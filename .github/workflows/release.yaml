@@ -12,7 +12,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -28,13 +28,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # GoReleaser's Rust builder cross-compiles with cargo-zigbuild.
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.14.1
+      # GoReleaser's Rust builder cross-compiles with cargo-zigbuild, which
+      # needs Zig. Downloaded directly: the setup-zig action still runs on
+      # the deprecated Node 20.
+      - name: Install Zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz | tar xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
           args: release --clean
