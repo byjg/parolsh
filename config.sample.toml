@@ -1,0 +1,126 @@
+# Parolsh configuration: every option, commented out.
+#
+# Copy it and uncomment what you use:
+#
+#   mkdir -p ~/.config/parolsh
+#   cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
+#
+# The same keys work in a project's `.parolsh/config.toml`, which overrides
+# this file field by field. Full reference: docs/configuration.md and
+# docs/agents.md, or https://opensource.byjg.com/docs/ai/parolsh
+
+
+# --- Shell ------------------------------------------------------------------
+
+# Command line that runs `!command`; the command is added as the last argument.
+# The default is an interactive bash, so your ~/.bashrc aliases work.
+# shell = ["bash", "-ic"]
+
+
+# --- Prompt -----------------------------------------------------------------
+
+# How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.
+#   parolsh   the directory name and ❯ (default)
+#   starship  your Starship prompt (~/.config/starship.toml), on ANSI terminals
+#   minimal   only ❯
+# prompt = "parolsh"
+
+
+# --- Agent started with Parolsh ---------------------------------------------
+
+# Must name one of the [agents.<name>] tables below. `#agent <name>` switches
+# to another agent until you leave Parolsh.
+# default_agent = "claude"
+
+
+# --- Agents -----------------------------------------------------------------
+#
+# Each agent is a program that speaks ACP over stdio:
+#
+#   command = program to run
+#   args    = its arguments
+#   env     = extra environment variables for it (base URLs, models, switches).
+#             Keep API keys in your shell environment instead: the agent
+#             inherits them, and this file stays free of secrets.
+#   mode    = the agent's own session mode, set on every new conversation.
+#             Omit it to keep the agent's default. `#agent list` shows the
+#             modes the running agent offers.
+#
+# Each agent keeps its own login, models and settings (~/.claude, ~/.codex,
+# ~/.gemini, ~/.qwen, ...): Parolsh does not replace them.
+
+
+# Claude Code
+#   npm install -g @agentclientprotocol/claude-agent-acp
+#   Login: your Claude Code login, or ANTHROPIC_API_KEY.
+#   Modes: default (asks), acceptEdits, plan (read-only), auto, bypassPermissions
+#
+# [agents.claude]
+# command = "claude-agent-acp"
+# mode = "default"
+
+
+# Codex
+#   npm install -g @agentclientprotocol/codex-acp
+#   Login: your ChatGPT login (~/.codex), or CODEX_API_KEY / OPENAI_API_KEY.
+#   Modes: read-only, agent (default, asks for unsafe actions), agent-full-access
+#
+# [agents.codex]
+# command = "codex-acp"
+# mode = "agent"
+
+
+# Gemini CLI
+#   npm install -g @google/gemini-cli
+#   Login: GEMINI_API_KEY (Google AI Studio) or Vertex AI. The personal
+#   "Gemini Code Assist for individuals" login is refused by Google.
+#   Modes: default (asks), autoEdit, yolo, plan (read-only)
+#
+# [agents.gemini]
+# command = "gemini"
+# args = ["--acp"]
+# mode = "default"
+
+
+# Qwen Code
+#   npm install -g @qwen-code/qwen-code
+#   Login: the provider and model in ~/.qwen/settings.json, or the
+#   OPENAI_* variables below.
+#   Modes: plan (read-only), default (asks), auto-edit, auto, yolo
+#
+# [agents.qwen]
+# command = "qwen"
+# args = ["--acp"]
+# mode = "default"
+
+
+# Any OpenAI-compatible API (OpenAI, OpenRouter, Azure, vLLM, Ollama, ...),
+# through Qwen Code. Set OPENAI_API_KEY in your shell.
+#
+# [agents.openai]
+# command = "qwen"
+# args = ["--acp"]
+# env = { OPENAI_BASE_URL = "https://api.openai.com/v1", OPENAI_MODEL = "gpt-5" }
+# mode = "default"
+
+
+# Kilo Code
+#   npm install -g @kilocode/cli
+#   Login: kilo auth login
+#   No session modes: permissions are set in ~/.config/kilo/kilo.json.
+#
+# [agents.kilo]
+# command = "kilo"
+# args = ["acp"]
+
+
+# Goose
+#   curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash
+#   Login: its provider (goose configure, ~/.config/goose/config.yaml) or env.
+#   Modes: approve (asks), smart_approve, chat (no tools), auto (default)
+#
+# [agents.goose]
+# command = "goose"
+# args = ["acp"]
+# env = { GOOSE_PROVIDER = "openai", GOOSE_MODEL = "gpt-5" }
+# mode = "approve"
