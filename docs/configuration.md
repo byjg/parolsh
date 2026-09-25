@@ -23,6 +23,9 @@ The package installs a sample with every option and a ready block for each
 ```bash
 mkdir -p ~/.config/parolsh
 cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
+
+# Installed with Homebrew:
+cp "$(brew --prefix)/share/parolsh/config.sample.toml" ~/.config/parolsh/config.toml
 ```
 
 Uncomment the agents you use and set `default_agent`. The sample is also in
@@ -119,4 +122,5 @@ falls back to `parolsh`.
 | Path | Content |
 |---|---|
 | `~/.local/state/parolsh/history` (or `$XDG_STATE_HOME/parolsh/history`) | Input history, last 1000 lines |
-| `/usr/share/doc/parolsh/config.sample.toml` | The commented sample configuration |
+| `/usr/share/doc/parolsh/config.sample.toml` | The commented sample configuration (Linux packages) |
+| `$(brew --prefix)/share/parolsh/config.sample.toml` | The same, installed with Homebrew |

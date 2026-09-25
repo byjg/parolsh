@@ -17,8 +17,19 @@ sudo apt install parolsh
 sudo dnf install parolsh
 ```
 
-The package installs a single binary, `/usr/bin/parolsh`, and depends only on
-`bash`. ACP agents are not dependencies: install the one you want to use and
+On macOS (or Linux) with [Homebrew](https://brew.sh):
+
+```bash
+brew install byjg/tap/parolsh
+```
+
+Homebrew builds Parolsh from source from the
+[ByJG tap](https://github.com/byjg/homebrew-tap), installing Rust only for the
+build. The sample configuration is then in
+`$(brew --prefix)/share/parolsh/config.sample.toml`.
+
+The Linux package installs a single binary, `/usr/bin/parolsh`, and depends
+only on `bash`. ACP agents are not dependencies: install the one you want to use and
 configure it, see [Agents](agents.md).
 
 ## Start it

@@ -69,6 +69,14 @@ sudo dnf install parolsh
 Packages are built for `amd64` and `arm64`, and need glibc 2.28 or newer
 (Debian 10+, Ubuntu 20.04+, RHEL 8+).
 
+On macOS (or Linux) with [Homebrew](https://brew.sh):
+
+```bash
+brew install byjg/tap/parolsh
+```
+
+Homebrew builds it from source, installing Rust only for the build.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)

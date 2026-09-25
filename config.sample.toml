@@ -5,6 +5,8 @@
 #   mkdir -p ~/.config/parolsh
 #   cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
 #
+# With Homebrew, the sample is in $(brew --prefix)/share/parolsh/.
+#
 # The same keys work in a project's `.parolsh/config.toml`, which overrides
 # this file field by field. Full reference: docs/configuration.md and
 # docs/agents.md, or https://opensource.byjg.com/docs/ai/parolsh
