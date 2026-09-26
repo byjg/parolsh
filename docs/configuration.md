@@ -86,6 +86,7 @@ launched as `claude-agent-acp`.
 | `agents.<name>.mode` | the agent's default | The agent's own session mode id, set on every new conversation. See [Modes](agents.md#modes). |
 | `agents.<name>.options` | `{}` | The agent's own config options (`effort`, `model`, ...), set on every new conversation. See [Options](agents.md#options). |
 | `markdown` | `true` | Render the answers' markdown on ANSI terminals: `**bold**`, `` `code` `` in cyan, code blocks, `#` headings and `-` bullets, with the markers hidden. `false` prints the raw text. |
+| `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
 | `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
@@ -132,6 +133,30 @@ Starship is configured outside the shell, which is why it works in both.
 If `starship` is missing or fails, Parolsh prints why and uses the `parolsh`
 prompt for the rest of the session. Without an ANSI terminal, `starship` also
 falls back to `parolsh`.
+
+## Shell environment
+
+Started from a terminal, Parolsh inherits everything your shell set up: the
+`PATH` of nvm (where npm installs the agents), exported API keys, proxies.
+Started any other way (a desktop launcher, a terminal profile that runs
+`parolsh` directly, an IDE), it does not, and an agent installed with npm
+fails with *cannot start `claude-agent-acp`: not found on PATH*.
+
+Parolsh cannot read `~/.profile` or `~/.bashrc` itself: they are shell
+scripts. Instead it asks your shell to run them, `bash -ilc 'env -0'` (with
+the program of the `shell` setting), and imports the environment it prints,
+except `TERM`, `PWD` and `SHLVL`. The shell runs without a terminal and with a
+5-second limit, so a startup file that waits for input cannot block Parolsh;
+whatever the startup files print is ignored.
+
+| `shell_env` | Imports the environment |
+|---|---|
+| `auto` (default) | only when the process that started Parolsh is not a shell |
+| `always` | on every start (about 0.2 s) |
+| `never` | never |
+
+If the import fails, Parolsh says why after the banner and keeps the
+environment it was given.
 
 ## Other files
 

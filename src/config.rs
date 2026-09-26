@@ -49,6 +49,17 @@ impl std::fmt::Display for OptionValue {
     }
 }
 
+/// When to import the environment the user's shell sets up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellEnv {
+    /// When Parolsh was not started from a shell.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
 /// How markdown links are shown.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -113,6 +124,7 @@ pub struct Config {
     /// Render the answers' markdown on ANSI terminals.
     pub markdown: bool,
     pub links: LinkStyle,
+    pub shell_env: ShellEnv,
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, Agent>,
 }
@@ -127,6 +139,7 @@ struct ConfigFile {
     thinking: Option<ThinkingDisplay>,
     markdown: Option<bool>,
     links: Option<LinkStyle>,
+    shell_env: Option<ShellEnv>,
     default_agent: Option<String>,
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
@@ -161,6 +174,7 @@ impl ConfigFile {
         self.thinking = over.thinking.or(self.thinking);
         self.markdown = over.markdown.or(self.markdown);
         self.links = over.links.or(self.links);
+        self.shell_env = over.shell_env.or(self.shell_env);
         self.default_agent = over.default_agent.or(self.default_agent);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
@@ -233,6 +247,7 @@ impl Config {
             thinking: file.thinking.unwrap_or_default(),
             markdown: file.markdown.unwrap_or(true),
             links: file.links.unwrap_or_default(),
+            shell_env: file.shell_env.unwrap_or_default(),
             default_agent: file.default_agent,
             agents,
         })
@@ -275,6 +290,7 @@ mod tests {
         assert_eq!(config.thinking, ThinkingDisplay::Status);
         assert!(config.markdown);
         assert_eq!(config.links, LinkStyle::Both);
+        assert_eq!(config.shell_env, ShellEnv::Auto);
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
     }
@@ -494,6 +510,7 @@ mod tests {
             "prompt = \"ps1\"\n",
             "thinking = \"loud\"\n",
             "links = \"never\"\n",
+            "shell_env = \"sometimes\"\n",
             "[agents.qwen]\ncommand = \"qwen\"\noptions = { effort = 3 }\n",
             // The old mapping keys are not accepted any more.
             "[agents.qwen]\ncommand = \"qwen\"\npermission_mode = \"normal\"\n",

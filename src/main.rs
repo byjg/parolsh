@@ -8,6 +8,7 @@ mod markdown;
 mod project;
 mod setup;
 mod shell;
+mod shellenv;
 mod turn;
 mod ui;
 
@@ -44,13 +45,23 @@ fn main() -> ExitCode {
         };
     }
 
+    // First, while Parolsh has a single thread: it may change the
+    // environment. A broken configuration is reported by App::new.
+    let notices: Vec<String> = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| config::Config::load(project::find_root(&cwd).as_deref()).ok())
+        // SAFETY: no other thread has been started yet.
+        .and_then(|config| unsafe { shellenv::load(config.shell_env, &config.shell[0]) })
+        .into_iter()
+        .collect();
+
     if let Err(e) = turn::install_interrupt_handler() {
         eprintln!("parolsh: cannot handle Ctrl+C: {e}");
     }
 
     let result = std::env::current_dir()
         .map_err(anyhow::Error::from)
-        .and_then(app::App::new)
+        .and_then(|cwd| app::App::new(cwd, notices))
         .and_then(|mut app| app.run());
 
     match result {

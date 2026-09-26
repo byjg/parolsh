@@ -394,3 +394,74 @@ fn bang_plus_shares_the_output_with_the_next_message() {
     assert!(screen.contains("\n[]\n"), "{screen}");
     assert!(screen.contains("usage: !+<command>"), "{screen}");
 }
+
+/// An agent reachable only through the PATH that ~/.profile sets up, as
+/// with npm agents under nvm. `always`, and `auto` when not started from a
+/// shell, import that PATH and the agent starts; `never`, and `auto` from a
+/// shell, give a clear error instead of an internal one.
+#[test]
+fn the_shell_environment_makes_profile_agents_reachable() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("nvm-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let agent = bin.join("fake-acp");
+    std::fs::write(
+        &agent,
+        format!("#!/bin/sh\nexec python3 {FAKE_AGENT} \"$@\"\n"),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&agent).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&agent, permissions).unwrap();
+    std::fs::write(
+        home.path().join(".profile"),
+        format!("export PATH=\"{}:$PATH\"\n", bin.display()),
+    )
+    .unwrap();
+    // `launcher`: started directly, not from a shell.
+    let run = |shell_env: &str, launcher: bool| {
+        let config = config_home(&format!(
+            "shell_env = \"{shell_env}\"\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"fake-acp\"\n"
+        ));
+        let parolsh = env!("CARGO_BIN_EXE_parolsh");
+        let start = if launcher {
+            format!("exec:{parolsh}")
+        } else {
+            parolsh.to_string()
+        };
+        let output = Command::new("python3")
+            .arg(JOB_SHELL)
+            .arg(start)
+            .arg("env PAROLSH_MARK")
+            .arg("#exit")
+            .env("TERM", "dumb")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("XDG_STATE_HOME", config.path())
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let imported = run("always", false);
+    let not_imported = run("never", false);
+    let auto_from_launcher = run("auto", true);
+    let auto_from_shell = run("auto", false);
+
+    // The agent started and answered (the variable is not set: "<unset>").
+    assert!(imported.contains("\n<unset>\n"), "{imported}");
+    assert!(
+        auto_from_launcher.contains("\n<unset>\n"),
+        "{auto_from_launcher}"
+    );
+    // Started from a shell, `auto` trusts the environment it was given.
+    assert!(
+        auto_from_shell.contains("cannot start `fake-acp`: not found on PATH."),
+        "{auto_from_shell}"
+    );
+    assert!(
+        not_imported.contains("cannot start `fake-acp`: not found on PATH."),
+        "{not_imported}"
+    );
+    assert!(!not_imported.contains("Internal error"), "{not_imported}");
+}

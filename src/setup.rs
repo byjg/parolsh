@@ -1,7 +1,7 @@
 //! First run: when there is no global configuration, write one from the
 //! built-in sample, with the agents found on `PATH` already enabled.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The sample configuration, built into the binary so the first run does not
 /// depend on where a package installed the file.
@@ -51,7 +51,7 @@ pub fn first_run(path: &Path, search_path: Option<&str>) -> Option<String> {
 pub fn installed_agents(search_path: Option<&str>) -> Vec<&'static str> {
     KNOWN_AGENTS
         .iter()
-        .filter(|(_, command)| find_command(command, search_path).is_some())
+        .filter(|(_, command)| crate::shellenv::find_command(command, search_path).is_some())
         .map(|(name, _)| *name)
         .collect()
 }
@@ -98,18 +98,6 @@ fn is_setting(line: &str) -> bool {
         || line
             .split_once(" = ")
             .is_some_and(|(key, _)| key.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
-}
-
-/// The first executable named `command` in the directories of `search_path`
-/// (a `PATH`-style list).
-fn find_command(command: &str, search_path: Option<&str>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(search_path?)
-        .map(|dir| dir.join(command))
-        .find(|path| {
-            path.metadata()
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
 }
 
 #[cfg(test)]
