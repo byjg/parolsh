@@ -9,6 +9,8 @@ pub enum Input {
     Shell(String),
     /// `!bash`, an interactive Bash session.
     Bash,
+    /// `!+command`: run by the shell, its output sent with the next message.
+    Share(String),
     /// `#name args`, handled by Parolsh itself.
     Control {
         name: String,
@@ -24,7 +26,11 @@ pub fn route(line: &str) -> Input {
     }
 
     if let Some(command) = line.strip_prefix('!') {
-        return match command.trim() {
+        let command = command.trim();
+        if let Some(shared) = command.strip_prefix('+') {
+            return Input::Share(shared.trim().to_string());
+        }
+        return match command {
             "" => Input::Empty,
             "bash" => Input::Bash,
             command => Input::Shell(command.to_string()),
@@ -95,6 +101,16 @@ mod tests {
             route("!bash script.sh"),
             Input::Shell("bash script.sh".to_string())
         );
+    }
+
+    #[test]
+    fn bang_plus_shares_the_output() {
+        assert_eq!(route("!+docker ps"), Input::Share("docker ps".to_string()));
+        assert_eq!(
+            route("!+ git log -3"),
+            Input::Share("git log -3".to_string())
+        );
+        assert_eq!(route("!+"), Input::Share(String::new()));
     }
 
     #[test]

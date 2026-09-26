@@ -48,6 +48,7 @@ English or a command.
 | `text` | Sent to the agent |
 | `/command` | Sent to the agent unchanged (the agent's own slash commands) |
 | `!command` | Run with `bash -ic`, in the current directory |
+| `!+command` | Run the same way, and send its output with your next message |
 | `!bash` | Interactive Bash session; `exit` returns to Parolsh |
 | `#command` | Parolsh control command, see `#help` |
 

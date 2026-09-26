@@ -100,6 +100,7 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 ```text
 wallet ❯ what changed today?    ask the agent
 wallet ❯ !git status            run a shell command
+wallet ❯ !+docker ps           run it, and share its output with your next question
 wallet ❯ !bash                  open a Bash session, `exit` to come back
 wallet ❯ #cd ~/projects/billing switch to another project
 wallet ❯ #project init          mark the current directory as a project

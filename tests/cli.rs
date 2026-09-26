@@ -364,3 +364,33 @@ fn markdown_is_rendered_on_ansi_terminals() {
     assert!(raw.contains("- **bold** and `code`\n"), "{raw}");
     assert!(raw.contains("## Title\n"), "{raw}");
 }
+
+/// `!+command` runs the command, shows its output, and sends it with the
+/// next message only.
+#[test]
+fn bang_plus_shares_the_output_with_the_next_message() {
+    let screen = with_fake_agent(
+        "",
+        &["!+echo shared-marker; (exit 4)", "blocks", "blocks", "!+"],
+    );
+
+    assert!(screen.contains("\nshared-marker\n"), "{screen}");
+    assert!(
+        screen.contains("(output of `echo shared-marker; (exit 4)` goes with your next message)"),
+        "{screen}"
+    );
+    // The first message carries the output, with the command and exit code.
+    assert!(
+        screen.contains("The user ran the shell command `echo shared-marker; (exit 4)`"),
+        "{screen}"
+    );
+    assert!(screen.contains("(exit code 4)"), "{screen}");
+    // Only the command's output, not what the shell printed while starting.
+    assert!(
+        screen.contains("Its output:\\n```\\nshared-marker\\n```"),
+        "{screen}"
+    );
+    // The next one does not.
+    assert!(screen.contains("\n[]\n"), "{screen}");
+    assert!(screen.contains("usage: !+<command>"), "{screen}");
+}

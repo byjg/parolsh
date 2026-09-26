@@ -12,6 +12,7 @@ character decides, always:
 | `text` | The active ACP agent |
 | `/command` | The active ACP agent, unchanged |
 | `!command` | The configured shell, default `bash -ic` |
+| `!+command` | The same, and its output goes with your next message |
 | `!bash` | An interactive Bash session |
 | `#command` | Parolsh itself |
 
@@ -49,6 +50,32 @@ The shell is configurable, see [Configuration](configuration.md):
 ```toml
 shell = ["zsh", "-ic"]
 ```
+
+## `!+command`
+
+Runs the command like `!command`, shows its output, and keeps it for the
+agent: it is sent with your next message, then forgotten.
+
+```text
+wallet ❯ !+docker ps
+CONTAINER ID   IMAGE        STATUS
+...
+(output of `docker ps` goes with your next message)
+wallet ❯ which of these containers looks unhealthy?
+```
+
+The agent answers from that output instead of running the command again.
+
+- Only commands you mark with `!+` are shared: a plain `!command` never
+  reaches the agent.
+- Several `!+` commands before one message are all sent, in order, each with
+  its command, directory and exit code.
+- At most the last 16 KB of each output is sent.
+- The command's output goes through Parolsh, so programs see a pipe instead
+  of a terminal: they print plain text, without colors or pagers. Full-screen
+  programs (`vim`, `top`) belong to a plain `!`. Its input is still the
+  terminal, so a `sudo` password prompt works.
+- `!+` alone shows how to use it.
 
 ## `!bash`
 

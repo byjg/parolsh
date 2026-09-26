@@ -203,7 +203,8 @@ impl JsonRpcRequest for PermissionRequest {
 }
 
 enum Command {
-    Prompt(String),
+    /// Text blocks of one message: context first, the user's text last.
+    Prompt(Vec<String>),
     Cancel,
     NewSession(PathBuf),
     SetOption(String, OptionValue),
@@ -286,8 +287,14 @@ impl AgentHandle {
     }
 
     /// Sends a prompt. False when the agent is no longer running.
+    #[cfg(test)]
     pub fn prompt(&self, text: String) -> bool {
-        self.send(Command::Prompt(text))
+        self.prompt_blocks(vec![text])
+    }
+
+    /// Sends one message made of several text blocks.
+    pub fn prompt_blocks(&self, blocks: Vec<String>) -> bool {
+        self.send(Command::Prompt(blocks))
     }
 
     /// Cancels the running prompt, if any.
@@ -387,8 +394,8 @@ async fn serve(
 
                 while let Some(command) = commands.recv().await {
                     match command {
-                        Command::Prompt(text) => {
-                            let stop_reason = prompt(&cx, &session, text, &mut commands).await?;
+                        Command::Prompt(blocks) => {
+                            let stop_reason = prompt(&cx, &session, blocks, &mut commands).await?;
                             let _ = events.send(Event::TurnEnd(stop_reason));
                         }
                         Command::NewSession(dir) => {
@@ -462,14 +469,15 @@ async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
 async fn prompt(
     cx: &ConnectionTo<Agent>,
     session: &SessionId,
-    text: String,
+    blocks: Vec<String>,
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> Result<StopReason, agent_client_protocol::Error> {
+    let blocks = blocks
+        .into_iter()
+        .map(|text| ContentBlock::Text(TextContent::new(text)))
+        .collect();
     let turn = cx
-        .send_request(PromptRequest::new(
-            session.clone(),
-            vec![ContentBlock::Text(TextContent::new(text))],
-        ))
+        .send_request(PromptRequest::new(session.clone(), blocks))
         .block_task();
     tokio::pin!(turn);
 
@@ -869,6 +877,22 @@ mod tests {
         let (_, result) = answer_form("qwen", Some(form::Answers::new()));
 
         assert_eq!(result, r#"{"outcome": {"outcome": "cancelled"}}"#);
+    }
+
+    #[test]
+    fn a_message_can_carry_several_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt_blocks(vec![
+            "output one".to_string(),
+            "output two".to_string(),
+            "blocks".to_string(),
+        ]));
+
+        match next(&agent) {
+            Event::Text(text) => assert_eq!(text, r#"["output one", "output two"]"#),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

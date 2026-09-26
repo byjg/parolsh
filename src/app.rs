@@ -16,6 +16,7 @@ Input:
   <text>          ask the agent (natural language)
   /<command>      forwarded unchanged to the agent
   !<command>      run a shell command (bash -ic)
+  !+<command>     run it and send its output with your next message
   !bash           open an interactive Bash session
   #<command>      Parolsh control command
 
@@ -43,6 +44,8 @@ pub struct App {
     prompt_override: Option<PromptStyle>,
     /// What the first run did, shown once after the banner.
     setup_notice: Option<String>,
+    /// Outputs of `!+` commands, sent with the next message.
+    shared: Vec<Shared>,
     /// Exit code and duration of the last command, for the prompt.
     last_status: i32,
     last_duration: Duration,
@@ -68,6 +71,7 @@ impl App {
             config,
             agent: None,
             prompt_override: None,
+            shared: Vec::new(),
             setup_notice,
             last_status: 0,
             last_duration: Duration::ZERO,
@@ -116,6 +120,7 @@ impl App {
             Input::Agent(text) => self.ask(text),
             Input::Shell(line) => run(shell::command(&self.config.shell, &line, &self.cwd)),
             Input::Bash => run(shell::bash(&self.cwd)),
+            Input::Share(line) => self.share(line),
             Input::Control { name, args } => match self.control(&name, &args) {
                 Some(status) => status,
                 None => return Flow::Exit,
@@ -297,18 +302,48 @@ impl App {
         Ok(())
     }
 
-    /// Sends `text` to the agent. Returns the status for the prompt.
+    /// `!+command`: runs it, keeping its output for the next message.
+    fn share(&mut self, line: String) -> i32 {
+        if line.is_empty() {
+            eprintln!("parolsh: usage: !+<command>, e.g. !+docker ps");
+            return 1;
+        }
+        match shell::run_shared(&self.config.shell, &line, &self.cwd, SHARED_LIMIT) {
+            Ok((code, captured)) => {
+                if code != 0 {
+                    eprintln!("exit {code}");
+                }
+                println!("(output of `{line}` goes with your next message)");
+                self.shared.push(Shared {
+                    command: line,
+                    cwd: self.cwd.clone(),
+                    code,
+                    captured,
+                });
+                code
+            }
+            Err(e) => {
+                eprintln!("parolsh: {e}");
+                127
+            }
+        }
+    }
+
+    /// Sends `text` to the agent, after the outputs shared with `!+`.
+    /// Returns the status for the prompt.
     fn ask(&mut self, text: String) -> i32 {
         let Some(agent) = &self.agent else {
             eprintln!("parolsh: {}", no_agent());
             return 1;
         };
+        let mut blocks: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
+        blocks.push(text);
         let display = turn::Display {
             thinking: self.config.thinking,
             markdown: self.config.markdown,
             links: self.config.links,
         };
-        match turn::run(agent, text, display) {
+        match turn::run(agent, blocks, display) {
             turn::Outcome::Finished => 0,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
@@ -464,6 +499,35 @@ impl App {
 }
 
 /// Runs a `!` command or `!bash`. Returns its exit code.
+/// Most of a `!+` command's output kept for the agent: the end of it.
+const SHARED_LIMIT: usize = 16 * 1024;
+
+/// A `!+` command and its output, waiting for the next message.
+struct Shared {
+    command: String,
+    cwd: PathBuf,
+    code: i32,
+    captured: shell::Captured,
+}
+
+impl Shared {
+    /// The text block sent to the agent.
+    fn block(&self) -> String {
+        let cut = if self.captured.truncated {
+            format!(" (only its last {} KB)", SHARED_LIMIT / 1024)
+        } else {
+            String::new()
+        };
+        format!(
+            "The user ran the shell command `{}` in {} (exit code {}). Its output{cut}:\n```\n{}\n```",
+            self.command,
+            self.cwd.display(),
+            self.code,
+            self.captured.text.trim_end()
+        )
+    }
+}
+
 /// Where to go when no agent is configured.
 fn no_agent() -> String {
     match config::global_path() {

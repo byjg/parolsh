@@ -27,7 +27,6 @@ pub enum Outcome {
     AgentStopped,
 }
 
-/// Sends `text` and prints the agent's answer as it arrives.
 /// How a turn is shown, from the configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct Display {
@@ -37,8 +36,10 @@ pub struct Display {
     pub links: LinkStyle,
 }
 
-pub fn run(agent: &AgentHandle, text: String, display: Display) -> Outcome {
-    if !agent.prompt(text) {
+/// Sends one message (text blocks, the user's text last) and prints the
+/// agent's answer as it arrives.
+pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcome {
+    if !agent.prompt_blocks(blocks) {
         return Outcome::AgentStopped;
     }
     INTERRUPTED.store(false, Ordering::SeqCst);

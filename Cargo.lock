@@ -1070,6 +1070,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
+ "libc",
  "nix",
  "reedline",
  "serde",

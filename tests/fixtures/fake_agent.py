@@ -12,6 +12,9 @@ Prompts:
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
   md     replies markdown, with the markers cut across chunks
+  blocks replies the text of the blocks sent before it, as JSON
+
+The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
@@ -91,7 +94,7 @@ def ask_permission(session_id, tool_call):
 def prompt(request):
     params = request["params"]
     session_id = params["sessionId"]
-    text = params["prompt"][0]["text"]
+    text = params["prompt"][-1]["text"]
     session = sessions[session_id]
     stop_reason = "end_turn"
 
@@ -129,6 +132,8 @@ def prompt(request):
     elif text == "opts":
         say(session_id, json.dumps(
             {**session["options"], "mode": session["mode"]}, sort_keys=True))
+    elif text == "blocks":
+        say(session_id, json.dumps([block.get("text") for block in params["prompt"][:-1]]))
     elif text == "md":
         for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
             say(session_id, chunk)
