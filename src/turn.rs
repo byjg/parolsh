@@ -7,7 +7,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Detail, Event};
-use crate::config::ThinkingDisplay;
+use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::markdown::Markdown;
 use crate::ui;
@@ -28,18 +28,23 @@ pub enum Outcome {
 }
 
 /// Sends `text` and prints the agent's answer as it arrives.
-pub fn run(
-    agent: &AgentHandle,
-    text: String,
-    thinking: ThinkingDisplay,
-    markdown: bool,
-) -> Outcome {
+/// How a turn is shown, from the configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct Display {
+    pub thinking: ThinkingDisplay,
+    /// Render markdown (on ANSI terminals only).
+    pub markdown: bool,
+    pub links: LinkStyle,
+}
+
+pub fn run(agent: &AgentHandle, text: String, display: Display) -> Outcome {
     if !agent.prompt(text) {
         return Outcome::AgentStopped;
     }
     INTERRUPTED.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
-    let mut out = Output::new(ansi, thinking, ansi && markdown);
+    let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
+    let mut out = Output::new(ansi, display.thinking, markdown);
     out.show();
 
     loop {
@@ -246,9 +251,9 @@ struct Status {
 }
 
 impl Output {
-    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: bool) -> Self {
+    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: Option<Markdown>) -> Self {
         Self {
-            markdown: markdown.then(Markdown::default),
+            markdown,
             thinking,
             ansi,
             in_thought: false,

@@ -303,7 +303,12 @@ impl App {
             eprintln!("parolsh: {}", no_agent());
             return 1;
         };
-        match turn::run(agent, text, self.config.thinking, self.config.markdown) {
+        let display = turn::Display {
+            thinking: self.config.thinking,
+            markdown: self.config.markdown,
+            links: self.config.links,
+        };
+        match turn::run(agent, text, display) {
             turn::Outcome::Finished => 0,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);

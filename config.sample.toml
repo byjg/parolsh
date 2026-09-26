@@ -28,6 +28,13 @@
 # blocks, headings, bullets), with the markers hidden. false prints raw text.
 # markdown = true
 
+# How markdown links are shown:
+#   both       clickable text followed by the URL (default)
+#   clickable  clickable text only; where the terminal does not support
+#              clickable text (OSC 8), the URL is not shown at all
+#   inline     underlined text followed by the URL, nothing clickable
+# links = "both"
+
 
 # How the agent's reasoning ("thinking") is displayed:
 #   status  its latest line in the status line (default)

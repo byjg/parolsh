@@ -431,6 +431,14 @@ text is never held back. An unclosed `**` only affects the rest of its line.
 `markdown = false` in the [configuration](configuration.md#keys) prints the
 raw text.
 
+Links `[text](url)` show their text underlined and clickable, followed by the
+URL: `text (https://...)`. Most terminals open it with Ctrl+click (GNOME
+Terminal, Konsole, kitty, WezTerm, iTerm2, Windows Terminal, tmux 3.4 or
+newer); elsewhere the URL after the text is still there to copy. The URL is
+not repeated when it is the text itself, as in `<https://...>`. A link is the
+only thing held back while it streams, from its `[` to its `)`. `links` in the
+configuration shows only the clickable text, or only the text and the URL.
+
 A status line under the answer shows what the agent is doing, redrawn in place
 instead of adding lines:
 
