@@ -6,6 +6,8 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::acp::Detail;
+
 const LOGO: [&str; 3] = [
     "┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻",
     "┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫",
@@ -14,6 +16,8 @@ const LOGO: [&str; 3] = [
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const CYAN: &str = "\x1b[36m";
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 /// Back to column 0 and erase the line.
@@ -191,6 +195,105 @@ pub fn status(frame: usize, activity: &str, elapsed: Duration, width: usize) -> 
     format!("{DIM}{spinner} {activity}{tail}{RESET}")
 }
 
+/// The end of `text`'s last non-empty line, at most `max` characters: what
+/// the agent is thinking right now, for the status line.
+pub fn thinking(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let count = line.chars().count();
+    if count <= max {
+        return line.to_string();
+    }
+    let tail: String = line.chars().skip(count - max.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
+/// The lines shown under a permission request: diffs, text, or the tool's
+/// input. At most `max_lines`, then a note with how many were left out.
+pub fn details(details: &[Detail], ansi: bool, max_lines: usize) -> Vec<String> {
+    let paint = |color: &str, line: String| {
+        if ansi {
+            format!("{color}{line}{RESET}")
+        } else {
+            line
+        }
+    };
+    let mut lines = Vec::new();
+    for detail in details {
+        match detail {
+            Detail::Text(text) => lines.extend(text.lines().map(str::to_string)),
+            Detail::Diff { path, old, new } => {
+                lines.push(paint(DIM, format!("{}", path.display())));
+                let old = old.as_deref().unwrap_or_default();
+                let diff = similar::TextDiff::from_lines(old, new.as_str());
+                for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+                    lines.push(paint(DIM, hunk.header().to_string()));
+                    for change in hunk.iter_changes() {
+                        let text = change.value().trim_end_matches('\n');
+                        lines.push(match change.tag() {
+                            similar::ChangeTag::Delete => paint(RED, format!("-{text}")),
+                            similar::ChangeTag::Insert => paint(GREEN, format!("+{text}")),
+                            similar::ChangeTag::Equal => format!(" {text}"),
+                        });
+                    }
+                }
+            }
+            Detail::Input(value) => render_value(value, 0, &mut lines),
+        }
+    }
+    if lines.len() > max_lines {
+        let hidden = lines.len() - max_lines;
+        lines.truncate(max_lines);
+        lines.push(paint(DIM, format!("… {hidden} more lines")));
+    }
+    lines
+}
+
+/// JSON as indented `key: value` lines, readable in a terminal.
+fn render_value(value: &serde_json::Value, indent: usize, lines: &mut Vec<String>) {
+    use serde_json::Value;
+    let pad = " ".repeat(indent);
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                match value {
+                    Value::Object(_) | Value::Array(_) => {
+                        lines.push(format!("{pad}{key}:"));
+                        render_value(value, indent + 2, lines);
+                    }
+                    scalar => lines.push(format!("{pad}{key}: {}", scalar_text(scalar))),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::Object(_) | Value::Array(_) => {
+                        // The first line of the item carries the dash.
+                        let start = lines.len();
+                        render_value(item, indent + 2, lines);
+                        if let Some(first) = lines.get_mut(start) {
+                            first.replace_range(indent..indent + 2, "- ");
+                        }
+                    }
+                    scalar => lines.push(format!("{pad}- {}", scalar_text(scalar))),
+                }
+            }
+        }
+        scalar => lines.push(format!("{pad}{}", scalar_text(scalar))),
+    }
+}
+
+fn scalar_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.replace('\n', " "),
+        other => other.to_string(),
+    }
+}
+
 /// The line printed when a turn ends.
 pub fn summary(tools: usize, elapsed: Duration) -> String {
     let tools = match tools {
@@ -351,6 +454,84 @@ mod tests {
 
         assert!(Prompt::starship("/nonexistent/starship", &context).is_err());
         assert!(Prompt::starship("false", &context).is_err());
+    }
+
+    #[test]
+    fn thinking_shows_the_end_of_the_last_line() {
+        assert_eq!(thinking("First idea.\nSecond idea\n\n", 40), "Second idea");
+        assert_eq!(thinking("write exactly LAST LINE HERE", 12), "…T LINE HERE");
+        assert_eq!(thinking("", 10), "");
+    }
+
+    #[test]
+    fn a_diff_shows_the_path_and_changed_lines() {
+        let detail = Detail::Diff {
+            path: "/tmp/settings.json".into(),
+            old: Some("{\n  \"a\": 1\n}\n".to_string()),
+            new: "{\n  \"a\": 1,\n  \"enable_thinking\": false\n}\n".to_string(),
+        };
+
+        let lines = details(&[detail], false, 40);
+
+        assert_eq!(
+            lines,
+            [
+                "/tmp/settings.json",
+                "@@ -1,3 +1,4 @@",
+                " {",
+                "-  \"a\": 1",
+                "+  \"a\": 1,",
+                "+  \"enable_thinking\": false",
+                " }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_file_is_all_added_lines() {
+        let detail = Detail::Diff {
+            path: "/tmp/test.txt".into(),
+            old: None,
+            new: "hello".to_string(),
+        };
+
+        assert_eq!(
+            details(&[detail], false, 40),
+            ["/tmp/test.txt", "@@ -0,0 +1 @@", "+hello"]
+        );
+    }
+
+    #[test]
+    fn tool_input_is_shown_as_indented_lines() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "Which color do you prefer?",
+                "options": [{"label": "Red"}, {"label": "Blue"}]
+            }]
+        });
+
+        assert_eq!(
+            details(&[Detail::Input(input)], false, 40),
+            [
+                "questions:",
+                "  - question: Which color do you prefer?",
+                "    options:",
+                "      - label: Red",
+                "      - label: Blue",
+            ]
+        );
+    }
+
+    #[test]
+    fn details_are_capped() {
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let lines = details(&[Detail::Text(text)], false, 3);
+
+        assert_eq!(lines, ["1", "2", "3", "… 7 more lines"]);
     }
 
     #[test]

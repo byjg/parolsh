@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Event};
+use crate::acp::{AgentHandle, Detail, Event};
 use crate::ui;
 
 /// Set by the SIGINT handler. The terminal is in cooked mode while a turn
@@ -52,15 +52,17 @@ pub fn run(agent: &AgentHandle, text: String) -> Outcome {
 
         match event {
             Event::Text(text) => out.text(&text),
+            Event::Thought(text) => out.thought(&text),
             Event::Tool(title) => out.tool(&title),
             Event::Permission {
                 title,
+                details,
                 options,
                 reply,
             } => {
                 out.hide();
                 out.end_line();
-                let _ = reply.send(ask_permission(&title, &options));
+                let _ = reply.send(ask_permission(&title, &details, &options));
                 out.show();
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
@@ -107,12 +109,20 @@ fn describe(reason: StopReason) -> Option<&'static str> {
     }
 }
 
-/// Numbered choice of the agent's options. Anything else rejects once.
+/// Lines of permission details shown before asking.
+const MAX_DETAIL_LINES: usize = 40;
+
+/// Shows what the agent wants to do, then a numbered choice of its options.
+/// Anything else rejects once.
 fn ask_permission(
     title: &str,
+    details: &[Detail],
     options: &[PermissionOption],
 ) -> Option<agent_client_protocol::schema::v1::PermissionOptionId> {
     println!("Permission requested: {title}");
+    for line in ui::details(details, ui::is_ansi(), MAX_DETAIL_LINES) {
+        println!("  {line}");
+    }
     for (i, option) in options.iter().enumerate() {
         println!("  [{}] {}", i + 1, option.name);
     }
@@ -149,6 +159,8 @@ struct Output {
 struct Status {
     started: Instant,
     activity: String,
+    /// The agent's reasoning since the last answer text or tool call.
+    thoughts: String,
     frame: usize,
     tools: usize,
     shown: bool,
@@ -161,6 +173,7 @@ impl Output {
             status: ansi.then(|| Status {
                 started: Instant::now(),
                 activity: "Thinking".to_string(),
+                thoughts: String::new(),
                 frame: 0,
                 tools: 0,
                 shown: false,
@@ -178,6 +191,29 @@ impl Output {
         self.mid_line = !text.ends_with('\n');
         if let Some(status) = &mut self.status {
             status.activity = "Writing".to_string();
+            status.thoughts.clear();
+        }
+        self.show();
+    }
+
+    /// Reasoning only feeds the status line; it never reaches the scrollback.
+    fn thought(&mut self, text: &str) {
+        if let Some(status) = &mut self.status {
+            status.thoughts.push_str(text);
+            // Only the last line is shown: keep the buffer small.
+            if status.thoughts.len() > 4096 {
+                let keep = status.thoughts.len() - 1024;
+                let cut = (keep..status.thoughts.len())
+                    .find(|&i| status.thoughts.is_char_boundary(i))
+                    .unwrap_or(status.thoughts.len());
+                status.thoughts.drain(..cut);
+            }
+            let snippet = ui::thinking(&status.thoughts, ui::width().saturating_sub(24));
+            status.activity = if snippet.is_empty() {
+                "Thinking".to_string()
+            } else {
+                format!("Thinking: {snippet}")
+            };
         }
         self.show();
     }
@@ -187,6 +223,7 @@ impl Output {
             Some(status) => {
                 status.tools += 1;
                 status.activity = format!("Running: {title}");
+                status.thoughts.clear();
                 self.hide();
                 self.end_line();
                 self.show();

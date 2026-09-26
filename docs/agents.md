@@ -345,8 +345,10 @@ wallet ❯ why is the API container restarting?
 ⠹ Running: Terminal · 12s
 ```
 
-Tool calls only update that line. When the turn ends, the status line is
-replaced by a summary:
+Tool calls only update that line. While the agent reasons before answering
+("thinking"), the line shows the latest bit of its reasoning, for example
+`⠸ Thinking: Let me calculate · 3s`; the reasoning itself is not printed. When
+the turn ends, the status line is replaced by a summary:
 
 ```text
 The container exits because DATABASE_URL is not set...
@@ -356,15 +358,24 @@ The container exits because DATABASE_URL is not set...
 Without an ANSI terminal (output piped, or `TERM=dumb`), there is no status
 line and each tool call is printed as a `• <title>` line.
 
-When the agent asks for permission, Parolsh shows its options:
+When the agent asks for permission, Parolsh shows what it wants to do, then
+its options:
 
 ```text
-Permission requested: Delete build/
-  [1] Allow once
-  [2] Allow always
+Permission requested: Writing to /tmp/notes.txt
+  /tmp/notes.txt
+  @@ -1 +1,2 @@
+   first line
+  +second line
+  [1] Allow All Edits
+  [2] Allow
   [3] Reject
 Choose:
 ```
+
+File edits show as a diff (red and green on an ANSI terminal), text the agent
+attached is printed as is, and when the agent attached neither, its tool
+input is shown instead. At most 40 lines are shown.
 
 Type the number and press Enter. Anything else rejects once.
 

@@ -2,7 +2,10 @@
 """A minimal ACP agent for tests: newline-delimited JSON-RPC over stdio.
 
 Prompts:
-  perm   asks for permission and replies with the chosen option id
+  perm   asks for permission to edit a file (with a diff) and replies with
+         the chosen option id
+  ask    asks for permission with only raw input (like Qwen's questions)
+  think  sends reasoning, then the answer "done"
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
@@ -37,12 +40,12 @@ def say(session_id, text):
         "content": {"type": "text", "text": text}}}})
 
 
-def ask_permission(session_id):
+def ask_permission(session_id, tool_call):
     global next_request_id
     next_request_id += 1
     send({"id": next_request_id, "method": "session/request_permission", "params": {
         "sessionId": session_id,
-        "toolCall": {"toolCallId": "t1", "title": "Delete build/"},
+        "toolCall": tool_call,
         "options": [
             {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
             {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
@@ -62,7 +65,20 @@ def prompt(request):
     stop_reason = "end_turn"
 
     if text == "perm":
-        say(session_id, "chose:" + ask_permission(session_id))
+        tool_call = {"toolCallId": "t1", "title": "Writing to notes.txt", "kind": "edit",
+                     "content": [{"type": "diff", "path": "/tmp/notes.txt",
+                                  "oldText": "a\n", "newText": "a\nb\n"}]}
+        say(session_id, "chose:" + ask_permission(session_id, tool_call))
+    elif text == "ask":
+        tool_call = {"toolCallId": "t2", "title": "Ask user 1 question", "content": [],
+                     "rawInput": {"questions": [{"question": "Which color?"}]}}
+        say(session_id, "chose:" + ask_permission(session_id, tool_call))
+    elif text == "think":
+        for chunk in ["Let me ", "think.\n", "Almost there"]:
+            send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": chunk}}}})
+        say(session_id, "done")
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "slow":

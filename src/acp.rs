@@ -7,6 +7,7 @@ use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionId, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
     SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent,
+    ToolCallContent,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
 use std::path::{Path, PathBuf};
@@ -21,12 +22,16 @@ use crate::config;
 pub enum Event {
     /// A piece of the agent's answer.
     Text(String),
+    /// A piece of the agent's reasoning ("thinking"), before or between answers.
+    Thought(String),
     /// The agent started a tool call.
     Tool(String),
     /// The agent asks for permission. Reply with the chosen option, or
     /// `None` to cancel.
     Permission {
         title: String,
+        /// What the permission is about: diffs, text, or the tool's input.
+        details: Vec<Detail>,
         options: Vec<PermissionOption>,
         reply: oneshot::Sender<Option<PermissionOptionId>>,
     },
@@ -46,6 +51,52 @@ pub struct SessionModes {
 }
 
 type SharedModes = Arc<Mutex<Option<SessionModes>>>;
+
+/// Content attached to a permission request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Detail {
+    Text(String),
+    Diff {
+        path: PathBuf,
+        old: Option<String>,
+        new: String,
+    },
+    /// The tool's raw input, when the agent attached no standard content
+    /// (Qwen's questions to the user arrive this way).
+    Input(serde_json::Value),
+}
+
+impl Detail {
+    fn from_tool_call(
+        content: Option<Vec<ToolCallContent>>,
+        raw_input: Option<serde_json::Value>,
+    ) -> Vec<Self> {
+        let details: Vec<Self> = content
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|content| match content {
+                ToolCallContent::Content(content) => match content.content {
+                    ContentBlock::Text(text) => Some(Self::Text(text.text)),
+                    _ => None,
+                },
+                ToolCallContent::Diff(diff) => Some(Self::Diff {
+                    path: diff.path,
+                    old: diff.old_text,
+                    new: diff.new_text,
+                }),
+                _ => None,
+            })
+            .collect();
+        if !details.is_empty() {
+            return details;
+        }
+        raw_input
+            .filter(|input| !input.is_null())
+            .map(Self::Input)
+            .into_iter()
+            .collect()
+    }
+}
 
 enum Command {
     Prompt(String),
@@ -166,8 +217,10 @@ async fn serve(
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 let (reply, answer) = oneshot::channel();
+                let fields = request.tool_call.fields;
                 let event = Event::Permission {
-                    title: request.tool_call.fields.title.unwrap_or_default(),
+                    title: fields.title.unwrap_or_default(),
+                    details: Detail::from_tool_call(fields.content, fields.raw_input),
                     options: request.options,
                     reply,
                 };
@@ -307,6 +360,10 @@ fn forward(events: &mpsc::Sender<Event>, modes: &SharedModes, update: SessionUpd
             content: ContentBlock::Text(text),
             ..
         }) => Event::Text(text.text),
+        SessionUpdate::AgentThoughtChunk(ContentChunk {
+            content: ContentBlock::Text(text),
+            ..
+        }) => Event::Thought(text.text),
         SessionUpdate::ToolCall(call) => Event::Tool(call.title),
         _ => return,
     };
@@ -405,10 +462,19 @@ mod tests {
         match next(&agent) {
             Event::Permission {
                 title,
+                details,
                 options,
                 reply,
             } => {
-                assert_eq!(title, "Delete build/");
+                assert_eq!(title, "Writing to notes.txt");
+                assert_eq!(
+                    details,
+                    [Detail::Diff {
+                        path: "/tmp/notes.txt".into(),
+                        old: Some("a\n".to_string()),
+                        new: "a\nb\n".to_string(),
+                    }]
+                );
                 assert_eq!(options.len(), 2);
                 reply.send(Some(options[0].option_id.clone())).unwrap();
             }
@@ -419,6 +485,46 @@ mod tests {
             Event::Text(text) => assert_eq!(text, "chose:allow-once"),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn raw_input_is_the_detail_when_there_is_no_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt("ask".to_string()));
+
+        match next(&agent) {
+            Event::Permission { details, reply, .. } => {
+                assert_eq!(
+                    details,
+                    [Detail::Input(serde_json::json!({
+                        "questions": [{"question": "Which color?"}]
+                    }))]
+                );
+                drop(reply);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_arrives_as_thoughts_before_the_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt("think".to_string()));
+
+        let mut thoughts = String::new();
+        loop {
+            match next(&agent) {
+                Event::Thought(text) => thoughts.push_str(&text),
+                Event::Text(text) => {
+                    assert_eq!(text, "done");
+                    break;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(thoughts, "Let me think.\nAlmost there");
     }
 
     #[test]
