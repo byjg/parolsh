@@ -110,8 +110,9 @@
 #   OPENAI_* variables below.
 #   Modes: plan (read-only), default (asks), auto-edit, auto, yolo
 #
-#   Options: model; reasoning_effort (none = thinking off) only when the model
-#   declares reasoning capabilities in ~/.qwen/settings.json.
+#   Options: model; reasoning_effort only when the model declares reasoning
+#   capabilities in ~/.qwen/settings.json. To turn thinking off, set
+#   "reasoning": false in model.generationConfig of ~/.qwen/settings.json.
 #
 # [agents.qwen]
 # command = "qwen"

@@ -106,7 +106,7 @@ option or setting:
 |---|---|---|
 | Claude | `effort` | `low` |
 | Codex | `reasoning_effort` | `low` |
-| Qwen Code | `reasoning_effort`, [when the model declares it](#qwen-code) | `none` (off) |
+| Qwen Code | `"reasoning": false` in `~/.qwen/settings.json`, see [Qwen Code](#qwen-code) | off |
 | Kilo Code | `effort` | the lowest value `#options` lists |
 | Gemini CLI, Goose | none through ACP | their own settings |
 
@@ -272,32 +272,36 @@ mode = "default"
 Qwen Code does not always start in `default` (it started in `auto` in our
 tests): set `mode` to be sure.
 
-**Thinking off.** Qwen Code has no ACP switch for thinking with an
-OpenAI-compatible model unless the model declares its reasoning support. In
-`~/.qwen/settings.json`, on the model's `modelProviders` entry:
+**Thinking off.** Set `"reasoning": false` in the `model.generationConfig`
+of `~/.qwen/settings.json`:
 
 ```json
 {
-  "modelProviders": { "openai": [ {
-    "id": "Qwen/Qwen3.6-35B-A3B",
-    "baseUrl": "http://localhost:8000/v1",
-    "envKey": "OPENAI_API_KEY",
-    "capabilities": { "reasoning": { "profile": "qwen-chat-template" } },
+  "model": {
+    "name": "Qwen/Qwen3.6-35B-A3B",
     "generationConfig": { "reasoning": false }
-  } ] }
+  }
 }
 ```
 
-- `"reasoning": false` turns thinking off for that model: Qwen Code sends
+- It works with the provider set through environment variables
+  (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, or the same in
+  `~/.qwen/.env`): no `modelProviders` entry is needed.
+- For a Qwen-family model, Qwen Code then sends
   `chat_template_kwargs: {enable_thinking: false}` (vLLM, SGLang) or
   `enable_thinking: false` (DashScope).
-- The `capabilities` block also makes Qwen Code offer the `reasoning_effort`
-  option, so `options = { reasoning_effort = "none" }` or
-  `#options reasoning_effort none` switches it per conversation.
+- Checked with Qwen Code 0.24.5 and `Qwen/Qwen3.6-35B-A3B` on vLLM: 29
+  reasoning chunks for a small question before, none after, same answer.
 - A top-level `"enable_thinking": false` in `settings.json` is ignored.
 
-This comes from Qwen Code 0.24.5's source; it has not been checked end to
-end with every provider.
+With a [`modelProviders`](https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/model-providers.md)
+entry, which Qwen Code recommends over environment variables, put
+`"reasoning": false` in that entry's `generationConfig` instead: the top-level
+`model.generationConfig` is ignored for provider models. Declaring
+`"capabilities": { "reasoning": { "profile": "qwen-chat-template" } }` on the
+entry also makes Qwen Code offer the `reasoning_effort` option, so
+`#options reasoning_effort none` switches thinking per conversation. These two
+come from Qwen Code's source and were not checked end to end.
 
 ## Kilo Code
 
