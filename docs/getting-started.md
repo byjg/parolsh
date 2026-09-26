@@ -87,7 +87,7 @@ mode and the directory:
 ```text
   ┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻
   ┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫
-  ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  0.1.0
+  ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  x.y.z
   Speak to your terminal. Natural language first.
   agent: claude (auto) · ~/projects/wallet · #help
 wallet ❯

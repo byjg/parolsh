@@ -31,11 +31,16 @@ Code, Gemini CLI, OpenCode and others.
 
 The name comes from Esperanto *parol-* (to speak) + *sh*.
 
-:::warning Early development
-Parolsh talks to one ACP agent: answers stream as they arrive, permission
-requests are asked in the terminal, and `Ctrl+C` cancels a turn. `#agent <name>`
-switches agents, and answers are rendered as markdown. Not there yet:
-`#resume`, and sending `!command` output to the agent.
+:::warning Early development — use with care
+Parolsh is young software, and commands, configuration and behavior may still
+change between releases.
+
+It hands your terminal to an AI agent. The agent can read files, edit them and
+run commands in your directory with your user's permissions, and it can be
+wrong. Read each permission request before you approve it, prefer the agent's
+more restrictive modes in directories you care about, and keep your work under
+version control. Anything you send with `!+command` goes to the agent's
+provider.
 :::
 
 ## Input
