@@ -6,6 +6,10 @@ Parolsh started from a user's terminal. Prints what the terminal showed,
 without escape sequences.
 
 Usage: job_shell.py LINE...
+
+A LINE starting with "paste:" is pasted instead of typed: "\\n" becomes a line
+break, and, like a terminal, the paste is wrapped in bracketed-paste markers
+only if the program turned bracketed paste on. No Enter is added.
 """
 import os
 import pty
@@ -19,6 +23,7 @@ if pid == 0:
     os.execvp("bash", ["bash", "--norc", "--noprofile", "-i"])
 
 output = b""
+bracketed = False
 
 
 def pump(seconds):
@@ -33,6 +38,11 @@ def pump(seconds):
         except OSError:
             return
         output += data
+        global bracketed
+        if b"\x1b[?2004h" in data:
+            bracketed = True
+        if b"\x1b[?2004l" in data:
+            bracketed = False
         # Answer cursor-position queries like a terminal emulator would.
         for _ in range(data.count(b"\x1b[6n")):
             os.write(fd, b"\x1b[1;1R")
@@ -40,7 +50,13 @@ def pump(seconds):
 
 pump(0.5)
 for line in sys.argv[1:]:
-    os.write(fd, line.encode() + b"\r")
+    if line.startswith("paste:"):
+        text = line[len("paste:"):].replace("\\n", "\n").encode()
+        if bracketed:
+            text = b"\x1b[200~" + text + b"\x1b[201~"
+        os.write(fd, text)
+    else:
+        os.write(fd, line.encode() + b"\r")
     pump(1.5)
 os.kill(pid, 9)
 

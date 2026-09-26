@@ -1,6 +1,6 @@
 [package]
 name = "parolsh"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Natural-language-first shell for ACP agents"
@@ -15,9 +15,13 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29"
 ctrlc = "3.5.2"
+libc = "0.2"
 nix = { version = "0.31", features = ["process", "signal", "term"] }
+nu-ansi-term = "0.50"
 reedline = "0.51.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+similar = "3.2.0"
 tokio = { version = "1.53.1", features = ["rt", "macros", "sync"] }
 toml = "1.1.6"
 

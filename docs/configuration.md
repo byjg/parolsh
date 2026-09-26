@@ -15,20 +15,32 @@ The project file is applied on top of the global one, field by field: it only
 needs the values it changes. Unknown keys are an error, so a typo is reported
 instead of being ignored.
 
-## Start from the sample
+## The first run creates it
 
-The package installs a sample with every option and a ready block for each
-[agent](agents.md), all commented out:
+When `~/.config/parolsh/config.toml` does not exist, Parolsh writes it from
+its built-in sample, with the [agents](agents.md) it finds on `PATH` enabled
+and the first of them as `default_agent` (see
+[First run](getting-started.md#first-run)). The sample holds every option and
+a ready block for each agent; the ones not installed stay commented out.
+
+`#config` shows the files in use and whether they exist:
+
+```text
+wallet ❯ #config
+Global:  /home/joao/.config/parolsh/config.toml
+Project: /home/joao/projects/wallet/.parolsh/config.toml  (not found)
+#config sample prints every option, with a block for each agent.
+```
+
+To start over, delete the file and restart Parolsh, or copy the sample by
+hand. It is printed by `#config sample`, and also installed with the package:
 
 ```bash
-mkdir -p ~/.config/parolsh
 cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
 
 # Installed with Homebrew:
 cp "$(brew --prefix)/share/parolsh/config.sample.toml" ~/.config/parolsh/config.toml
-```
-
-Uncomment the agents you use and set `default_agent`. The sample is also in
+``` The sample is also in
 the repository as
 [`config.sample.toml`](https://github.com/byjg/parolsh/blob/master/config.sample.toml).
 
@@ -72,12 +84,16 @@ launched as `claude-agent-acp`.
 | `agents.<name>.args` | `[]` | Arguments for `command` |
 | `agents.<name>.env` | `{}` | Environment variables added for the agent, such as a base URL or a model. See [API keys](agents.md#api-keys) before putting a key here. |
 | `agents.<name>.mode` | the agent's default | The agent's own session mode id, set on every new conversation. See [Modes](agents.md#modes). |
+| `agents.<name>.options` | `{}` | The agent's own config options (`effort`, `model`, ...), set on every new conversation. See [Options](agents.md#options). |
+| `markdown` | `true` | Render the answers' markdown on ANSI terminals: `**bold**`, `` `code` `` in cyan, code blocks, `#` headings and `-` bullets, with the markers hidden. `false` prints the raw text. |
+| `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
+| `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
 plain `bash -c`.
 
-`env` merges key by key: a project can change one variable without repeating
-the others.
+`env` and `options` merge key by key: a project can change one variable or
+option without repeating the others.
 
 ## Prompt
 

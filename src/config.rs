@@ -16,6 +16,63 @@ pub struct Agent {
     /// The agent's own session mode id, set on every new conversation.
     /// `None` keeps the agent's default.
     pub mode: Option<String>,
+    /// The agent's own config options (`effort`, `model`, ...), by id, set
+    /// on every new conversation.
+    pub options: BTreeMap<String, OptionValue>,
+}
+
+/// A config option value: the id of a choice, or on/off.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum OptionValue {
+    Bool(bool),
+    Text(String),
+}
+
+impl OptionValue {
+    /// Reads a value typed by the user: `true`/`false`, or a choice id.
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "true" => Self::Bool(true),
+            "false" => Self::Bool(false),
+            other => Self::Text(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for OptionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::Text(value) => f.write_str(value),
+        }
+    }
+}
+
+/// How markdown links are shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkStyle {
+    /// Clickable text, followed by the URL.
+    #[default]
+    Both,
+    /// Clickable text only (OSC 8): the URL is lost where it is unsupported.
+    Clickable,
+    /// Underlined text followed by the URL, nothing clickable.
+    Inline,
+}
+
+/// How the agent's reasoning ("thinking") is displayed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// Its latest line in the status line.
+    #[default]
+    Status,
+    /// Only "Thinking" in the status line.
+    Hidden,
+    /// Printed dim in the scrollback.
+    Show,
 }
 
 /// How the input prompt is drawn.
@@ -52,6 +109,10 @@ pub struct Config {
     /// Command line that runs `!command`; the command is appended as the last argument.
     pub shell: Vec<String>,
     pub prompt: PromptStyle,
+    pub thinking: ThinkingDisplay,
+    /// Render the answers' markdown on ANSI terminals.
+    pub markdown: bool,
+    pub links: LinkStyle,
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, Agent>,
 }
@@ -63,6 +124,9 @@ pub struct Config {
 struct ConfigFile {
     shell: Option<Vec<String>>,
     prompt: Option<PromptStyle>,
+    thinking: Option<ThinkingDisplay>,
+    markdown: Option<bool>,
+    links: Option<LinkStyle>,
     default_agent: Option<String>,
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
@@ -76,6 +140,8 @@ struct AgentFile {
     #[serde(default)]
     env: BTreeMap<String, String>,
     mode: Option<String>,
+    #[serde(default)]
+    options: BTreeMap<String, OptionValue>,
 }
 
 impl ConfigFile {
@@ -92,6 +158,9 @@ impl ConfigFile {
     fn merge(mut self, over: Self) -> Self {
         self.shell = over.shell.or(self.shell);
         self.prompt = over.prompt.or(self.prompt);
+        self.thinking = over.thinking.or(self.thinking);
+        self.markdown = over.markdown.or(self.markdown);
+        self.links = over.links.or(self.links);
         self.default_agent = over.default_agent.or(self.default_agent);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
@@ -99,6 +168,7 @@ impl ConfigFile {
             base.args = agent.args.or(base.args.take());
             base.env.extend(agent.env);
             base.mode = agent.mode.or(base.mode.take());
+            base.options.extend(agent.options);
         }
         self
     }
@@ -108,8 +178,14 @@ impl Config {
     /// Loads `$XDG_CONFIG_HOME/parolsh/config.toml` and, when inside a
     /// project, `<root>/.parolsh/config.toml` on top of it.
     pub fn load(project_root: Option<&Path>) -> Result<Self> {
-        let project = project_root.map(|root| root.join(STATE_DIR).join("config.toml"));
+        let project = project_root.map(project_path);
         Self::load_files(global_path().as_deref(), project.as_deref())
+    }
+
+    /// Loads one file on its own, as if it were the global configuration.
+    #[cfg(test)]
+    pub fn load_file(path: &Path) -> Result<Self> {
+        Self::load_files(Some(path), None)
     }
 
     fn load_files(global: Option<&Path>, project: Option<&Path>) -> Result<Self> {
@@ -140,6 +216,7 @@ impl Config {
                     args: agent.args.unwrap_or_default(),
                     env: agent.env,
                     mode: agent.mode,
+                    options: agent.options,
                 },
             );
         }
@@ -153,13 +230,22 @@ impl Config {
         Ok(Self {
             shell,
             prompt: file.prompt.unwrap_or_default(),
+            thinking: file.thinking.unwrap_or_default(),
+            markdown: file.markdown.unwrap_or(true),
+            links: file.links.unwrap_or_default(),
             default_agent: file.default_agent,
             agents,
         })
     }
 }
 
-fn global_path() -> Option<PathBuf> {
+/// `<root>/.parolsh/config.toml`.
+pub fn project_path(root: &Path) -> PathBuf {
+    root.join(STATE_DIR).join("config.toml")
+}
+
+/// `$XDG_CONFIG_HOME/parolsh/config.toml`, or `~/.config/parolsh/config.toml`.
+pub fn global_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
@@ -186,6 +272,9 @@ mod tests {
 
         assert_eq!(config.shell, ["bash", "-ic"]);
         assert_eq!(config.prompt, PromptStyle::Parolsh);
+        assert_eq!(config.thinking, ThinkingDisplay::Status);
+        assert!(config.markdown);
+        assert_eq!(config.links, LinkStyle::Both);
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
     }
@@ -233,6 +322,7 @@ mod tests {
                 args: vec![],
                 env: BTreeMap::new(),
                 mode: Some("auto".to_string()),
+                options: BTreeMap::new(),
             }
         );
         assert_eq!(
@@ -242,6 +332,7 @@ mod tests {
                 args: vec!["--acp".to_string()],
                 env: BTreeMap::new(),
                 mode: None,
+                options: BTreeMap::new(),
             }
         );
     }
@@ -272,6 +363,55 @@ mod tests {
 
         assert_eq!(qwen.env["OPENAI_BASE_URL"], "https://api.openai.com/v1");
         assert_eq!(qwen.env["OPENAI_MODEL"], "gpt-5-mini");
+    }
+
+    #[test]
+    fn options_and_thinking_merge_like_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = write(
+            tmp.path(),
+            "global.toml",
+            r#"
+            thinking = "hidden"
+
+            [agents.claude]
+            command = "claude-agent-acp"
+            options = { effort = "low", model = "sonnet", fast = true }
+            "#,
+        );
+        let project = write(
+            tmp.path(),
+            "project.toml",
+            r#"
+            thinking = "show"
+            markdown = false
+            links = "inline"
+
+            [agents.claude]
+            options = { effort = "high" }
+            "#,
+        );
+
+        let config = Config::load_files(Some(&global), Some(&project)).unwrap();
+
+        assert_eq!(config.thinking, ThinkingDisplay::Show);
+        assert!(!config.markdown);
+        assert_eq!(config.links, LinkStyle::Inline);
+        assert_eq!(
+            config.agents["claude"].options,
+            BTreeMap::from([
+                ("effort".to_string(), OptionValue::Text("high".into())),
+                ("fast".to_string(), OptionValue::Bool(true)),
+                ("model".to_string(), OptionValue::Text("sonnet".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn option_values_typed_by_the_user() {
+        assert_eq!(OptionValue::parse("true"), OptionValue::Bool(true));
+        assert_eq!(OptionValue::parse("low"), OptionValue::Text("low".into()));
+        assert_eq!(OptionValue::Bool(false).to_string(), "false");
     }
 
     #[test]
@@ -352,6 +492,9 @@ mod tests {
             "shell = []\n",
             "unknown_key = 1\n",
             "prompt = \"ps1\"\n",
+            "thinking = \"loud\"\n",
+            "links = \"never\"\n",
+            "[agents.qwen]\ncommand = \"qwen\"\noptions = { effort = 3 }\n",
             // The old mapping keys are not accepted any more.
             "[agents.qwen]\ncommand = \"qwen\"\npermission_mode = \"normal\"\n",
             "[agents.qwen]\ncommand = \"qwen\"\nmode = 1\n",

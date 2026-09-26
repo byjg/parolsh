@@ -1,8 +1,12 @@
 mod acp;
 mod app;
 mod config;
+mod form;
+mod hints;
 mod input;
+mod markdown;
 mod project;
+mod setup;
 mod shell;
 mod turn;
 mod ui;

@@ -34,8 +34,8 @@ The name comes from Esperanto *parol-* (to speak) + *sh*.
 :::warning Early development
 Parolsh talks to one ACP agent: answers stream as they arrive, permission
 requests are asked in the terminal, and `Ctrl+C` cancels a turn. `#agent <name>`
-switches agents. Not there yet: `#resume`, sending `!command` output to the
-agent, and Markdown formatting.
+switches agents, and answers are rendered as markdown. Not there yet:
+`#resume`, and sending `!command` output to the agent.
 :::
 
 ## Input
@@ -48,6 +48,7 @@ English or a command.
 | `text` | Sent to the agent |
 | `/command` | Sent to the agent unchanged (the agent's own slash commands) |
 | `!command` | Run with `bash -ic`, in the current directory |
+| `!+command` | Run the same way, and send its output with your next message |
 | `!bash` | Interactive Bash session; `exit` returns to Parolsh |
 | `#command` | Parolsh control command, see `#help` |
 
@@ -76,6 +77,11 @@ brew install byjg/tap/parolsh
 ```
 
 Homebrew builds it from source, installing Rust only for the build.
+
+Then install an ACP agent, for example
+`npm install -g @agentclientprotocol/claude-agent-acp`, and run `parolsh`: the
+first run creates `~/.config/parolsh/config.toml` with the agents it finds
+already enabled. See [Getting started](docs/getting-started.md).
 
 ## Documentation
 

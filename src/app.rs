@@ -7,15 +7,16 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::acp::AgentHandle;
-use crate::config::{Agent, Config, PromptStyle};
+use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, route};
-use crate::{project, shell, turn, ui};
+use crate::{config, hints, project, setup, shell, turn, ui};
 
 const HELP: &str = "\
 Input:
   <text>          ask the agent (natural language)
   /<command>      forwarded unchanged to the agent
   !<command>      run a shell command (bash -ic)
+  !+<command>     run it and send its output with your next message
   !bash           open an interactive Bash session
   #<command>      Parolsh control command
 
@@ -25,6 +26,9 @@ Control commands:
   #cd <path>      switch to another directory or project
   #agent [list]   show the active agent, or list the configured ones
   #agent <name>   switch to another agent (new conversation)
+  #config [sample] show the configuration files, or print the full sample
+  #options        show the agent's options (effort, model, ...)
+  #options <id> <value>  set one until you leave Parolsh
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
   #exit           leave Parolsh";
@@ -38,6 +42,10 @@ pub struct App {
     agent: Option<AgentHandle>,
     /// Set by `#prompt <name>`, or to fall back when Starship fails.
     prompt_override: Option<PromptStyle>,
+    /// What the first run did, shown once after the banner.
+    setup_notice: Option<String>,
+    /// Outputs of `!+` commands, sent with the next message.
+    shared: Vec<Shared>,
     /// Exit code and duration of the last command, for the prompt.
     last_status: i32,
     last_duration: Duration,
@@ -50,6 +58,10 @@ enum Flow {
 
 impl App {
     pub fn new(cwd: PathBuf) -> Result<Self> {
+        // Before loading: the first run may write the global configuration.
+        let search_path = std::env::var("PATH").ok();
+        let setup_notice =
+            config::global_path().and_then(|path| setup::first_run(&path, search_path.as_deref()));
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
@@ -59,6 +71,8 @@ impl App {
             config,
             agent: None,
             prompt_override: None,
+            shared: Vec::new(),
+            setup_notice,
             last_status: 0,
             last_duration: Duration::ZERO,
         };
@@ -67,7 +81,15 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let mut editor = Reedline::create();
+        // Bracketed paste: a pasted text with line breaks is one input, not
+        // one Enter per line.
+        let mut editor = Reedline::create().use_bracketed_paste(true);
+        if ui::is_ansi() {
+            // Tips while typing: the color and a hint of where the line goes.
+            editor = editor
+                .with_highlighter(Box::new(hints::InputHighlighter))
+                .with_hinter(Box::new(hints::PrefixHinter));
+        }
         if let Some(path) = history_path() {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
@@ -76,6 +98,9 @@ impl App {
         }
         if ui::is_ansi() {
             self.print_banner();
+        }
+        if let Some(notice) = self.setup_notice.take() {
+            println!("{notice}");
         }
 
         loop {
@@ -101,6 +126,7 @@ impl App {
             Input::Agent(text) => self.ask(text),
             Input::Shell(line) => run(shell::command(&self.config.shell, &line, &self.cwd)),
             Input::Bash => run(shell::bash(&self.cwd)),
+            Input::Share(line) => self.share(line),
             Input::Control { name, args } => match self.control(&name, &args) {
                 Some(status) => status,
                 None => return Flow::Exit,
@@ -137,6 +163,77 @@ impl App {
         }
     }
 
+    fn options_command(&self, args: &str) -> Result<()> {
+        let Some(agent) = &self.agent else {
+            anyhow::bail!("{}", no_agent());
+        };
+        let options = agent.options();
+        if args.is_empty() {
+            if options.is_empty() {
+                println!("The agent offers no options (or its session has not started yet).");
+            }
+            for option in &options {
+                let values: Vec<String> = option
+                    .values
+                    .iter()
+                    .map(|v| {
+                        if *v == option.current {
+                            format!("{v}*")
+                        } else {
+                            v.clone()
+                        }
+                    })
+                    .collect();
+                println!("  {:<18} {}", option.id, values.join(", "));
+            }
+            return Ok(());
+        }
+
+        let Some((id, value)) = args.split_once(char::is_whitespace) else {
+            anyhow::bail!("usage: #options <id> <value>");
+        };
+        let value = value.trim();
+        let Some(option) = options.iter().find(|option| option.id == id) else {
+            let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
+            anyhow::bail!("no option `{id}`. The agent offers: {}", ids.join(", "));
+        };
+        if !option.values.iter().any(|v| v == value) {
+            anyhow::bail!(
+                "`{id}` has no value `{value}`. Values: {}",
+                option.values.join(", ")
+            );
+        }
+        agent.set_option(id.to_string(), OptionValue::parse(value));
+        println!("{id} = {value}, until you leave Parolsh.");
+        Ok(())
+    }
+
+    fn config_command(&self, args: &str) -> Result<()> {
+        match args {
+            "" => {
+                let status = |path: &Path| {
+                    let state = if path.exists() { "" } else { "  (not found)" };
+                    format!("{}{state}", path.display())
+                };
+                match config::global_path() {
+                    Some(path) => println!("Global:  {}", status(&path)),
+                    None => println!("Global:  none ($HOME is not set)"),
+                }
+                match &self.project_root {
+                    Some(root) => println!("Project: {}", status(&config::project_path(root))),
+                    None => println!("Project: none (#project init creates one here)"),
+                }
+                println!("#config sample prints every option, with a block for each agent.");
+                Ok(())
+            }
+            "sample" => {
+                print!("{}", setup::SAMPLE);
+                Ok(())
+            }
+            _ => anyhow::bail!("usage: #config [sample]"),
+        }
+    }
+
     fn prompt_command(&mut self, args: &str) -> Result<()> {
         if args.is_empty() {
             println!(
@@ -169,6 +266,8 @@ impl App {
             "agent" => self.agent(args),
             "project" => self.project(args),
             "prompt" => self.prompt_command(args),
+            "config" => self.config_command(args),
+            "options" => self.options_command(args),
             _ => Err(anyhow::anyhow!("unknown command `#{name}`, see #help")),
         };
         match result {
@@ -209,13 +308,48 @@ impl App {
         Ok(())
     }
 
-    /// Sends `text` to the agent. Returns the status for the prompt.
+    /// `!+command`: runs it, keeping its output for the next message.
+    fn share(&mut self, line: String) -> i32 {
+        if line.is_empty() {
+            eprintln!("parolsh: usage: !+<command>, e.g. !+docker ps");
+            return 1;
+        }
+        match shell::run_shared(&self.config.shell, &line, &self.cwd, SHARED_LIMIT) {
+            Ok((code, captured)) => {
+                if code != 0 {
+                    eprintln!("exit {code}");
+                }
+                println!("(output of `{line}` goes with your next message)");
+                self.shared.push(Shared {
+                    command: line,
+                    cwd: self.cwd.clone(),
+                    code,
+                    captured,
+                });
+                code
+            }
+            Err(e) => {
+                eprintln!("parolsh: {e}");
+                127
+            }
+        }
+    }
+
+    /// Sends `text` to the agent, after the outputs shared with `!+`.
+    /// Returns the status for the prompt.
     fn ask(&mut self, text: String) -> i32 {
         let Some(agent) = &self.agent else {
-            eprintln!("parolsh: no agent configured. Set `default_agent` in the configuration.");
+            eprintln!("parolsh: {}", no_agent());
             return 1;
         };
-        match turn::run(agent, text) {
+        let mut blocks: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
+        blocks.push(text);
+        let display = turn::Display {
+            thinking: self.config.thinking,
+            markdown: self.config.markdown,
+            links: self.config.links,
+        };
+        match turn::run(agent, blocks, display) {
             turn::Outcome::Finished => 0,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
@@ -237,7 +371,7 @@ impl App {
         if self.agent.is_some() {
             println!("Started a new conversation.");
         } else {
-            eprintln!("parolsh: no agent configured. Set `default_agent` in the configuration.");
+            eprintln!("parolsh: {}", no_agent());
         }
     }
 
@@ -270,7 +404,7 @@ impl App {
         match args {
             "" => match &self.active {
                 Some(name) => println!("{name}"),
-                None => println!("No agent selected. Set `default_agent` in the configuration."),
+                None => println!("{}", no_agent()),
             },
             "list" => self.list_agents(),
             name => self.switch_agent(name)?,
@@ -371,6 +505,46 @@ impl App {
 }
 
 /// Runs a `!` command or `!bash`. Returns its exit code.
+/// Most of a `!+` command's output kept for the agent: the end of it.
+const SHARED_LIMIT: usize = 16 * 1024;
+
+/// A `!+` command and its output, waiting for the next message.
+struct Shared {
+    command: String,
+    cwd: PathBuf,
+    code: i32,
+    captured: shell::Captured,
+}
+
+impl Shared {
+    /// The text block sent to the agent.
+    fn block(&self) -> String {
+        let cut = if self.captured.truncated {
+            format!(" (only its last {} KB)", SHARED_LIMIT / 1024)
+        } else {
+            String::new()
+        };
+        format!(
+            "The user ran the shell command `{}` in {} (exit code {}). Its output{cut}:\n```\n{}\n```",
+            self.command,
+            self.cwd.display(),
+            self.code,
+            self.captured.text.trim_end()
+        )
+    }
+}
+
+/// Where to go when no agent is configured.
+fn no_agent() -> String {
+    match config::global_path() {
+        Some(path) => format!(
+            "no agent configured. Add one to {} and set default_agent (see #config).",
+            path.display()
+        ),
+        None => "no agent configured (see #config).".to_string(),
+    }
+}
+
 fn run(command: Command) -> i32 {
     match shell::run_foreground(command) {
         Ok(0) => 0,

@@ -23,6 +23,7 @@ command = "claude-agent-acp"    # program that speaks ACP
 args = []                       # its arguments
 env = { }                       # extra environment variables for it
 mode = "default"                # the agent's own mode; omit to keep its default
+options = { effort = "low" }    # the agent's own config options
 ```
 
 ## Switching agents
@@ -55,12 +56,63 @@ sets it on every new conversation and does not translate it. Without `mode`,
 the agent starts in its own default.
 
 If the agent does not offer that mode, it stays in its current one and
-Parolsh prints a notice with the modes it does offer. Agents without session
-modes (Kilo Code) ignore `mode`, and Parolsh says so.
+Parolsh prints a notice with the modes it does offer. Some agents (Kilo Code)
+have no session modes but a `mode` [option](#options): `mode` sets that
+instead.
 
 Whatever the mode, when the agent asks for permission, Parolsh shows the
 agent's options and waits for your choice (see
 [During a turn](#during-a-turn)).
+
+## Options
+
+Agents offer config options: reasoning effort, model, fast mode, and so on.
+`options` sets them, with the agent's own ids and values, on every new
+conversation:
+
+```toml
+[agents.claude]
+command = "claude-agent-acp"
+options = { effort = "low", model = "sonnet" }
+```
+
+`#options` shows what the running agent offers, with `*` on the current
+value, and `#options <id> <value>` changes one until you leave Parolsh (it is
+set again after `#new` and `#cd`):
+
+```text
+wallet ❯ #options
+  mode               default*, acceptEdits, plan, auto, bypassPermissions
+  model              default*, opus[1m], claude-fable-5-1[1m], sonnet, haiku
+  effort             default, low*, medium, high, xhigh, max
+  fast               on, off*
+wallet ❯ #options model sonnet
+model = sonnet, until you leave Parolsh.
+```
+
+An option or value the agent does not offer is reported with what it does
+offer, and the conversation keeps going. The list can change: Claude drops
+`fast` for models without a fast mode. Options are values the agent reports
+for your account and version, so check `#options` rather than this page.
+
+`options` merges key by key, like `env`: a project can change one option.
+
+### Less thinking
+
+No agent turns reasoning off through a standard switch; each has its own
+option or setting:
+
+| Agent | Option | Least thinking |
+|---|---|---|
+| Claude | `effort` | `low` |
+| Codex | `reasoning_effort` | `low` |
+| Qwen Code | `"reasoning": false` in `~/.qwen/settings.json`, see [Qwen Code](#qwen-code) | off |
+| Kilo Code | `effort` | the lowest value `#options` lists |
+| Gemini CLI, Goose | none through ACP | their own settings |
+
+How Parolsh *displays* the reasoning is separate: `thinking` in the
+[configuration](configuration.md#keys) shows it in the status line (default),
+hides it, or prints it.
 
 ## API keys
 
@@ -220,6 +272,37 @@ mode = "default"
 Qwen Code does not always start in `default` (it started in `auto` in our
 tests): set `mode` to be sure.
 
+**Thinking off.** Set `"reasoning": false` in the `model.generationConfig`
+of `~/.qwen/settings.json`:
+
+```json
+{
+  "model": {
+    "name": "Qwen/Qwen3.6-35B-A3B",
+    "generationConfig": { "reasoning": false }
+  }
+}
+```
+
+- It works with the provider set through environment variables
+  (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, or the same in
+  `~/.qwen/.env`): no `modelProviders` entry is needed.
+- For a Qwen-family model, Qwen Code then sends
+  `chat_template_kwargs: {enable_thinking: false}` (vLLM, SGLang) or
+  `enable_thinking: false` (DashScope).
+- Checked with Qwen Code 0.24.5 and `Qwen/Qwen3.6-35B-A3B` on vLLM: 29
+  reasoning chunks for a small question before, none after, same answer.
+- A top-level `"enable_thinking": false` in `settings.json` is ignored.
+
+With a [`modelProviders`](https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/model-providers.md)
+entry, which Qwen Code recommends over environment variables, put
+`"reasoning": false` in that entry's `generationConfig` instead: the top-level
+`model.generationConfig` is ignored for provider models. Declaring
+`"capabilities": { "reasoning": { "profile": "qwen-chat-template" } }` on the
+entry also makes Qwen Code offer the `reasoning_effort` option, so
+`#options reasoning_effort none` switches thinking per conversation. These two
+come from Qwen Code's source and were not checked end to end.
+
 ## Kilo Code
 
 Kilo Code's CLI. The npm package ships a native binary, no Node.js version
@@ -239,11 +322,14 @@ command = "kilo"
 args = ["acp"]
 ```
 
+Kilo has no ACP session modes, but a `mode` option with its agents: `ask`
+and `plan` (read-only), `code` (its default), `debug` and `orchestrator`.
+`mode = "ask"` sets it through that option.
+
 :::warning Permissions are configured in Kilo
-Kilo has no ACP session modes, so `mode` has no effect. Kilo asks according
-to its own configuration: set `"permission": "allow"` in
-`~/.config/kilo/kilo.json` to let it act without asking, or use its
-`/auto-approve` setting.
+None of Kilo's modes acts without asking. Kilo asks according to its own
+configuration: set `"permission": "allow"` in `~/.config/kilo/kilo.json` to
+let it act without asking, or use its `/auto-approve` setting.
 :::
 
 ## Any OpenAI-compatible API
@@ -337,16 +423,34 @@ The full list is at
 
 ## During a turn
 
-The answer is printed as it arrives. On an ANSI terminal, a status line under
-it shows what the agent is doing, redrawn in place instead of adding lines:
+The answer is printed as it arrives. On an ANSI terminal its markdown is
+rendered on the fly: `**bold**` in bold, `` `code` `` and code blocks in cyan,
+`#` headings bold and underlined, `-` bullets as `•`, with the markers hidden.
+Only a marker cut in half between two chunks waits for the next one, so the
+text is never held back. An unclosed `**` only affects the rest of its line.
+`markdown = false` in the [configuration](configuration.md#keys) prints the
+raw text.
+
+Links `[text](url)` show their text underlined and clickable, followed by the
+URL: `text (https://...)`. Most terminals open it with Ctrl+click (GNOME
+Terminal, Konsole, kitty, WezTerm, iTerm2, Windows Terminal, tmux 3.4 or
+newer); elsewhere the URL after the text is still there to copy. The URL is
+not repeated when it is the text itself, as in `<https://...>`. A link is the
+only thing held back while it streams, from its `[` to its `)`. `links` in the
+configuration shows only the clickable text, or only the text and the URL.
+
+A status line under the answer shows what the agent is doing, redrawn in place
+instead of adding lines:
 
 ```text
 wallet ❯ why is the API container restarting?
 ⠹ Running: Terminal · 12s
 ```
 
-Tool calls only update that line. When the turn ends, the status line is
-replaced by a summary:
+Tool calls only update that line. While the agent reasons before answering
+("thinking"), the line shows the latest bit of its reasoning, for example
+`⠸ Thinking: Let me calculate · 3s`; the reasoning itself is not printed. When
+the turn ends, the status line is replaced by a summary:
 
 ```text
 The container exits because DATABASE_URL is not set...
@@ -356,17 +460,47 @@ The container exits because DATABASE_URL is not set...
 Without an ANSI terminal (output piped, or `TERM=dumb`), there is no status
 line and each tool call is printed as a `• <title>` line.
 
-When the agent asks for permission, Parolsh shows its options:
+When the agent asks for permission, Parolsh shows what it wants to do, then
+its options:
 
 ```text
-Permission requested: Delete build/
-  [1] Allow once
-  [2] Allow always
+Permission requested: Writing to /tmp/notes.txt
+  /tmp/notes.txt
+  @@ -1 +1,2 @@
+   first line
+  +second line
+  [1] Allow All Edits
+  [2] Allow
   [3] Reject
 Choose:
 ```
 
+File edits show as a diff (red and green on an ANSI terminal), text the agent
+attached is printed as is, and when the agent attached neither, its tool
+input is shown instead. At most 40 lines are shown.
+
 Type the number and press Enter. Anything else rejects once.
+
+### Questions from the agent
+
+Agents can ask you questions while they work:
+
+```text
+The agent asks (press Enter to skip a question):
+  Which color do you prefer?
+    [1] Red
+    [2] Blue
+  Choose a number, or type your own answer: 2
+```
+
+- Type the number of a choice, several numbers separated by commas when more
+  than one is allowed, or your own answer when the agent accepts free text.
+- Enter skips a question. If you skip a question the agent marked as
+  required, it gets no answers at all.
+
+Claude and Codex ask through the standard ACP form request (elicitation), and
+Qwen Code through its own question tool; Parolsh answers both. Gemini CLI does
+not ask questions in ACP mode.
 
 `Ctrl+C` cancels the turn: the agent stops, Parolsh prints `(cancelled)` and
 returns to the prompt.

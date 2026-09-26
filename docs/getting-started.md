@@ -29,8 +29,42 @@ build. The sample configuration is then in
 `$(brew --prefix)/share/parolsh/config.sample.toml`.
 
 The Linux package installs a single binary, `/usr/bin/parolsh`, and depends
-only on `bash`. ACP agents are not dependencies: install the one you want to use and
-configure it, see [Agents](agents.md).
+only on `bash`.
+
+## Install an agent
+
+ACP agents are not dependencies: install at least one before the first run.
+For example, Claude:
+
+```bash
+npm install -g @agentclientprotocol/claude-agent-acp
+```
+
+[Agents](agents.md) lists the others (Codex, Gemini CLI, Qwen Code, Kilo
+Code, Goose, ...) with their install command and login.
+
+## First run
+
+The first time Parolsh starts, it creates your configuration,
+`~/.config/parolsh/config.toml`, from its built-in sample:
+
+- every agent it finds on your `PATH` (`claude-agent-acp`, `codex-acp`,
+  `gemini`, `qwen`, `kilo`, `goose`) is already enabled;
+- the first one found becomes `default_agent`, in that order;
+- everything else stays in the file as commented examples.
+
+```text
+Created /home/joao/.config/parolsh/config.toml with claude, qwen. Using claude; switch with #agent <name>.
+wallet ❯
+```
+
+If no agent is found, the file is created with everything commented out:
+install an agent, then uncomment its block and `default_agent`. Parolsh never
+overwrites an existing file; delete it to run the first-run setup again.
+
+`#config` shows which configuration files are used, and `#config sample`
+prints the full sample. See [Configuration](configuration.md) for every
+option.
 
 ## Start it
 
@@ -66,6 +100,7 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 ```text
 wallet ❯ what changed today?    ask the agent
 wallet ❯ !git status            run a shell command
+wallet ❯ !+docker ps           run it, and share its output with your next question
 wallet ❯ !bash                  open a Bash session, `exit` to come back
 wallet ❯ #cd ~/projects/billing switch to another project
 wallet ❯ #project init          mark the current directory as a project

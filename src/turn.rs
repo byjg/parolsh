@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Event};
+use crate::acp::{AgentHandle, Detail, Event};
+use crate::config::{LinkStyle, ThinkingDisplay};
+use crate::form::{self, Answers, FieldKind, Form};
+use crate::markdown::Markdown;
 use crate::ui;
 
 /// Set by the SIGINT handler. The terminal is in cooked mode while a turn
@@ -24,13 +27,25 @@ pub enum Outcome {
     AgentStopped,
 }
 
-/// Sends `text` and prints the agent's answer as it arrives.
-pub fn run(agent: &AgentHandle, text: String) -> Outcome {
-    if !agent.prompt(text) {
+/// How a turn is shown, from the configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct Display {
+    pub thinking: ThinkingDisplay,
+    /// Render markdown (on ANSI terminals only).
+    pub markdown: bool,
+    pub links: LinkStyle,
+}
+
+/// Sends one message (text blocks, the user's text last) and prints the
+/// agent's answer as it arrives.
+pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcome {
+    if !agent.prompt_blocks(blocks) {
         return Outcome::AgentStopped;
     }
     INTERRUPTED.store(false, Ordering::SeqCst);
-    let mut out = Output::new(ui::is_ansi());
+    let ansi = ui::is_ansi();
+    let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
+    let mut out = Output::new(ansi, display.thinking, markdown);
     out.show();
 
     loop {
@@ -52,15 +67,23 @@ pub fn run(agent: &AgentHandle, text: String) -> Outcome {
 
         match event {
             Event::Text(text) => out.text(&text),
+            Event::Thought(text) => out.thought(&text),
             Event::Tool(title) => out.tool(&title),
             Event::Permission {
                 title,
+                details,
                 options,
                 reply,
             } => {
                 out.hide();
                 out.end_line();
-                let _ = reply.send(ask_permission(&title, &options));
+                let _ = reply.send(ask_permission(&title, &details, &options));
+                out.show();
+            }
+            Event::Form { form, reply } => {
+                out.hide();
+                out.end_line();
+                let _ = reply.send(ask_form(&form));
                 out.show();
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
@@ -107,12 +130,20 @@ fn describe(reason: StopReason) -> Option<&'static str> {
     }
 }
 
-/// Numbered choice of the agent's options. Anything else rejects once.
+/// Lines of permission details shown before asking.
+const MAX_DETAIL_LINES: usize = 40;
+
+/// Shows what the agent wants to do, then a numbered choice of its options.
+/// Anything else rejects once.
 fn ask_permission(
     title: &str,
+    details: &[Detail],
     options: &[PermissionOption],
 ) -> Option<agent_client_protocol::schema::v1::PermissionOptionId> {
     println!("Permission requested: {title}");
+    for line in ui::details(details, ui::is_ansi(), MAX_DETAIL_LINES) {
+        println!("  {line}");
+    }
     for (i, option) in options.iter().enumerate() {
         println!("  [{}] {}", i + 1, option.name);
     }
@@ -122,6 +153,64 @@ fn ask_permission(
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     choose(options, answer.trim()).map(|option| option.option_id.clone())
+}
+
+/// Asks each question of the form. Enter skips a question; `None` (cancel)
+/// when the input closes. A skipped required question declines the form.
+fn ask_form(form: &Form) -> Option<Answers> {
+    println!("The agent asks (press Enter to skip a question):");
+    if !form.message.is_empty() {
+        println!("  {}", form.message);
+    }
+    let mut answers = Answers::new();
+    for field in &form.fields {
+        println!("  {}", field.title);
+        if let Some(description) = &field.description {
+            println!("  {description}");
+        }
+        if let FieldKind::Choice { options, .. } = &field.kind {
+            for (i, option) in options.iter().enumerate() {
+                match &option.description {
+                    Some(description) => {
+                        println!("    [{}] {} — {description}", i + 1, option.label)
+                    }
+                    None => println!("    [{}] {}", i + 1, option.label),
+                }
+            }
+        }
+        loop {
+            print!("  {}: ", hint(&field.kind));
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+                return None;
+            }
+            match form::parse(&field.kind, &input) {
+                Ok(Some(answer)) => {
+                    answers.insert(field.key.clone(), answer);
+                    break;
+                }
+                Ok(None) => break,
+                Err(message) => println!("  ({message})"),
+            }
+        }
+    }
+    if form.missing_required(&answers) {
+        println!("  A required question was skipped: the agent gets no answers.");
+        return Some(Answers::new());
+    }
+    Some(answers)
+}
+
+fn hint(kind: &FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Text => "Answer",
+        FieldKind::Number { .. } => "Number",
+        FieldKind::Boolean => "y/n",
+        FieldKind::Choice { multiple: true, .. } => "Choose numbers, separated by commas",
+        FieldKind::Choice { other: true, .. } => "Choose a number, or type your own answer",
+        FieldKind::Choice { .. } => "Choose a number",
+    }
 }
 
 fn choose<'a>(options: &'a [PermissionOption], answer: &str) -> Option<&'a PermissionOption> {
@@ -144,23 +233,36 @@ struct Output {
     /// The cursor is after text that did not end with a newline.
     mid_line: bool,
     status: Option<Status>,
+    thinking: ThinkingDisplay,
+    ansi: bool,
+    /// The last thing printed was reasoning (`thinking = "show"`).
+    in_thought: bool,
+    /// Renders the answer's markdown, on ANSI terminals.
+    markdown: Option<Markdown>,
 }
 
 struct Status {
     started: Instant,
     activity: String,
+    /// The agent's reasoning since the last answer text or tool call.
+    thoughts: String,
     frame: usize,
     tools: usize,
     shown: bool,
 }
 
 impl Output {
-    fn new(ansi: bool) -> Self {
+    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: Option<Markdown>) -> Self {
         Self {
+            markdown,
+            thinking,
+            ansi,
+            in_thought: false,
             mid_line: false,
             status: ansi.then(|| Status {
                 started: Instant::now(),
                 activity: "Thinking".to_string(),
+                thoughts: String::new(),
                 frame: 0,
                 tools: 0,
                 shown: false,
@@ -173,12 +275,74 @@ impl Output {
             return;
         }
         self.hide();
-        print!("{text}");
+        if self.in_thought {
+            // The answer starts on its own line, after the reasoning.
+            self.end_line();
+            self.in_thought = false;
+        }
+        match &mut self.markdown {
+            Some(markdown) => {
+                // The status line resets the terminal's style: restore it.
+                print!("{}{}", markdown.resume(), markdown.push(text));
+                self.mid_line = !markdown.at_line_start();
+            }
+            None => {
+                print!("{text}");
+                self.mid_line = !text.ends_with('\n');
+            }
+        }
         let _ = std::io::stdout().flush();
-        self.mid_line = !text.ends_with('\n');
         if let Some(status) = &mut self.status {
             status.activity = "Writing".to_string();
+            status.thoughts.clear();
         }
+        self.show();
+    }
+
+    /// Reasoning feeds the status line (`status`), or only shows "Thinking"
+    /// (`hidden`), or is printed dim in the scrollback (`show`).
+    fn thought(&mut self, text: &str) {
+        match self.thinking {
+            ThinkingDisplay::Status => {}
+            ThinkingDisplay::Hidden => return,
+            ThinkingDisplay::Show => return self.print_thought(text),
+        }
+        if let Some(status) = &mut self.status {
+            status.thoughts.push_str(text);
+            // Only the last line is shown: keep the buffer small.
+            if status.thoughts.len() > 4096 {
+                let keep = status.thoughts.len() - 1024;
+                let cut = (keep..status.thoughts.len())
+                    .find(|&i| status.thoughts.is_char_boundary(i))
+                    .unwrap_or(status.thoughts.len());
+                status.thoughts.drain(..cut);
+            }
+            let snippet = ui::thinking(&status.thoughts, ui::width().saturating_sub(24));
+            status.activity = if snippet.is_empty() {
+                "Thinking".to_string()
+            } else {
+                format!("Thinking: {snippet}")
+            };
+        }
+        self.show();
+    }
+
+    fn print_thought(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.hide();
+        if !self.in_thought {
+            self.end_line();
+            self.in_thought = true;
+        }
+        if self.ansi {
+            print!("{}", ui::dim(text));
+        } else {
+            print!("{text}");
+        }
+        let _ = std::io::stdout().flush();
+        self.mid_line = !text.ends_with('\n');
         self.show();
     }
 
@@ -187,6 +351,7 @@ impl Output {
             Some(status) => {
                 status.tools += 1;
                 status.activity = format!("Running: {title}");
+                status.thoughts.clear();
                 self.hide();
                 self.end_line();
                 self.show();
@@ -203,6 +368,14 @@ impl Output {
     }
 
     fn end_line(&mut self) {
+        // Print what the markdown held back, and close its styles.
+        if let Some(markdown) = &mut self.markdown {
+            let held_back = markdown.has_pending();
+            print!("{}", markdown.finish());
+            if held_back {
+                self.mid_line = true;
+            }
+        }
         if self.mid_line {
             println!();
             self.mid_line = false;

@@ -2,19 +2,37 @@
 """A minimal ACP agent for tests: newline-delimited JSON-RPC over stdio.
 
 Prompts:
-  perm   asks for permission and replies with the chosen option id
+  perm   asks for permission to edit a file (with a diff) and replies with
+         the chosen option id
+  ask    asks for permission with only raw input (like Qwen's questions)
+  think  sends reasoning, then the answer "done"
+  caps   replies the client's elicitation capability, as JSON
+  form   sends an elicitation/create form and replies the result, as JSON
+  qwen   asks a question the way Qwen Code does and replies the raw result
+  opts   replies the session's config option values, as JSON
+  bump   changes `effort` to "high" itself and notifies the client
+  md     replies markdown, with the markers cut across chunks
+  blocks replies the text of the blocks sent before it, as JSON
+
+The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
-With --no-auto the sessions do not offer the `auto` mode.
+With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
+Kilo Code: no session modes, and the mode is a `mode` config option.
+
+Sessions offer config options `effort` (low/high), `fast` (boolean) and
+`model` (one/two).
 """
 import json
 import os
 import sys
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
+kilo = "--kilo" in sys.argv
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
+client_capabilities = {}
 next_request_id = 1000
 
 
@@ -31,38 +49,106 @@ def receive():
     return json.loads(line)
 
 
+def config_options(session):
+    def select(option_id, values):
+        current = session["mode"] if option_id == "mode" else session["options"][option_id]
+        return {"id": option_id, "name": option_id.title(), "type": "select",
+                "currentValue": current,
+                "options": [{"value": v, "name": v} for v in values]}
+    options = [select("effort", ["low", "high"]), select("model", ["one", "two"]),
+               {"id": "fast", "name": "Fast", "type": "boolean",
+                "currentValue": session["options"]["fast"]}]
+    if kilo:
+        options.append(select("mode", ["code", "ask"]))
+    return options
+
+
 def say(session_id, text):
     send({"method": "session/update", "params": {"sessionId": session_id, "update": {
         "sessionUpdate": "agent_message_chunk",
         "content": {"type": "text", "text": text}}}})
 
 
-def ask_permission(session_id):
+def ask_client(method, params):
+    """Sends a request to the client and returns its result."""
     global next_request_id
     next_request_id += 1
-    send({"id": next_request_id, "method": "session/request_permission", "params": {
-        "sessionId": session_id,
-        "toolCall": {"toolCallId": "t1", "title": "Delete build/"},
-        "options": [
-            {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-            {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
-        ]}})
+    send({"id": next_request_id, "method": method, "params": params})
     while True:
         message = receive()
         if message.get("id") == next_request_id and "method" not in message:
-            outcome = message["result"]["outcome"]
-            return outcome.get("optionId", outcome["outcome"])
+            return message["result"]
+
+
+def ask_permission(session_id, tool_call):
+    outcome = ask_client("session/request_permission", {
+        "sessionId": session_id,
+        "toolCall": tool_call,
+        "options": [
+            {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+            {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+        ]})["outcome"]
+    return outcome.get("optionId", outcome["outcome"])
 
 
 def prompt(request):
     params = request["params"]
     session_id = params["sessionId"]
-    text = params["prompt"][0]["text"]
+    text = params["prompt"][-1]["text"]
     session = sessions[session_id]
     stop_reason = "end_turn"
 
     if text == "perm":
-        say(session_id, "chose:" + ask_permission(session_id))
+        tool_call = {"toolCallId": "t1", "title": "Writing to notes.txt", "kind": "edit",
+                     "content": [{"type": "diff", "path": "/tmp/notes.txt",
+                                  "oldText": "a\n", "newText": "a\nb\n"}]}
+        say(session_id, "chose:" + ask_permission(session_id, tool_call))
+    elif text == "ask":
+        tool_call = {"toolCallId": "t2", "title": "Ask user 1 question", "content": [],
+                     "rawInput": {"questions": [{"question": "Which color?"}]}}
+        say(session_id, "chose:" + ask_permission(session_id, tool_call))
+    elif text == "caps":
+        say(session_id, json.dumps(client_capabilities.get("elicitation")))
+    elif text == "form":
+        result = ask_client("elicitation/create", {
+            "sessionId": session_id, "mode": "form", "message": "Pick a color",
+            "requestedSchema": {"type": "object", "properties": {
+                "color": {"type": "string", "title": "Color",
+                          "oneOf": [{"const": "red", "title": "Red"},
+                                    {"const": "blue", "title": "Blue"}]}}}})
+        say(session_id, json.dumps(result, sort_keys=True))
+    elif text == "qwen":
+        questions = [{"question": "Which color?", "header": "Color",
+                      "options": [{"label": "Red"}, {"label": "Blue"}]}]
+        result = ask_client("session/request_permission", {
+            "sessionId": session_id,
+            "toolCall": {"toolCallId": "t3", "title": "Ask user 1 question", "content": [],
+                         "rawInput": {"questions": questions},
+                         "_meta": {"qwenInteractionKind": "user_question",
+                                   "qwenQuestions": questions}},
+            "options": [{"optionId": "proceed_once", "name": "Submit", "kind": "allow_once"},
+                        {"optionId": "cancel", "name": "Cancel", "kind": "reject_once"}]})
+        say(session_id, json.dumps(result, sort_keys=True))
+    elif text == "opts":
+        say(session_id, json.dumps(
+            {**session["options"], "mode": session["mode"]}, sort_keys=True))
+    elif text == "blocks":
+        say(session_id, json.dumps([block.get("text") for block in params["prompt"][:-1]]))
+    elif text == "md":
+        for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
+            say(session_id, chunk)
+    elif text == "bump":
+        session["options"]["effort"] = "high"
+        send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": config_options(session)}}})
+        say(session_id, "bumped")
+    elif text == "think":
+        for chunk in ["Let me ", "think.\n", "Almost there"]:
+            send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": chunk}}}})
+        say(session_id, "done")
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "slow":
@@ -86,14 +172,34 @@ def main():
         message = receive()
         method = message.get("method")
         if method == "initialize":
+            client_capabilities.update(message["params"].get("clientCapabilities", {}))
             send({"id": message["id"], "result": {
                 "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
         elif method == "session/new":
             session_id = f"s{len(sessions) + 1}"
-            sessions[session_id] = {"cwd": message["params"]["cwd"], "mode": "default"}
-            send({"id": message["id"], "result": {"sessionId": session_id, "modes": {
-                "currentModeId": "default",
-                "availableModes": [{"id": m, "name": m} for m in modes]}}})
+            session = sessions[session_id] = {
+                "cwd": message["params"]["cwd"], "mode": "code" if kilo else "default",
+                "options": {"effort": "high", "model": "one", "fast": False}}
+            result = {"sessionId": session_id, "configOptions": config_options(session)}
+            if not kilo:
+                result["modes"] = {"currentModeId": "default",
+                                   "availableModes": [{"id": m, "name": m} for m in modes]}
+            send({"id": message["id"], "result": result})
+        elif method == "session/set_config_option":
+            params = message["params"]
+            session = sessions[params["sessionId"]]
+            option = next((o for o in config_options(session)
+                           if o["id"] == params["configId"]), None)
+            value = params["value"]
+            allowed = [v["value"] for v in option.get("options", [])] if option else []
+            if option is None or (option["type"] == "select" and value not in allowed):
+                send({"id": message["id"], "error": {"code": -32602, "message": "invalid"}})
+                continue
+            if params["configId"] == "mode":
+                session["mode"] = value
+            else:
+                session["options"][params["configId"]] = value
+            send({"id": message["id"], "result": {"configOptions": config_options(session)}})
         elif method == "session/set_mode":
             params = message["params"]
             sessions[params["sessionId"]]["mode"] = params["modeId"]
