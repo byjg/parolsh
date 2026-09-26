@@ -11,6 +11,7 @@ Prompts:
   qwen   asks a question the way Qwen Code does and replies the raw result
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
+  md     replies markdown, with the markers cut across chunks
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
@@ -128,6 +129,9 @@ def prompt(request):
     elif text == "opts":
         say(session_id, json.dumps(
             {**session["options"], "mode": session["mode"]}, sort_keys=True))
+    elif text == "md":
+        for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
+            say(session_id, chunk)
     elif text == "bump":
         session["options"]["effort"] = "high"
         send({"method": "session/update", "params": {"sessionId": session_id, "update": {

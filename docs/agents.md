@@ -423,8 +423,16 @@ The full list is at
 
 ## During a turn
 
-The answer is printed as it arrives. On an ANSI terminal, a status line under
-it shows what the agent is doing, redrawn in place instead of adding lines:
+The answer is printed as it arrives. On an ANSI terminal its markdown is
+rendered on the fly: `**bold**` in bold, `` `code` `` and code blocks in cyan,
+`#` headings bold and underlined, `-` bullets as `•`, with the markers hidden.
+Only a marker cut in half between two chunks waits for the next one, so the
+text is never held back. An unclosed `**` only affects the rest of its line.
+`markdown = false` in the [configuration](configuration.md#keys) prints the
+raw text.
+
+A status line under the answer shows what the agent is doing, redrawn in place
+instead of adding lines:
 
 ```text
 wallet ❯ why is the API container restarting?

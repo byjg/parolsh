@@ -97,6 +97,8 @@ pub struct Config {
     pub shell: Vec<String>,
     pub prompt: PromptStyle,
     pub thinking: ThinkingDisplay,
+    /// Render the answers' markdown on ANSI terminals.
+    pub markdown: bool,
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, Agent>,
 }
@@ -109,6 +111,7 @@ struct ConfigFile {
     shell: Option<Vec<String>>,
     prompt: Option<PromptStyle>,
     thinking: Option<ThinkingDisplay>,
+    markdown: Option<bool>,
     default_agent: Option<String>,
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
@@ -141,6 +144,7 @@ impl ConfigFile {
         self.shell = over.shell.or(self.shell);
         self.prompt = over.prompt.or(self.prompt);
         self.thinking = over.thinking.or(self.thinking);
+        self.markdown = over.markdown.or(self.markdown);
         self.default_agent = over.default_agent.or(self.default_agent);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
@@ -211,6 +215,7 @@ impl Config {
             shell,
             prompt: file.prompt.unwrap_or_default(),
             thinking: file.thinking.unwrap_or_default(),
+            markdown: file.markdown.unwrap_or(true),
             default_agent: file.default_agent,
             agents,
         })
@@ -251,6 +256,7 @@ mod tests {
         assert_eq!(config.shell, ["bash", "-ic"]);
         assert_eq!(config.prompt, PromptStyle::Parolsh);
         assert_eq!(config.thinking, ThinkingDisplay::Status);
+        assert!(config.markdown);
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
     }
@@ -360,6 +366,7 @@ mod tests {
             "project.toml",
             r#"
             thinking = "show"
+            markdown = false
 
             [agents.claude]
             options = { effort = "high" }
@@ -369,6 +376,7 @@ mod tests {
         let config = Config::load_files(Some(&global), Some(&project)).unwrap();
 
         assert_eq!(config.thinking, ThinkingDisplay::Show);
+        assert!(!config.markdown);
         assert_eq!(
             config.agents["claude"].options,
             BTreeMap::from([

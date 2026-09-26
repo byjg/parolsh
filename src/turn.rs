@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{AgentHandle, Detail, Event};
 use crate::config::ThinkingDisplay;
 use crate::form::{self, Answers, FieldKind, Form};
+use crate::markdown::Markdown;
 use crate::ui;
 
 /// Set by the SIGINT handler. The terminal is in cooked mode while a turn
@@ -27,12 +28,18 @@ pub enum Outcome {
 }
 
 /// Sends `text` and prints the agent's answer as it arrives.
-pub fn run(agent: &AgentHandle, text: String, thinking: ThinkingDisplay) -> Outcome {
+pub fn run(
+    agent: &AgentHandle,
+    text: String,
+    thinking: ThinkingDisplay,
+    markdown: bool,
+) -> Outcome {
     if !agent.prompt(text) {
         return Outcome::AgentStopped;
     }
     INTERRUPTED.store(false, Ordering::SeqCst);
-    let mut out = Output::new(ui::is_ansi(), thinking);
+    let ansi = ui::is_ansi();
+    let mut out = Output::new(ansi, thinking, ansi && markdown);
     out.show();
 
     loop {
@@ -224,6 +231,8 @@ struct Output {
     ansi: bool,
     /// The last thing printed was reasoning (`thinking = "show"`).
     in_thought: bool,
+    /// Renders the answer's markdown, on ANSI terminals.
+    markdown: Option<Markdown>,
 }
 
 struct Status {
@@ -237,8 +246,9 @@ struct Status {
 }
 
 impl Output {
-    fn new(ansi: bool, thinking: ThinkingDisplay) -> Self {
+    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: bool) -> Self {
         Self {
+            markdown: markdown.then(Markdown::default),
             thinking,
             ansi,
             in_thought: false,
@@ -264,9 +274,18 @@ impl Output {
             self.end_line();
             self.in_thought = false;
         }
-        print!("{text}");
+        match &mut self.markdown {
+            Some(markdown) => {
+                // The status line resets the terminal's style: restore it.
+                print!("{}{}", markdown.resume(), markdown.push(text));
+                self.mid_line = !markdown.at_line_start();
+            }
+            None => {
+                print!("{text}");
+                self.mid_line = !text.ends_with('\n');
+            }
+        }
         let _ = std::io::stdout().flush();
-        self.mid_line = !text.ends_with('\n');
         if let Some(status) = &mut self.status {
             status.activity = "Writing".to_string();
             status.thoughts.clear();
@@ -343,6 +362,14 @@ impl Output {
     }
 
     fn end_line(&mut self) {
+        // Print what the markdown held back, and close its styles.
+        if let Some(markdown) = &mut self.markdown {
+            let held_back = markdown.has_pending();
+            print!("{}", markdown.finish());
+            if held_back {
+                self.mid_line = true;
+            }
+        }
         if self.mid_line {
             println!();
             self.mid_line = false;

@@ -34,8 +34,8 @@ The name comes from Esperanto *parol-* (to speak) + *sh*.
 :::warning Early development
 Parolsh talks to one ACP agent: answers stream as they arrive, permission
 requests are asked in the terminal, and `Ctrl+C` cancels a turn. `#agent <name>`
-switches agents. Not there yet: `#resume`, sending `!command` output to the
-agent, and Markdown formatting.
+switches agents, and answers are rendered as markdown. Not there yet:
+`#resume`, and sending `!command` output to the agent.
 :::
 
 ## Input

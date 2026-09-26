@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod form;
 mod input;
+mod markdown;
 mod project;
 mod setup;
 mod shell;

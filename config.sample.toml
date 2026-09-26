@@ -24,6 +24,11 @@
 
 # --- Prompt -----------------------------------------------------------------
 
+# Render the answers' markdown on ANSI terminals (bold, `code` in cyan, code
+# blocks, headings, bullets), with the markers hidden. false prints raw text.
+# markdown = true
+
+
 # How the agent's reasoning ("thinking") is displayed:
 #   status  its latest line in the status line (default)
 #   hidden  only "Thinking" in the status line

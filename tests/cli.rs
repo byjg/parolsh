@@ -277,6 +277,10 @@ fn config_shows_the_files_and_the_sample() {
 /// Runs Parolsh with the fake agent as the only agent, `extra` added to the
 /// configuration, and returns the screen after typing `lines`.
 fn with_fake_agent(extra: &str, lines: &[&str]) -> String {
+    with_fake_agent_on(extra, lines, "dumb")
+}
+
+fn with_fake_agent_on(extra: &str, lines: &[&str], term: &str) -> String {
     let config = config_home(&format!(
         "{extra}\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
     ));
@@ -285,7 +289,7 @@ fn with_fake_agent(extra: &str, lines: &[&str]) -> String {
         .arg(env!("CARGO_BIN_EXE_parolsh"))
         .args(lines)
         .arg("#exit")
-        .env("TERM", "dumb")
+        .env("TERM", term)
         .env("XDG_CONFIG_HOME", config.path())
         .env("XDG_STATE_HOME", config.path())
         .output()
@@ -339,4 +343,24 @@ fn thinking_can_be_shown_or_hidden() {
     );
     assert!(!hidden.contains("Let me think."), "{hidden}");
     assert!(hidden.contains("\ndone"), "{hidden}");
+}
+
+/// On an ANSI terminal the answer's markdown is rendered while it streams:
+/// markers are hidden even when a chunk cuts them in half. `markdown = false`
+/// keeps the raw text.
+#[test]
+fn markdown_is_rendered_on_ansi_terminals() {
+    let rendered = with_fake_agent_on("", &["md"], "xterm-256color");
+    let raw = with_fake_agent_on("markdown = false", &["md"], "xterm-256color");
+
+    // The status line is redrawn in place; this log keeps its text in front
+    // of each line, so only the ends of the lines are compared.
+    assert!(rendered.contains("• bold and code\n"), "{rendered}");
+    assert!(rendered.contains("Title\n"), "{rendered}");
+    assert!(
+        !rendered.contains("**") && !rendered.contains("## "),
+        "{rendered}"
+    );
+    assert!(raw.contains("- **bold** and `code`\n"), "{raw}");
+    assert!(raw.contains("## Title\n"), "{raw}");
 }
