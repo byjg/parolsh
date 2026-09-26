@@ -1,6 +1,9 @@
 # Parolsh configuration: every option, commented out.
 #
-# Copy it and uncomment what you use:
+# The first run of Parolsh writes this file to ~/.config/parolsh/config.toml,
+# with the agents found on PATH already enabled. `#config sample` prints it.
+#
+# To copy it by hand and uncomment what you use:
 #
 #   mkdir -p ~/.config/parolsh
 #   cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml

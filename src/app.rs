@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::acp::AgentHandle;
 use crate::config::{Agent, Config, PromptStyle};
 use crate::input::{Input, route};
-use crate::{project, shell, turn, ui};
+use crate::{config, project, setup, shell, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -25,6 +25,7 @@ Control commands:
   #cd <path>      switch to another directory or project
   #agent [list]   show the active agent, or list the configured ones
   #agent <name>   switch to another agent (new conversation)
+  #config [sample] show the configuration files, or print the full sample
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
   #exit           leave Parolsh";
@@ -38,6 +39,8 @@ pub struct App {
     agent: Option<AgentHandle>,
     /// Set by `#prompt <name>`, or to fall back when Starship fails.
     prompt_override: Option<PromptStyle>,
+    /// What the first run did, shown once after the banner.
+    setup_notice: Option<String>,
     /// Exit code and duration of the last command, for the prompt.
     last_status: i32,
     last_duration: Duration,
@@ -50,6 +53,10 @@ enum Flow {
 
 impl App {
     pub fn new(cwd: PathBuf) -> Result<Self> {
+        // Before loading: the first run may write the global configuration.
+        let search_path = std::env::var("PATH").ok();
+        let setup_notice =
+            config::global_path().and_then(|path| setup::first_run(&path, search_path.as_deref()));
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
@@ -59,6 +66,7 @@ impl App {
             config,
             agent: None,
             prompt_override: None,
+            setup_notice,
             last_status: 0,
             last_duration: Duration::ZERO,
         };
@@ -78,6 +86,9 @@ impl App {
         }
         if ui::is_ansi() {
             self.print_banner();
+        }
+        if let Some(notice) = self.setup_notice.take() {
+            println!("{notice}");
         }
 
         loop {
@@ -139,6 +150,32 @@ impl App {
         }
     }
 
+    fn config_command(&self, args: &str) -> Result<()> {
+        match args {
+            "" => {
+                let status = |path: &Path| {
+                    let state = if path.exists() { "" } else { "  (not found)" };
+                    format!("{}{state}", path.display())
+                };
+                match config::global_path() {
+                    Some(path) => println!("Global:  {}", status(&path)),
+                    None => println!("Global:  none ($HOME is not set)"),
+                }
+                match &self.project_root {
+                    Some(root) => println!("Project: {}", status(&config::project_path(root))),
+                    None => println!("Project: none (#project init creates one here)"),
+                }
+                println!("#config sample prints every option, with a block for each agent.");
+                Ok(())
+            }
+            "sample" => {
+                print!("{}", setup::SAMPLE);
+                Ok(())
+            }
+            _ => anyhow::bail!("usage: #config [sample]"),
+        }
+    }
+
     fn prompt_command(&mut self, args: &str) -> Result<()> {
         if args.is_empty() {
             println!(
@@ -171,6 +208,7 @@ impl App {
             "agent" => self.agent(args),
             "project" => self.project(args),
             "prompt" => self.prompt_command(args),
+            "config" => self.config_command(args),
             _ => Err(anyhow::anyhow!("unknown command `#{name}`, see #help")),
         };
         match result {
@@ -214,7 +252,7 @@ impl App {
     /// Sends `text` to the agent. Returns the status for the prompt.
     fn ask(&mut self, text: String) -> i32 {
         let Some(agent) = &self.agent else {
-            eprintln!("parolsh: no agent configured. Set `default_agent` in the configuration.");
+            eprintln!("parolsh: {}", no_agent());
             return 1;
         };
         match turn::run(agent, text) {
@@ -239,7 +277,7 @@ impl App {
         if self.agent.is_some() {
             println!("Started a new conversation.");
         } else {
-            eprintln!("parolsh: no agent configured. Set `default_agent` in the configuration.");
+            eprintln!("parolsh: {}", no_agent());
         }
     }
 
@@ -272,7 +310,7 @@ impl App {
         match args {
             "" => match &self.active {
                 Some(name) => println!("{name}"),
-                None => println!("No agent selected. Set `default_agent` in the configuration."),
+                None => println!("{}", no_agent()),
             },
             "list" => self.list_agents(),
             name => self.switch_agent(name)?,
@@ -373,6 +411,17 @@ impl App {
 }
 
 /// Runs a `!` command or `!bash`. Returns its exit code.
+/// Where to go when no agent is configured.
+fn no_agent() -> String {
+    match config::global_path() {
+        Some(path) => format!(
+            "no agent configured. Add one to {} and set default_agent (see #config).",
+            path.display()
+        ),
+        None => "no agent configured (see #config).".to_string(),
+    }
+}
+
 fn run(command: Command) -> i32 {
     match shell::run_foreground(command) {
         Ok(0) => 0,

@@ -15,20 +15,32 @@ The project file is applied on top of the global one, field by field: it only
 needs the values it changes. Unknown keys are an error, so a typo is reported
 instead of being ignored.
 
-## Start from the sample
+## The first run creates it
 
-The package installs a sample with every option and a ready block for each
-[agent](agents.md), all commented out:
+When `~/.config/parolsh/config.toml` does not exist, Parolsh writes it from
+its built-in sample, with the [agents](agents.md) it finds on `PATH` enabled
+and the first of them as `default_agent` (see
+[First run](getting-started.md#first-run)). The sample holds every option and
+a ready block for each agent; the ones not installed stay commented out.
+
+`#config` shows the files in use and whether they exist:
+
+```text
+wallet ❯ #config
+Global:  /home/joao/.config/parolsh/config.toml
+Project: /home/joao/projects/wallet/.parolsh/config.toml  (not found)
+#config sample prints every option, with a block for each agent.
+```
+
+To start over, delete the file and restart Parolsh, or copy the sample by
+hand. It is printed by `#config sample`, and also installed with the package:
 
 ```bash
-mkdir -p ~/.config/parolsh
 cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
 
 # Installed with Homebrew:
 cp "$(brew --prefix)/share/parolsh/config.sample.toml" ~/.config/parolsh/config.toml
-```
-
-Uncomment the agents you use and set `default_agent`. The sample is also in
+``` The sample is also in
 the repository as
 [`config.sample.toml`](https://github.com/byjg/parolsh/blob/master/config.sample.toml).
 

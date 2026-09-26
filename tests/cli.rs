@@ -6,6 +6,18 @@ fn parolsh() -> Command {
     Command::new(env!("CARGO_BIN_EXE_parolsh"))
 }
 
+const JOB_SHELL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/job_shell.py");
+const FAKE_AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_agent.py");
+
+/// An `XDG_CONFIG_HOME` whose `parolsh/config.toml` holds `toml`. A config
+/// file must exist, or the first run writes one with the agents on `PATH`.
+fn config_home(toml: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join("parolsh")).unwrap();
+    std::fs::write(home.path().join("parolsh/config.toml"), toml).unwrap();
+    home
+}
+
 #[test]
 fn dash_c_returns_the_command_exit_code() {
     let status = parolsh().args(["-c", "exit 7"]).status().unwrap();
@@ -56,7 +68,7 @@ fn version_matches_the_crate() {
 /// as it redraws its prompt.
 #[test]
 fn a_bang_command_cannot_keep_the_terminal() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_home("");
     let steal_terminal = "!python3 -c 'import os, signal; \
         signal.signal(signal.SIGTTOU, signal.SIG_IGN); \
         os.setpgid(0, 0); os.tcsetpgrp(0, os.getpgrp())'";
@@ -148,7 +160,7 @@ fn agent_switches_to_another_configured_agent() {
 /// an Enter and the rest of the paste was lost.
 #[test]
 fn a_multi_line_paste_is_one_input() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_home("");
 
     let output = Command::new("python3")
         .arg(concat!(
@@ -168,4 +180,96 @@ fn a_multi_line_paste_is_one_input() {
 
     assert!(screen.contains("\npasted-one\n"), "{screen}");
     assert!(screen.contains("\npasted-two\n"), "{screen}");
+}
+
+/// The first run writes the configuration with the agents found on PATH,
+/// starts the default one, and says so; the next run leaves the file alone.
+#[test]
+fn the_first_run_configures_the_agents_on_path() {
+    let config = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    // A `claude-agent-acp` that is really the fake agent, first on PATH.
+    let fake = bin.path().join("claude-agent-acp");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\nexec python3 {FAKE_AGENT} \"$@\"\n"),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&fake, permissions).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let run = || {
+        let output = Command::new("python3")
+            .arg(JOB_SHELL)
+            .arg(env!("CARGO_BIN_EXE_parolsh"))
+            .arg("env PWD")
+            .arg("#exit")
+            .env("TERM", "dumb")
+            .env("PATH", &path)
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("XDG_STATE_HOME", config.path())
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let screen = run();
+
+    let file = config.path().join("parolsh/config.toml");
+    assert!(
+        screen.contains(&format!("Created {}", file.display())),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Using claude; switch with #agent <name>."),
+        "{screen}"
+    );
+    // The fake agent answered: the configured agent was started.
+    assert!(!screen.contains("no agent configured"), "{screen}");
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(written.contains("\n[agents.claude]\ncommand = \"claude-agent-acp\"\n"));
+    assert!(written.contains("\ndefault_agent = \"claude\"\n"));
+
+    let screen = run();
+
+    assert!(!screen.contains("Created "), "{screen}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+}
+
+/// `#config` lists the configuration files; `#config sample` prints the
+/// built-in sample.
+#[test]
+fn config_shows_the_files_and_the_sample() {
+    let config = config_home("");
+    let output = Command::new("python3")
+        .arg(JOB_SHELL)
+        .arg(env!("CARGO_BIN_EXE_parolsh"))
+        .arg("#config")
+        .arg("#config sample")
+        .arg("#exit")
+        .env("TERM", "dumb")
+        .env("XDG_CONFIG_HOME", config.path())
+        .env("XDG_STATE_HOME", config.path())
+        .output()
+        .unwrap();
+    let screen = String::from_utf8(output.stdout).unwrap();
+
+    let global = config.path().join("parolsh/config.toml");
+    assert!(
+        screen.contains(&format!("Global:  {}\n", global.display())),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Project: none (#project init creates one here)"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("# Parolsh configuration: every option, commented out."),
+        "{screen}"
+    );
 }

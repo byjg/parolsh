@@ -108,8 +108,14 @@ impl Config {
     /// Loads `$XDG_CONFIG_HOME/parolsh/config.toml` and, when inside a
     /// project, `<root>/.parolsh/config.toml` on top of it.
     pub fn load(project_root: Option<&Path>) -> Result<Self> {
-        let project = project_root.map(|root| root.join(STATE_DIR).join("config.toml"));
+        let project = project_root.map(project_path);
         Self::load_files(global_path().as_deref(), project.as_deref())
+    }
+
+    /// Loads one file on its own, as if it were the global configuration.
+    #[cfg(test)]
+    pub fn load_file(path: &Path) -> Result<Self> {
+        Self::load_files(Some(path), None)
     }
 
     fn load_files(global: Option<&Path>, project: Option<&Path>) -> Result<Self> {
@@ -159,7 +165,13 @@ impl Config {
     }
 }
 
-fn global_path() -> Option<PathBuf> {
+/// `<root>/.parolsh/config.toml`.
+pub fn project_path(root: &Path) -> PathBuf {
+    root.join(STATE_DIR).join("config.toml")
+}
+
+/// `$XDG_CONFIG_HOME/parolsh/config.toml`, or `~/.config/parolsh/config.toml`.
+pub fn global_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)

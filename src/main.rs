@@ -4,6 +4,7 @@ mod config;
 mod form;
 mod input;
 mod project;
+mod setup;
 mod shell;
 mod turn;
 mod ui;

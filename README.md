@@ -77,6 +77,11 @@ brew install byjg/tap/parolsh
 
 Homebrew builds it from source, installing Rust only for the build.
 
+Then install an ACP agent, for example
+`npm install -g @agentclientprotocol/claude-agent-acp`, and run `parolsh`: the
+first run creates `~/.config/parolsh/config.toml` with the agents it finds
+already enabled. See [Getting started](docs/getting-started.md).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
