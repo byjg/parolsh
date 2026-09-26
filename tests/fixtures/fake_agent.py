@@ -6,6 +6,9 @@ Prompts:
          the chosen option id
   ask    asks for permission with only raw input (like Qwen's questions)
   think  sends reasoning, then the answer "done"
+  caps   replies the client's elicitation capability, as JSON
+  form   sends an elicitation/create form and replies the result, as JSON
+  qwen   asks a question the way Qwen Code does and replies the raw result
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
@@ -18,6 +21,7 @@ import sys
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
+client_capabilities = {}
 next_request_id = 1000
 
 
@@ -40,21 +44,26 @@ def say(session_id, text):
         "content": {"type": "text", "text": text}}}})
 
 
-def ask_permission(session_id, tool_call):
+def ask_client(method, params):
+    """Sends a request to the client and returns its result."""
     global next_request_id
     next_request_id += 1
-    send({"id": next_request_id, "method": "session/request_permission", "params": {
+    send({"id": next_request_id, "method": method, "params": params})
+    while True:
+        message = receive()
+        if message.get("id") == next_request_id and "method" not in message:
+            return message["result"]
+
+
+def ask_permission(session_id, tool_call):
+    outcome = ask_client("session/request_permission", {
         "sessionId": session_id,
         "toolCall": tool_call,
         "options": [
             {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
             {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
-        ]}})
-    while True:
-        message = receive()
-        if message.get("id") == next_request_id and "method" not in message:
-            outcome = message["result"]["outcome"]
-            return outcome.get("optionId", outcome["outcome"])
+        ]})["outcome"]
+    return outcome.get("optionId", outcome["outcome"])
 
 
 def prompt(request):
@@ -73,6 +82,28 @@ def prompt(request):
         tool_call = {"toolCallId": "t2", "title": "Ask user 1 question", "content": [],
                      "rawInput": {"questions": [{"question": "Which color?"}]}}
         say(session_id, "chose:" + ask_permission(session_id, tool_call))
+    elif text == "caps":
+        say(session_id, json.dumps(client_capabilities.get("elicitation")))
+    elif text == "form":
+        result = ask_client("elicitation/create", {
+            "sessionId": session_id, "mode": "form", "message": "Pick a color",
+            "requestedSchema": {"type": "object", "properties": {
+                "color": {"type": "string", "title": "Color",
+                          "oneOf": [{"const": "red", "title": "Red"},
+                                    {"const": "blue", "title": "Blue"}]}}}})
+        say(session_id, json.dumps(result, sort_keys=True))
+    elif text == "qwen":
+        questions = [{"question": "Which color?", "header": "Color",
+                      "options": [{"label": "Red"}, {"label": "Blue"}]}]
+        result = ask_client("session/request_permission", {
+            "sessionId": session_id,
+            "toolCall": {"toolCallId": "t3", "title": "Ask user 1 question", "content": [],
+                         "rawInput": {"questions": questions},
+                         "_meta": {"qwenInteractionKind": "user_question",
+                                   "qwenQuestions": questions}},
+            "options": [{"optionId": "proceed_once", "name": "Submit", "kind": "allow_once"},
+                        {"optionId": "cancel", "name": "Cancel", "kind": "reject_once"}]})
+        say(session_id, json.dumps(result, sort_keys=True))
     elif text == "think":
         for chunk in ["Let me ", "think.\n", "Almost there"]:
             send({"method": "session/update", "params": {"sessionId": session_id, "update": {
@@ -102,6 +133,7 @@ def main():
         message = receive()
         method = message.get("method")
         if method == "initialize":
+            client_capabilities.update(message["params"].get("clientCapabilities", {}))
             send({"id": message["id"], "result": {
                 "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
         elif method == "session/new":

@@ -3,19 +3,25 @@
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, ContentChunk, InitializeRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent,
-    ToolCallContent,
+    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
+    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
+    ElicitationFormCapabilities, ElicitationMode, InitializeRequest, NewSessionRequest,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
+    SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo};
+use agent_client_protocol::{
+    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
+    UntypedMessage,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::config;
+use crate::form::{self, Answers, Form};
 
 /// What the agent reports back to the input loop.
 #[derive(Debug)]
@@ -34,6 +40,12 @@ pub enum Event {
         details: Vec<Detail>,
         options: Vec<PermissionOption>,
         reply: oneshot::Sender<Option<PermissionOptionId>>,
+    },
+    /// The agent asks the user questions. Reply with the answers, or `None`
+    /// to cancel.
+    Form {
+        form: Form,
+        reply: oneshot::Sender<Option<Answers>>,
     },
     /// The prompt finished.
     TurnEnd(StopReason),
@@ -96,6 +108,37 @@ impl Detail {
             .into_iter()
             .collect()
     }
+}
+
+/// `session/request_permission`, answered with raw JSON instead of the typed
+/// response: Qwen reads its users' answers from an `answers` field that
+/// `RequestPermissionResponse` cannot carry.
+#[derive(Debug, Clone)]
+struct PermissionRequest(RequestPermissionRequest);
+
+impl JsonRpcMessage for PermissionRequest {
+    fn matches_method(method: &str) -> bool {
+        RequestPermissionRequest::matches_method(method)
+    }
+
+    fn method(&self) -> &str {
+        self.0.method()
+    }
+
+    fn to_untyped_message(&self) -> Result<UntypedMessage, agent_client_protocol::Error> {
+        self.0.to_untyped_message()
+    }
+
+    fn parse_message(
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        RequestPermissionRequest::parse_message(method, params).map(Self)
+    }
+}
+
+impl JsonRpcRequest for PermissionRequest {
+    type Response = serde_json::Value;
 }
 
 enum Command {
@@ -203,6 +246,7 @@ async fn serve(
 ) -> Result<(), agent_client_protocol::Error> {
     let update_events = events.clone();
     let permission_events = events.clone();
+    let form_events = events.clone();
     let updated_modes = modes.clone();
 
     Client
@@ -215,34 +259,48 @@ async fn serve(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _cx| {
-                let (reply, answer) = oneshot::channel();
-                let fields = request.tool_call.fields;
-                let event = Event::Permission {
-                    title: fields.title.unwrap_or_default(),
-                    details: Detail::from_tool_call(fields.content, fields.raw_input),
-                    options: request.options,
-                    reply,
+            async move |PermissionRequest(request): PermissionRequest, responder, _cx| {
+                let response = match Form::from_qwen(request.tool_call.meta.as_ref()) {
+                    Some(form) => answer_qwen(&permission_events, form, &request.options).await,
+                    None => ask_permission(&permission_events, request).await,
                 };
-                let outcome = match permission_events.send(event) {
-                    Ok(()) => answer.await.ok().flatten(),
-                    Err(_) => None,
-                };
-                responder.respond(RequestPermissionResponse::new(match outcome {
-                    Some(id) => {
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                responder.respond(response)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CreateElicitationRequest, responder, _cx| {
+                let action = match request.mode {
+                    ElicitationMode::Form(mode) => {
+                        let form = Form::from_elicitation(request.message, &mode.requested_schema);
+                        match ask_form(&form_events, form).await {
+                            None => ElicitationAction::Cancel,
+                            Some(answers) if answers.is_empty() => ElicitationAction::Decline,
+                            Some(answers) => ElicitationAction::Accept(
+                                ElicitationAcceptAction::new()
+                                    .content(form::elicitation_content(answers)),
+                            ),
+                        }
                     }
-                    None => RequestPermissionOutcome::Cancelled,
-                }))
+                    // Only forms are advertised.
+                    _ => ElicitationAction::Decline,
+                };
+                responder.respond(CreateElicitationResponse::new(action))
             },
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(
             AcpAgent::new(config),
             async move |cx: ConnectionTo<Agent>| {
-                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
+                // Forms let agents ask the user questions (elicitation).
+                let capabilities = ClientCapabilities::new().elicitation(
+                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                );
+                cx.send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
+                )
+                .block_task()
+                .await?;
                 let mut session = open_session(&cx, &cwd, mode.as_deref(), &events, &modes).await?;
 
                 while let Some(command) = commands.recv().await {
@@ -262,6 +320,56 @@ async fn serve(
             },
         )
         .await
+}
+
+/// Asks the user through the input loop, and answers the permission request.
+async fn ask_permission(
+    events: &mpsc::Sender<Event>,
+    request: RequestPermissionRequest,
+) -> serde_json::Value {
+    let (reply, answer) = oneshot::channel();
+    let fields = request.tool_call.fields;
+    let event = Event::Permission {
+        title: fields.title.unwrap_or_default(),
+        details: Detail::from_tool_call(fields.content, fields.raw_input),
+        options: request.options,
+        reply,
+    };
+    let outcome = match events.send(event) {
+        Ok(()) => answer.await.ok().flatten(),
+        Err(_) => None,
+    };
+    let outcome = match outcome {
+        Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
+        None => RequestPermissionOutcome::Cancelled,
+    };
+    serde_json::to_value(RequestPermissionResponse::new(outcome)).unwrap_or_default()
+}
+
+/// Qwen's questions: submits the answers in the `answers` field Qwen reads,
+/// or cancels when the user answered nothing.
+async fn answer_qwen(
+    events: &mpsc::Sender<Event>,
+    form: Form,
+    options: &[PermissionOption],
+) -> serde_json::Value {
+    let submit = options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .or(options.first());
+    match (ask_form(events, form).await, submit) {
+        (Some(answers), Some(submit)) if !answers.is_empty() => serde_json::json!({
+            "outcome": {"outcome": "selected", "optionId": submit.option_id.to_string()},
+            "answers": form::qwen_answers(answers),
+        }),
+        _ => serde_json::json!({"outcome": {"outcome": "cancelled"}}),
+    }
+}
+
+async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
+    let (reply, answers) = oneshot::channel();
+    events.send(Event::Form { form, reply }).ok()?;
+    answers.await.ok().flatten()
 }
 
 /// Runs one prompt turn. A `Cancel` received meanwhile is sent to the agent,
@@ -525,6 +633,80 @@ mod tests {
             }
         }
         assert_eq!(thoughts, "Let me think.\nAlmost there");
+    }
+
+    /// Sends `prompt`, answers the form it triggers with `answers`, and
+    /// returns what the agent says it received.
+    fn answer_form(prompt: &str, answers: Option<form::Answers>) -> (Form, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt(prompt.to_string()));
+        let form = match next(&agent) {
+            Event::Form { form, reply } => {
+                reply.send(answers).unwrap();
+                form
+            }
+            other => panic!("unexpected event: {other:?}"),
+        };
+        match next(&agent) {
+            Event::Text(text) => (form, text),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forms_are_advertised_to_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+
+        let (text, _) = turn(&agent, "caps");
+
+        assert_eq!(text, r#"{"form": {}}"#);
+    }
+
+    #[test]
+    fn an_elicitation_form_is_accepted_with_the_answers() {
+        let answers =
+            form::Answers::from([("color".to_string(), form::Answer::Text("blue".to_string()))]);
+
+        let (form, result) = answer_form("form", Some(answers));
+
+        assert_eq!(form.message, "Pick a color");
+        assert_eq!(form.fields[0].title, "Color");
+        assert_eq!(
+            result,
+            r#"{"action": "accept", "content": {"color": "blue"}}"#
+        );
+    }
+
+    #[test]
+    fn an_elicitation_form_without_answers_is_declined_or_cancelled() {
+        let (_, declined) = answer_form("form", Some(form::Answers::new()));
+        let (_, cancelled) = answer_form("form", None);
+
+        assert_eq!(declined, r#"{"action": "decline"}"#);
+        assert_eq!(cancelled, r#"{"action": "cancel"}"#);
+    }
+
+    #[test]
+    fn qwen_questions_are_answered_in_its_answers_field() {
+        let answers =
+            form::Answers::from([("0".to_string(), form::Answer::Text("Blue".to_string()))]);
+
+        let (form, result) = answer_form("qwen", Some(answers));
+
+        assert_eq!(form.fields[0].title, "Which color?");
+        assert_eq!(
+            result,
+            r#"{"answers": {"0": "Blue"}, "outcome": {"optionId": "proceed_once", "outcome": "selected"}}"#
+        );
+    }
+
+    #[test]
+    fn unanswered_qwen_questions_are_cancelled() {
+        let (_, result) = answer_form("qwen", Some(form::Answers::new()));
+
+        assert_eq!(result, r#"{"outcome": {"outcome": "cancelled"}}"#);
     }
 
     #[test]

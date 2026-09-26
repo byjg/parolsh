@@ -1,6 +1,7 @@
 mod acp;
 mod app;
 mod config;
+mod form;
 mod input;
 mod project;
 mod shell;

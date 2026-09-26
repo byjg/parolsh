@@ -379,5 +379,26 @@ input is shown instead. At most 40 lines are shown.
 
 Type the number and press Enter. Anything else rejects once.
 
+### Questions from the agent
+
+Agents can ask you questions while they work:
+
+```text
+The agent asks (press Enter to skip a question):
+  Which color do you prefer?
+    [1] Red
+    [2] Blue
+  Choose a number, or type your own answer: 2
+```
+
+- Type the number of a choice, several numbers separated by commas when more
+  than one is allowed, or your own answer when the agent accepts free text.
+- Enter skips a question. If you skip a question the agent marked as
+  required, it gets no answers at all.
+
+Claude and Codex ask through the standard ACP form request (elicitation), and
+Qwen Code through its own question tool; Parolsh answers both. Gemini CLI does
+not ask questions in ACP mode.
+
 `Ctrl+C` cancels the turn: the agent stops, Parolsh prints `(cancelled)` and
 returns to the prompt.

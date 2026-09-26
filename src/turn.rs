@@ -7,6 +7,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Detail, Event};
+use crate::form::{self, Answers, FieldKind, Form};
 use crate::ui;
 
 /// Set by the SIGINT handler. The terminal is in cooked mode while a turn
@@ -63,6 +64,12 @@ pub fn run(agent: &AgentHandle, text: String) -> Outcome {
                 out.hide();
                 out.end_line();
                 let _ = reply.send(ask_permission(&title, &details, &options));
+                out.show();
+            }
+            Event::Form { form, reply } => {
+                out.hide();
+                out.end_line();
+                let _ = reply.send(ask_form(&form));
                 out.show();
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
@@ -132,6 +139,64 @@ fn ask_permission(
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     choose(options, answer.trim()).map(|option| option.option_id.clone())
+}
+
+/// Asks each question of the form. Enter skips a question; `None` (cancel)
+/// when the input closes. A skipped required question declines the form.
+fn ask_form(form: &Form) -> Option<Answers> {
+    println!("The agent asks (press Enter to skip a question):");
+    if !form.message.is_empty() {
+        println!("  {}", form.message);
+    }
+    let mut answers = Answers::new();
+    for field in &form.fields {
+        println!("  {}", field.title);
+        if let Some(description) = &field.description {
+            println!("  {description}");
+        }
+        if let FieldKind::Choice { options, .. } = &field.kind {
+            for (i, option) in options.iter().enumerate() {
+                match &option.description {
+                    Some(description) => {
+                        println!("    [{}] {} — {description}", i + 1, option.label)
+                    }
+                    None => println!("    [{}] {}", i + 1, option.label),
+                }
+            }
+        }
+        loop {
+            print!("  {}: ", hint(&field.kind));
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+                return None;
+            }
+            match form::parse(&field.kind, &input) {
+                Ok(Some(answer)) => {
+                    answers.insert(field.key.clone(), answer);
+                    break;
+                }
+                Ok(None) => break,
+                Err(message) => println!("  ({message})"),
+            }
+        }
+    }
+    if form.missing_required(&answers) {
+        println!("  A required question was skipped: the agent gets no answers.");
+        return Some(Answers::new());
+    }
+    Some(answers)
+}
+
+fn hint(kind: &FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Text => "Answer",
+        FieldKind::Number { .. } => "Number",
+        FieldKind::Boolean => "y/n",
+        FieldKind::Choice { multiple: true, .. } => "Choose numbers, separated by commas",
+        FieldKind::Choice { other: true, .. } => "Choose a number, or type your own answer",
+        FieldKind::Choice { .. } => "Choose a number",
+    }
 }
 
 fn choose<'a>(options: &'a [PermissionOption], answer: &str) -> Option<&'a PermissionOption> {
