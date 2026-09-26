@@ -7,6 +7,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Detail, Event};
+use crate::config::ThinkingDisplay;
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::ui;
 
@@ -26,12 +27,12 @@ pub enum Outcome {
 }
 
 /// Sends `text` and prints the agent's answer as it arrives.
-pub fn run(agent: &AgentHandle, text: String) -> Outcome {
+pub fn run(agent: &AgentHandle, text: String, thinking: ThinkingDisplay) -> Outcome {
     if !agent.prompt(text) {
         return Outcome::AgentStopped;
     }
     INTERRUPTED.store(false, Ordering::SeqCst);
-    let mut out = Output::new(ui::is_ansi());
+    let mut out = Output::new(ui::is_ansi(), thinking);
     out.show();
 
     loop {
@@ -219,6 +220,10 @@ struct Output {
     /// The cursor is after text that did not end with a newline.
     mid_line: bool,
     status: Option<Status>,
+    thinking: ThinkingDisplay,
+    ansi: bool,
+    /// The last thing printed was reasoning (`thinking = "show"`).
+    in_thought: bool,
 }
 
 struct Status {
@@ -232,8 +237,11 @@ struct Status {
 }
 
 impl Output {
-    fn new(ansi: bool) -> Self {
+    fn new(ansi: bool, thinking: ThinkingDisplay) -> Self {
         Self {
+            thinking,
+            ansi,
+            in_thought: false,
             mid_line: false,
             status: ansi.then(|| Status {
                 started: Instant::now(),
@@ -251,6 +259,11 @@ impl Output {
             return;
         }
         self.hide();
+        if self.in_thought {
+            // The answer starts on its own line, after the reasoning.
+            self.end_line();
+            self.in_thought = false;
+        }
         print!("{text}");
         let _ = std::io::stdout().flush();
         self.mid_line = !text.ends_with('\n');
@@ -261,8 +274,14 @@ impl Output {
         self.show();
     }
 
-    /// Reasoning only feeds the status line; it never reaches the scrollback.
+    /// Reasoning feeds the status line (`status`), or only shows "Thinking"
+    /// (`hidden`), or is printed dim in the scrollback (`show`).
     fn thought(&mut self, text: &str) {
+        match self.thinking {
+            ThinkingDisplay::Status => {}
+            ThinkingDisplay::Hidden => return,
+            ThinkingDisplay::Show => return self.print_thought(text),
+        }
         if let Some(status) = &mut self.status {
             status.thoughts.push_str(text);
             // Only the last line is shown: keep the buffer small.
@@ -280,6 +299,25 @@ impl Output {
                 format!("Thinking: {snippet}")
             };
         }
+        self.show();
+    }
+
+    fn print_thought(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.hide();
+        if !self.in_thought {
+            self.end_line();
+            self.in_thought = true;
+        }
+        if self.ansi {
+            print!("{}", ui::dim(text));
+        } else {
+            print!("{text}");
+        }
+        let _ = std::io::stdout().flush();
+        self.mid_line = !text.ends_with('\n');
         self.show();
     }
 

@@ -56,8 +56,9 @@ pub fn installed_agents(search_path: Option<&str>) -> Vec<&'static str> {
         .collect()
 }
 
-/// The sample with the blocks of `agents` uncommented (except `env`, whose
-/// values are only examples) and `default_agent` set to the first of them.
+/// The sample with the blocks of `agents` uncommented (except `env` and
+/// `options`, whose values are only examples) and `default_agent` set to the
+/// first of them.
 pub fn configuration(agents: &[&str]) -> String {
     let mut out = String::with_capacity(SAMPLE.len());
     let mut enabling = false;
@@ -69,7 +70,7 @@ pub fn configuration(agents: &[&str]) -> String {
                 enabling = agents.contains(&name);
                 out.push_str(if enabling { rest } else { line });
             }
-            Some(rest) if enabling && !rest.starts_with("env ") => out.push_str(rest),
+            Some(rest) if enabling && !is_example(rest) => out.push_str(rest),
             Some(rest) if rest.starts_with("default_agent ") && !agents.is_empty() => {
                 out.push_str(&format!("default_agent = \"{}\"", agents[0]));
             }
@@ -84,6 +85,11 @@ pub fn configuration(agents: &[&str]) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Settings whose sample values need the user's own data.
+fn is_example(line: &str) -> bool {
+    line.starts_with("env ") || line.starts_with("options ")
 }
 
 /// A commented-out TOML line: a table header or `key = value`.
@@ -145,8 +151,9 @@ mod tests {
         assert_eq!(names, ["codex", "goose"]);
         assert_eq!(config.agents["codex"].mode.as_deref(), Some("agent"));
         assert_eq!(config.agents["goose"].args, ["acp"]);
-        // The example env values stay commented out.
+        // The example env and options values stay commented out.
         assert!(config.agents["goose"].env.is_empty());
+        assert!(config.agents["codex"].options.is_empty());
     }
 
     #[test]

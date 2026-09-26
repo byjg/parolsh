@@ -23,6 +23,7 @@ command = "claude-agent-acp"    # program that speaks ACP
 args = []                       # its arguments
 env = { }                       # extra environment variables for it
 mode = "default"                # the agent's own mode; omit to keep its default
+options = { effort = "low" }    # the agent's own config options
 ```
 
 ## Switching agents
@@ -55,12 +56,63 @@ sets it on every new conversation and does not translate it. Without `mode`,
 the agent starts in its own default.
 
 If the agent does not offer that mode, it stays in its current one and
-Parolsh prints a notice with the modes it does offer. Agents without session
-modes (Kilo Code) ignore `mode`, and Parolsh says so.
+Parolsh prints a notice with the modes it does offer. Some agents (Kilo Code)
+have no session modes but a `mode` [option](#options): `mode` sets that
+instead.
 
 Whatever the mode, when the agent asks for permission, Parolsh shows the
 agent's options and waits for your choice (see
 [During a turn](#during-a-turn)).
+
+## Options
+
+Agents offer config options: reasoning effort, model, fast mode, and so on.
+`options` sets them, with the agent's own ids and values, on every new
+conversation:
+
+```toml
+[agents.claude]
+command = "claude-agent-acp"
+options = { effort = "low", model = "sonnet" }
+```
+
+`#options` shows what the running agent offers, with `*` on the current
+value, and `#options <id> <value>` changes one until you leave Parolsh (it is
+set again after `#new` and `#cd`):
+
+```text
+wallet ❯ #options
+  mode               default*, acceptEdits, plan, auto, bypassPermissions
+  model              default*, opus[1m], claude-fable-5-1[1m], sonnet, haiku
+  effort             default, low*, medium, high, xhigh, max
+  fast               on, off*
+wallet ❯ #options model sonnet
+model = sonnet, until you leave Parolsh.
+```
+
+An option or value the agent does not offer is reported with what it does
+offer, and the conversation keeps going. The list can change: Claude drops
+`fast` for models without a fast mode. Options are values the agent reports
+for your account and version, so check `#options` rather than this page.
+
+`options` merges key by key, like `env`: a project can change one option.
+
+### Less thinking
+
+No agent turns reasoning off through a standard switch; each has its own
+option or setting:
+
+| Agent | Option | Least thinking |
+|---|---|---|
+| Claude | `effort` | `low` |
+| Codex | `reasoning_effort` | `low` |
+| Qwen Code | `reasoning_effort`, [when the model declares it](#qwen-code) | `none` (off) |
+| Kilo Code | `effort` | the lowest value `#options` lists |
+| Gemini CLI, Goose | none through ACP | their own settings |
+
+How Parolsh *displays* the reasoning is separate: `thinking` in the
+[configuration](configuration.md#keys) shows it in the status line (default),
+hides it, or prints it.
 
 ## API keys
 
@@ -220,6 +272,33 @@ mode = "default"
 Qwen Code does not always start in `default` (it started in `auto` in our
 tests): set `mode` to be sure.
 
+**Thinking off.** Qwen Code has no ACP switch for thinking with an
+OpenAI-compatible model unless the model declares its reasoning support. In
+`~/.qwen/settings.json`, on the model's `modelProviders` entry:
+
+```json
+{
+  "modelProviders": { "openai": [ {
+    "id": "Qwen/Qwen3.6-35B-A3B",
+    "baseUrl": "http://localhost:8000/v1",
+    "envKey": "OPENAI_API_KEY",
+    "capabilities": { "reasoning": { "profile": "qwen-chat-template" } },
+    "generationConfig": { "reasoning": false }
+  } ] }
+}
+```
+
+- `"reasoning": false` turns thinking off for that model: Qwen Code sends
+  `chat_template_kwargs: {enable_thinking: false}` (vLLM, SGLang) or
+  `enable_thinking: false` (DashScope).
+- The `capabilities` block also makes Qwen Code offer the `reasoning_effort`
+  option, so `options = { reasoning_effort = "none" }` or
+  `#options reasoning_effort none` switches it per conversation.
+- A top-level `"enable_thinking": false` in `settings.json` is ignored.
+
+This comes from Qwen Code 0.24.5's source; it has not been checked end to
+end with every provider.
+
 ## Kilo Code
 
 Kilo Code's CLI. The npm package ships a native binary, no Node.js version
@@ -239,11 +318,14 @@ command = "kilo"
 args = ["acp"]
 ```
 
+Kilo has no ACP session modes, but a `mode` option with its agents: `ask`
+and `plan` (read-only), `code` (its default), `debug` and `orchestrator`.
+`mode = "ask"` sets it through that option.
+
 :::warning Permissions are configured in Kilo
-Kilo has no ACP session modes, so `mode` has no effect. Kilo asks according
-to its own configuration: set `"permission": "allow"` in
-`~/.config/kilo/kilo.json` to let it act without asking, or use its
-`/auto-approve` setting.
+None of Kilo's modes acts without asking. Kilo asks according to its own
+configuration: set `"permission": "allow"` in `~/.config/kilo/kilo.json` to
+let it act without asking, or use its `/auto-approve` setting.
 :::
 
 ## Any OpenAI-compatible API

@@ -9,17 +9,24 @@ Prompts:
   caps   replies the client's elicitation capability, as JSON
   form   sends an elicitation/create form and replies the result, as JSON
   qwen   asks a question the way Qwen Code does and replies the raw result
+  opts   replies the session's config option values, as JSON
+  bump   changes `effort` to "high" itself and notifies the client
   slow   replies "working" and waits for session/cancel
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
-With --no-auto the sessions do not offer the `auto` mode.
+With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
+Kilo Code: no session modes, and the mode is a `mode` config option.
+
+Sessions offer config options `effort` (low/high), `fast` (boolean) and
+`model` (one/two).
 """
 import json
 import os
 import sys
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
+kilo = "--kilo" in sys.argv
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
 client_capabilities = {}
 next_request_id = 1000
@@ -36,6 +43,20 @@ def receive():
     if not line:
         sys.exit(0)
     return json.loads(line)
+
+
+def config_options(session):
+    def select(option_id, values):
+        current = session["mode"] if option_id == "mode" else session["options"][option_id]
+        return {"id": option_id, "name": option_id.title(), "type": "select",
+                "currentValue": current,
+                "options": [{"value": v, "name": v} for v in values]}
+    options = [select("effort", ["low", "high"]), select("model", ["one", "two"]),
+               {"id": "fast", "name": "Fast", "type": "boolean",
+                "currentValue": session["options"]["fast"]}]
+    if kilo:
+        options.append(select("mode", ["code", "ask"]))
+    return options
 
 
 def say(session_id, text):
@@ -104,6 +125,15 @@ def prompt(request):
             "options": [{"optionId": "proceed_once", "name": "Submit", "kind": "allow_once"},
                         {"optionId": "cancel", "name": "Cancel", "kind": "reject_once"}]})
         say(session_id, json.dumps(result, sort_keys=True))
+    elif text == "opts":
+        say(session_id, json.dumps(
+            {**session["options"], "mode": session["mode"]}, sort_keys=True))
+    elif text == "bump":
+        session["options"]["effort"] = "high"
+        send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": config_options(session)}}})
+        say(session_id, "bumped")
     elif text == "think":
         for chunk in ["Let me ", "think.\n", "Almost there"]:
             send({"method": "session/update", "params": {"sessionId": session_id, "update": {
@@ -138,10 +168,29 @@ def main():
                 "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
         elif method == "session/new":
             session_id = f"s{len(sessions) + 1}"
-            sessions[session_id] = {"cwd": message["params"]["cwd"], "mode": "default"}
-            send({"id": message["id"], "result": {"sessionId": session_id, "modes": {
-                "currentModeId": "default",
-                "availableModes": [{"id": m, "name": m} for m in modes]}}})
+            session = sessions[session_id] = {
+                "cwd": message["params"]["cwd"], "mode": "code" if kilo else "default",
+                "options": {"effort": "high", "model": "one", "fast": False}}
+            result = {"sessionId": session_id, "configOptions": config_options(session)}
+            if not kilo:
+                result["modes"] = {"currentModeId": "default",
+                                   "availableModes": [{"id": m, "name": m} for m in modes]}
+            send({"id": message["id"], "result": result})
+        elif method == "session/set_config_option":
+            params = message["params"]
+            session = sessions[params["sessionId"]]
+            option = next((o for o in config_options(session)
+                           if o["id"] == params["configId"]), None)
+            value = params["value"]
+            allowed = [v["value"] for v in option.get("options", [])] if option else []
+            if option is None or (option["type"] == "select" and value not in allowed):
+                send({"id": message["id"], "error": {"code": -32602, "message": "invalid"}})
+                continue
+            if params["configId"] == "mode":
+                session["mode"] = value
+            else:
+                session["options"][params["configId"]] = value
+            send({"id": message["id"], "result": {"configOptions": config_options(session)}})
         elif method == "session/set_mode":
             params = message["params"]
             sessions[params["sessionId"]]["mode"] = params["modeId"]

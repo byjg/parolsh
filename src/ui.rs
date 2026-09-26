@@ -294,6 +294,11 @@ fn scalar_text(value: &serde_json::Value) -> String {
     }
 }
 
+/// `text` in the dim style used for secondary output.
+pub fn dim(text: &str) -> String {
+    format!("{DIM}{text}{RESET}")
+}
+
 /// The line printed when a turn ends.
 pub fn summary(tools: usize, elapsed: Duration) -> String {
     let tools = match tools {

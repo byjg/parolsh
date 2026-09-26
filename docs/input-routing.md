@@ -78,6 +78,8 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#agent` | Show the agent in use |
 | `#agent list` | List configured agents; `*` marks the one in use |
 | `#agent <name>` | Switch to another configured agent, with a new conversation. `default_agent` does not change. |
+| `#options` | Show the running agent's options, `*` on the current values |
+| `#options <id> <value>` | Set one of the agent's options until you leave Parolsh |
 | `#config` | Show the configuration files in use, and whether they exist |
 | `#config sample` | Print the full sample configuration |
 | `#prompt` | Show the prompt style in use |

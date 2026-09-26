@@ -24,6 +24,13 @@
 
 # --- Prompt -----------------------------------------------------------------
 
+# How the agent's reasoning ("thinking") is displayed:
+#   status  its latest line in the status line (default)
+#   hidden  only "Thinking" in the status line
+#   show    printed dim, before the answer
+# thinking = "status"
+
+
 # How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.
 #   parolsh   the directory name and ❯ (default)
 #   starship  your Starship prompt (~/.config/starship.toml), on ANSI terminals
@@ -50,6 +57,9 @@
 #   mode    = the agent's own session mode, set on every new conversation.
 #             Omit it to keep the agent's default. `#agent list` shows the
 #             modes the running agent offers.
+#   options = the agent's own config options (reasoning effort, model, ...),
+#             set on every new conversation. `#options` shows the ones the
+#             running agent offers, and `#options <id> <value>` changes one.
 #
 # Each agent keeps its own login, models and settings (~/.claude, ~/.codex,
 # ~/.gemini, ~/.qwen, ...): Parolsh does not replace them.
@@ -60,9 +70,12 @@
 #   Login: your Claude Code login, or ANTHROPIC_API_KEY.
 #   Modes: default (asks), acceptEdits, plan (read-only), auto, bypassPermissions
 #
+#   Options: effort (default, low, medium, high, xhigh, max), model, fast (on/off)
+#
 # [agents.claude]
 # command = "claude-agent-acp"
 # mode = "default"
+# options = { effort = "low" }
 
 
 # Codex
@@ -70,9 +83,13 @@
 #   Login: your ChatGPT login (~/.codex), or CODEX_API_KEY / OPENAI_API_KEY.
 #   Modes: read-only, agent (default, asks for unsafe actions), agent-full-access
 #
+#   Options: reasoning_effort (low ... ultra), model, fast-mode (on/off),
+#   collaboration_mode (default, plan)
+#
 # [agents.codex]
 # command = "codex-acp"
 # mode = "agent"
+# options = { reasoning_effort = "low" }
 
 
 # Gemini CLI
@@ -93,10 +110,14 @@
 #   OPENAI_* variables below.
 #   Modes: plan (read-only), default (asks), auto-edit, auto, yolo
 #
+#   Options: model; reasoning_effort (none = thinking off) only when the model
+#   declares reasoning capabilities in ~/.qwen/settings.json.
+#
 # [agents.qwen]
 # command = "qwen"
 # args = ["--acp"]
 # mode = "default"
+# options = { reasoning_effort = "none" }
 
 
 # Any OpenAI-compatible API (OpenAI, OpenRouter, Azure, vLLM, Ollama, ...),
@@ -112,11 +133,13 @@
 # Kilo Code
 #   npm install -g @kilocode/cli
 #   Login: kilo auth login
-#   No session modes: permissions are set in ~/.config/kilo/kilo.json.
+#   Modes (a config option): ask, plan, code (default), debug, orchestrator.
+#   Permissions are set in ~/.config/kilo/kilo.json.
 #
 # [agents.kilo]
 # command = "kilo"
 # args = ["acp"]
+# mode = "code"
 
 
 # Goose

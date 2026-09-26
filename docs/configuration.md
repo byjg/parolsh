@@ -84,12 +84,14 @@ launched as `claude-agent-acp`.
 | `agents.<name>.args` | `[]` | Arguments for `command` |
 | `agents.<name>.env` | `{}` | Environment variables added for the agent, such as a base URL or a model. See [API keys](agents.md#api-keys) before putting a key here. |
 | `agents.<name>.mode` | the agent's default | The agent's own session mode id, set on every new conversation. See [Modes](agents.md#modes). |
+| `agents.<name>.options` | `{}` | The agent's own config options (`effort`, `model`, ...), set on every new conversation. See [Options](agents.md#options). |
+| `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
 plain `bash -c`.
 
-`env` merges key by key: a project can change one variable without repeating
-the others.
+`env` and `options` merge key by key: a project can change one variable or
+option without repeating the others.
 
 ## Prompt
 

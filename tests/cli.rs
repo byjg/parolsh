@@ -273,3 +273,70 @@ fn config_shows_the_files_and_the_sample() {
         "{screen}"
     );
 }
+
+/// Runs Parolsh with the fake agent as the only agent, `extra` added to the
+/// configuration, and returns the screen after typing `lines`.
+fn with_fake_agent(extra: &str, lines: &[&str]) -> String {
+    let config = config_home(&format!(
+        "{extra}\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
+    ));
+    let output = Command::new("python3")
+        .arg(JOB_SHELL)
+        .arg(env!("CARGO_BIN_EXE_parolsh"))
+        .args(lines)
+        .arg("#exit")
+        .env("TERM", "dumb")
+        .env("XDG_CONFIG_HOME", config.path())
+        .env("XDG_STATE_HOME", config.path())
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// `#options` lists the agent's options with the current value marked, and
+/// `#options <id> <value>` sets one, checked against the offered values.
+#[test]
+fn options_are_listed_and_set_during_the_run() {
+    let screen = with_fake_agent(
+        "",
+        &[
+            "#options",
+            "#options effort low",
+            "opts",
+            "#options effort max",
+        ],
+    );
+
+    assert!(
+        screen.contains("  effort             low, high*\n"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("  fast               true, false*\n"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("effort = low, until you leave Parolsh."),
+        "{screen}"
+    );
+    assert!(screen.contains(r#""effort": "low""#), "{screen}");
+    assert!(
+        screen.contains("`effort` has no value `max`. Values: low, high"),
+        "{screen}"
+    );
+}
+
+/// `thinking = "show"` prints the reasoning before the answer; `"hidden"`
+/// keeps it out.
+#[test]
+fn thinking_can_be_shown_or_hidden() {
+    let shown = with_fake_agent("thinking = \"show\"", &["think"]);
+    let hidden = with_fake_agent("thinking = \"hidden\"", &["think"]);
+
+    assert!(
+        shown.contains("Let me think.\nAlmost there\ndone"),
+        "{shown}"
+    );
+    assert!(!hidden.contains("Let me think."), "{hidden}");
+    assert!(hidden.contains("\ndone"), "{hidden}");
+}

@@ -8,8 +8,9 @@ use agent_client_protocol::schema::v1::{
     ElicitationFormCapabilities, ElicitationMode, InitializeRequest, NewSessionRequest,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
@@ -20,8 +21,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
-use crate::config;
+use crate::config::{self, OptionValue};
 use crate::form::{self, Answers, Form};
+use std::collections::BTreeMap;
 
 /// What the agent reports back to the input loop.
 #[derive(Debug)]
@@ -62,7 +64,66 @@ pub struct SessionModes {
     pub available: Vec<String>,
 }
 
-type SharedModes = Arc<Mutex<Option<SessionModes>>>;
+/// A config option the agent offers (`effort`, `model`, ...), as it reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOption {
+    pub id: String,
+    pub name: String,
+    pub current: String,
+    /// The accepted values: choice ids, or `true`/`false`.
+    pub values: Vec<String>,
+}
+
+impl AgentOption {
+    fn from_acp(option: &SessionConfigOption) -> Option<Self> {
+        let (current, values) = match &option.kind {
+            SessionConfigKind::Select(select) => {
+                let values = match &select.options {
+                    SessionConfigSelectOptions::Ungrouped(options) => {
+                        options.iter().map(|o| o.value.to_string()).collect()
+                    }
+                    SessionConfigSelectOptions::Grouped(groups) => groups
+                        .iter()
+                        .flat_map(|g| g.options.iter().map(|o| o.value.to_string()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (select.current_value.to_string(), values)
+            }
+            SessionConfigKind::Boolean(boolean) => (
+                boolean.current_value.to_string(),
+                vec!["true".to_string(), "false".to_string()],
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            id: option.id.to_string(),
+            name: option.name.clone(),
+            current,
+            values,
+        })
+    }
+
+    fn list(options: &[SessionConfigOption]) -> Vec<Self> {
+        options.iter().filter_map(Self::from_acp).collect()
+    }
+}
+
+/// What the agent reported about the current session.
+#[derive(Debug, Default)]
+struct SessionState {
+    modes: Option<SessionModes>,
+    options: Vec<AgentOption>,
+}
+
+type Shared = Arc<Mutex<SessionState>>;
+
+/// The mode and options to set on every new conversation. `#options`
+/// changes them for the rest of the run.
+struct Wanted {
+    mode: Option<String>,
+    options: BTreeMap<String, OptionValue>,
+}
 
 /// Content attached to a permission request.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,13 +206,14 @@ enum Command {
     Prompt(String),
     Cancel,
     NewSession(PathBuf),
+    SetOption(String, OptionValue),
 }
 
 /// A running agent. Dropping it stops the agent process.
 pub struct AgentHandle {
     commands: Option<tokio_mpsc::UnboundedSender<Command>>,
     pub events: mpsc::Receiver<Event>,
-    modes: SharedModes,
+    shared: Shared,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -162,11 +224,14 @@ impl AgentHandle {
         let config = AcpAgentConfig::new(&agent.command)
             .args(agent.args.clone())
             .envs(agent.env.clone());
-        let mode = agent.mode.clone();
+        let wanted = Wanted {
+            mode: agent.mode.clone(),
+            options: agent.options.clone(),
+        };
         let (commands_tx, commands_rx) = tokio_mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::channel();
-        let modes = SharedModes::default();
-        let session_modes = modes.clone();
+        let shared = Shared::default();
+        let session_state = shared.clone();
 
         let thread = std::thread::spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
@@ -176,11 +241,11 @@ impl AgentHandle {
                     runtime
                         .block_on(serve(
                             config,
-                            mode,
+                            wanted,
                             cwd,
                             commands_rx,
                             events_tx.clone(),
-                            session_modes,
+                            session_state,
                         ))
                         .map_err(|e| e.to_string())
                 });
@@ -192,7 +257,7 @@ impl AgentHandle {
         Self {
             commands: Some(commands_tx),
             events: events_rx,
-            modes,
+            shared,
             thread: Some(thread),
         }
     }
@@ -200,7 +265,24 @@ impl AgentHandle {
     /// The modes of the current session, once the agent reported them.
     /// `None` also for agents without session modes.
     pub fn modes(&self) -> Option<SessionModes> {
-        self.modes.lock().ok().and_then(|modes| modes.clone())
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|state| state.modes.clone())
+    }
+
+    /// The config options of the current session, once the agent reported
+    /// them. Empty for agents without options.
+    pub fn options(&self) -> Vec<AgentOption> {
+        self.shared
+            .lock()
+            .map(|state| state.options.clone())
+            .unwrap_or_default()
+    }
+
+    /// Sets a config option now, and on every new conversation of this run.
+    pub fn set_option(&self, id: String, value: OptionValue) -> bool {
+        self.send(Command::SetOption(id, value))
     }
 
     /// Sends a prompt. False when the agent is no longer running.
@@ -238,22 +320,22 @@ impl Drop for AgentHandle {
 
 async fn serve(
     config: AcpAgentConfig,
-    mode: Option<String>,
+    mut wanted: Wanted,
     cwd: PathBuf,
     mut commands: tokio_mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
-    modes: SharedModes,
+    shared: Shared,
 ) -> Result<(), agent_client_protocol::Error> {
     let update_events = events.clone();
     let permission_events = events.clone();
     let form_events = events.clone();
-    let updated_modes = modes.clone();
+    let updated_state = shared.clone();
 
     Client
         .builder()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                forward(&update_events, &updated_modes, notification.update);
+                forward(&update_events, &updated_state, notification.update);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -301,7 +383,7 @@ async fn serve(
                 )
                 .block_task()
                 .await?;
-                let mut session = open_session(&cx, &cwd, mode.as_deref(), &events, &modes).await?;
+                let mut session = open_session(&cx, &cwd, &wanted, &events, &shared).await?;
 
                 while let Some(command) = commands.recv().await {
                     match command {
@@ -310,8 +392,11 @@ async fn serve(
                             let _ = events.send(Event::TurnEnd(stop_reason));
                         }
                         Command::NewSession(dir) => {
-                            session =
-                                open_session(&cx, &dir, mode.as_deref(), &events, &modes).await?;
+                            session = open_session(&cx, &dir, &wanted, &events, &shared).await?;
+                        }
+                        Command::SetOption(id, value) => {
+                            wanted.options.insert(id.clone(), value.clone());
+                            set_option(&cx, &session, &id, &value, &events, &shared).await;
                         }
                         Command::Cancel => {}
                     }
@@ -400,18 +485,19 @@ async fn prompt(
     }
 }
 
-/// Creates a session and, when `mode` is set, switches the agent to it.
+/// Creates a session, then sets the wanted mode and options.
 async fn open_session(
     cx: &ConnectionTo<Agent>,
     cwd: &Path,
-    mode: Option<&str>,
+    wanted: &Wanted,
     events: &mpsc::Sender<Event>,
-    shared: &SharedModes,
+    shared: &Shared,
 ) -> Result<SessionId, agent_client_protocol::Error> {
     let response = cx
         .send_request(NewSessionRequest::new(cwd))
         .block_task()
         .await?;
+    let session = response.session_id.clone();
 
     let mut modes = response.modes.as_ref().map(|modes| SessionModes {
         current: modes.current_mode_id.to_string(),
@@ -421,9 +507,13 @@ async fn open_session(
             .map(|mode| mode.id.to_string())
             .collect(),
     });
+    let options = AgentOption::list(response.config_options.as_deref().unwrap_or_default());
+    let mode_option = options.iter().any(|option| option.id == "mode");
 
-    match (mode, &mut modes) {
+    match (wanted.mode.as_deref(), &mut modes) {
         (None, _) => {}
+        // No session modes, but a `mode` config option (Kilo): set it below.
+        (Some(_), None) if mode_option => {}
         (Some(mode), None) => {
             let _ = events.send(Event::Notice(format!(
                 "the agent has no session modes, `mode = \"{mode}\"` is ignored"
@@ -432,7 +522,7 @@ async fn open_session(
         (Some(mode), Some(modes)) if modes.current == mode => {}
         (Some(mode), Some(modes)) if modes.available.iter().any(|m| m == mode) => {
             cx.send_request(SetSessionModeRequest::new(
-                response.session_id.clone(),
+                session.clone(),
                 mode.to_string(),
             ))
             .block_task()
@@ -448,19 +538,90 @@ async fn open_session(
         }
     }
 
-    if let Ok(mut shared) = shared.lock() {
-        *shared = modes;
+    if let Ok(mut state) = shared.lock() {
+        *state = SessionState { modes, options };
     }
-    Ok(response.session_id)
+
+    if let Some(mode) = &wanted.mode
+        && mode_option
+        && response.modes.is_none()
+    {
+        let value = OptionValue::Text(mode.clone());
+        set_option(cx, &session, "mode", &value, events, shared).await;
+    }
+    for (id, value) in &wanted.options {
+        set_option(cx, &session, id, value, events, shared).await;
+    }
+    Ok(session)
 }
 
-fn forward(events: &mpsc::Sender<Event>, modes: &SharedModes, update: SessionUpdate) {
+/// Sets one config option, after checking the agent offers it. Problems are
+/// notices: a wrong option never ends the session.
+async fn set_option(
+    cx: &ConnectionTo<Agent>,
+    session: &SessionId,
+    id: &str,
+    value: &OptionValue,
+    events: &mpsc::Sender<Event>,
+    shared: &Shared,
+) {
+    let options = shared
+        .lock()
+        .map(|state| state.options.clone())
+        .unwrap_or_default();
+    let notice = |message: String| {
+        let _ = events.send(Event::Notice(message));
+    };
+    let Some(option) = options.iter().find(|option| option.id == id) else {
+        let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
+        return notice(if ids.is_empty() {
+            format!("the agent has no options, `{id}` is ignored")
+        } else {
+            format!(
+                "the agent has no `{id}` option (it offers {})",
+                ids.join(", ")
+            )
+        });
+    };
+    let text = value.to_string();
+    if option.current == text {
+        return;
+    }
+    if !option.values.contains(&text) {
+        return notice(format!(
+            "`{id}` has no value `{text}` (it offers {}), it stays `{}`",
+            option.values.join(", "),
+            option.current
+        ));
+    }
+    let value = match value {
+        OptionValue::Bool(value) => SessionConfigOptionValue::boolean(*value),
+        OptionValue::Text(value) => SessionConfigOptionValue::value_id(value.clone()),
+    };
+    let request = SetSessionConfigOptionRequest::new(session.clone(), id.to_string(), value);
+    match cx.send_request(request).block_task().await {
+        Ok(response) => {
+            if let Ok(mut state) = shared.lock() {
+                state.options = AgentOption::list(&response.config_options);
+            }
+        }
+        Err(e) => notice(format!("the agent refused `{id} = {text}`: {e}")),
+    }
+}
+
+fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate) {
     let event = match update {
         SessionUpdate::CurrentModeUpdate(update) => {
-            if let Ok(mut modes) = modes.lock()
-                && let Some(modes) = modes.as_mut()
+            if let Ok(mut state) = shared.lock()
+                && let Some(modes) = state.modes.as_mut()
             {
                 modes.current = update.current_mode_id.to_string();
+            }
+            return;
+        }
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            if let Ok(mut state) = shared.lock() {
+                state.options = AgentOption::list(&update.config_options);
             }
             return;
         }
@@ -497,6 +658,7 @@ mod tests {
             args,
             env: Default::default(),
             mode: mode.map(str::to_string),
+            options: Default::default(),
         }
     }
 
@@ -787,6 +949,122 @@ mod tests {
                 available: vec!["default".into(), "plan".into(), "auto".into()],
             })
         );
+    }
+
+    fn start_with_options(
+        mode: Option<&str>,
+        options: &[(&str, OptionValue)],
+        extra: &[&str],
+        cwd: &Path,
+    ) -> AgentHandle {
+        let mut args = vec![FAKE_AGENT.to_string()];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        let mut agent = fake_agent(mode, args);
+        agent.options = options
+            .iter()
+            .map(|(id, value)| (id.to_string(), value.clone()))
+            .collect();
+        AgentHandle::start(&agent, cwd.to_path_buf())
+    }
+
+    fn text(value: &str) -> OptionValue {
+        OptionValue::Text(value.to_string())
+    }
+
+    #[test]
+    fn configured_options_are_set_on_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start_with_options(
+            None,
+            &[("effort", text("low")), ("fast", OptionValue::Bool(true))],
+            &[],
+            dir.path(),
+        );
+
+        let (reply, _) = turn(&agent, "opts");
+
+        assert_eq!(
+            reply,
+            r#"{"effort": "low", "fast": true, "mode": "default", "model": "one"}"#
+        );
+        let effort = agent
+            .options()
+            .into_iter()
+            .find(|o| o.id == "effort")
+            .unwrap();
+        assert_eq!(effort.current, "low");
+        assert_eq!(effort.values, ["low", "high"]);
+    }
+
+    #[test]
+    fn unknown_options_and_values_are_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start_with_options(
+            None,
+            &[("speed", text("max")), ("model", text("three"))],
+            &[],
+            dir.path(),
+        );
+
+        let mut notices = Vec::new();
+        for _ in 0..2 {
+            match next(&agent) {
+                Event::Notice(message) => notices.push(message),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        notices.sort();
+
+        assert_eq!(
+            notices,
+            [
+                "`model` has no value `three` (it offers one, two), it stays `one`",
+                "the agent has no `speed` option (it offers effort, model, fast)",
+            ]
+        );
+        let (reply, _) = turn(&agent, "opts");
+        assert!(reply.contains(r#""model": "one""#), "{reply}");
+    }
+
+    #[test]
+    fn an_option_set_during_the_run_applies_now_and_to_new_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start_with_options(None, &[], &[], dir.path());
+        turn(&agent, "hi");
+
+        assert!(agent.set_option("model".to_string(), text("two")));
+        let (reply, _) = turn(&agent, "opts");
+        assert!(reply.contains(r#""model": "two""#), "{reply}");
+
+        assert!(agent.new_session(dir.path().to_path_buf()));
+        let (reply, _) = turn(&agent, "opts");
+        assert!(reply.contains(r#""model": "two""#), "{reply}");
+    }
+
+    #[test]
+    fn option_changes_by_the_agent_are_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start_with_options(None, &[("effort", text("low"))], &[], dir.path());
+
+        turn(&agent, "bump");
+
+        let effort = agent
+            .options()
+            .into_iter()
+            .find(|o| o.id == "effort")
+            .unwrap();
+        assert_eq!(effort.current, "high");
+    }
+
+    #[test]
+    fn mode_is_set_through_a_mode_option_when_there_are_no_session_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start_with_options(Some("ask"), &[], &["--kilo"], dir.path());
+
+        let (reply, _) = turn(&agent, "opts");
+
+        assert!(reply.contains(r#""mode": "ask""#), "{reply}");
+        assert!(agent.modes().is_none());
     }
 
     #[test]

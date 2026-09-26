@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::acp::AgentHandle;
-use crate::config::{Agent, Config, PromptStyle};
+use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, route};
 use crate::{config, project, setup, shell, turn, ui};
 
@@ -26,6 +26,8 @@ Control commands:
   #agent [list]   show the active agent, or list the configured ones
   #agent <name>   switch to another agent (new conversation)
   #config [sample] show the configuration files, or print the full sample
+  #options        show the agent's options (effort, model, ...)
+  #options <id> <value>  set one until you leave Parolsh
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
   #exit           leave Parolsh";
@@ -150,6 +152,51 @@ impl App {
         }
     }
 
+    fn options_command(&self, args: &str) -> Result<()> {
+        let Some(agent) = &self.agent else {
+            anyhow::bail!("{}", no_agent());
+        };
+        let options = agent.options();
+        if args.is_empty() {
+            if options.is_empty() {
+                println!("The agent offers no options (or its session has not started yet).");
+            }
+            for option in &options {
+                let values: Vec<String> = option
+                    .values
+                    .iter()
+                    .map(|v| {
+                        if *v == option.current {
+                            format!("{v}*")
+                        } else {
+                            v.clone()
+                        }
+                    })
+                    .collect();
+                println!("  {:<18} {}", option.id, values.join(", "));
+            }
+            return Ok(());
+        }
+
+        let Some((id, value)) = args.split_once(char::is_whitespace) else {
+            anyhow::bail!("usage: #options <id> <value>");
+        };
+        let value = value.trim();
+        let Some(option) = options.iter().find(|option| option.id == id) else {
+            let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
+            anyhow::bail!("no option `{id}`. The agent offers: {}", ids.join(", "));
+        };
+        if !option.values.iter().any(|v| v == value) {
+            anyhow::bail!(
+                "`{id}` has no value `{value}`. Values: {}",
+                option.values.join(", ")
+            );
+        }
+        agent.set_option(id.to_string(), OptionValue::parse(value));
+        println!("{id} = {value}, until you leave Parolsh.");
+        Ok(())
+    }
+
     fn config_command(&self, args: &str) -> Result<()> {
         match args {
             "" => {
@@ -209,6 +256,7 @@ impl App {
             "project" => self.project(args),
             "prompt" => self.prompt_command(args),
             "config" => self.config_command(args),
+            "options" => self.options_command(args),
             _ => Err(anyhow::anyhow!("unknown command `#{name}`, see #help")),
         };
         match result {
@@ -255,7 +303,7 @@ impl App {
             eprintln!("parolsh: {}", no_agent());
             return 1;
         };
-        match turn::run(agent, text) {
+        match turn::run(agent, text, self.config.thinking) {
             turn::Outcome::Finished => 0,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
