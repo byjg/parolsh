@@ -409,6 +409,15 @@ the modes they offer once running.
 The full list is at
 [agentclientprotocol.com](https://agentclientprotocol.com/get-started/agents).
 
+## When an agent cannot start
+
+*cannot start `claude-agent-acp`: not found on PATH* means Parolsh does not
+see the agent's program. npm installs agents in a directory only your shell
+adds to `PATH` (with nvm, `~/.nvm/versions/node/<version>/bin`), so it happens
+when Parolsh was not started from a terminal. `shell_env` (see
+[Shell environment](configuration.md#shell-environment)) imports your shell's
+environment for that case; `shell_env = "always"` forces it.
+
 ## Lifecycle
 
 - **Start:** Parolsh starts the default agent when it starts, and opens a

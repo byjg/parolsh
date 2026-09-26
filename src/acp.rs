@@ -222,6 +222,7 @@ impl AgentHandle {
     /// Starts the agent and opens a session in `cwd`, in the background:
     /// this returns immediately, and prompts sent meanwhile wait for it.
     pub fn start(agent: &config::Agent, cwd: PathBuf) -> Self {
+        let missing = missing_command(&agent.command);
         let config = AcpAgentConfig::new(&agent.command)
             .args(agent.args.clone())
             .envs(agent.env.clone());
@@ -235,6 +236,10 @@ impl AgentHandle {
         let session_state = shared.clone();
 
         let thread = std::thread::spawn(move || {
+            if let Some(message) = missing {
+                let _ = events_tx.send(Event::Error(message));
+                return;
+            }
             let result = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .map_err(|e| e.to_string())
@@ -323,6 +328,24 @@ impl Drop for AgentHandle {
             let _ = thread.join();
         }
     }
+}
+
+/// Why `command` cannot be started, or `None` when it can be found.
+fn missing_command(command: &str) -> Option<String> {
+    let path = std::env::var("PATH").ok();
+    if crate::shellenv::find_command(command, path.as_deref()).is_some() {
+        return None;
+    }
+    let place = if command.contains('/') {
+        "no executable file at that path"
+    } else {
+        "not found on PATH"
+    };
+    Some(format!(
+        "cannot start `{command}`: {place}. Agents installed with npm under nvm are only on \
+         the PATH your ~/.bashrc sets up: start Parolsh from a terminal, or set \
+         shell_env = \"always\" in the configuration (see #config)."
+    ))
 }
 
 async fn serve(
@@ -1102,6 +1125,14 @@ mod tests {
             dir.path().to_path_buf(),
         );
 
-        assert!(matches!(next(&agent), Event::Error(_)));
+        match next(&agent) {
+            Event::Error(message) => assert!(
+                message.starts_with(
+                    "cannot start `/nonexistent/agent`: no executable file at that path."
+                ),
+                "{message}"
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

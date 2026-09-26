@@ -6,6 +6,11 @@ Parolsh started from a user's terminal. Prints what the terminal showed,
 without escape sequences.
 
 Usage: job_shell.py LINE...
+       job_shell.py exec:PROGRAM LINE...
+
+With exec:PROGRAM, PROGRAM runs directly on the pseudo-terminal instead of
+bash, like a program started by a desktop launcher (its parent is not a
+shell).
 
 A LINE starting with "paste:" is pasted instead of typed: "\\n" becomes a line
 break, and, like a terminal, the paste is wrapped in bracketed-paste markers
@@ -18,8 +23,15 @@ import select
 import sys
 import time
 
+args = sys.argv[1:]
+direct = args[0][len("exec:"):] if args and args[0].startswith("exec:") else None
+if direct:
+    args = args[1:]
+
 pid, fd = pty.fork()
 if pid == 0:
+    if direct:
+        os.execv(direct, [direct])
     os.execvp("bash", ["bash", "--norc", "--noprofile", "-i"])
 
 output = b""
@@ -49,7 +61,7 @@ def pump(seconds):
 
 
 pump(0.5)
-for line in sys.argv[1:]:
+for line in args:
     if line.startswith("paste:"):
         text = line[len("paste:"):].replace("\\n", "\n").encode()
         if bracketed:

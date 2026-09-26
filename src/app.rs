@@ -42,8 +42,9 @@ pub struct App {
     agent: Option<AgentHandle>,
     /// Set by `#prompt <name>`, or to fall back when Starship fails.
     prompt_override: Option<PromptStyle>,
-    /// What the first run did, shown once after the banner.
-    setup_notice: Option<String>,
+    /// Shown once after the banner: what the first run did, or why the
+    /// shell environment could not be loaded.
+    notices: Vec<String>,
     /// Outputs of `!+` commands, sent with the next message.
     shared: Vec<Shared>,
     /// Exit code and duration of the last command, for the prompt.
@@ -57,11 +58,13 @@ enum Flow {
 }
 
 impl App {
-    pub fn new(cwd: PathBuf) -> Result<Self> {
+    /// `notices` are shown after the banner, with the first run's.
+    pub fn new(cwd: PathBuf, mut notices: Vec<String>) -> Result<Self> {
         // Before loading: the first run may write the global configuration.
         let search_path = std::env::var("PATH").ok();
-        let setup_notice =
-            config::global_path().and_then(|path| setup::first_run(&path, search_path.as_deref()));
+        notices.extend(
+            config::global_path().and_then(|path| setup::first_run(&path, search_path.as_deref())),
+        );
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
@@ -72,7 +75,7 @@ impl App {
             agent: None,
             prompt_override: None,
             shared: Vec::new(),
-            setup_notice,
+            notices,
             last_status: 0,
             last_duration: Duration::ZERO,
         };
@@ -99,7 +102,7 @@ impl App {
         if ui::is_ansi() {
             self.print_banner();
         }
-        if let Some(notice) = self.setup_notice.take() {
+        for notice in self.notices.drain(..) {
             println!("{notice}");
         }
 
