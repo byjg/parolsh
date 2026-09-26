@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn banner_shows_the_logo_version_agent_and_directory() {
         let text = banner(
-            "0.1.0",
+            "x.y.z",
             Some(BannerAgent {
                 name: "claude",
                 mode: Some("auto"),
@@ -360,7 +360,7 @@ mod tests {
             plain(&text),
             "  ┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻\n\
              \x20 ┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫\n\
-             \x20 ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  0.1.0\n\
+             \x20 ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  x.y.z\n\
              \x20 Speak to your terminal. Natural language first.\n\
              \x20 agent: claude (auto) · ~/projects/wallet · #help\n"
         );
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn banner_without_agent_or_mode() {
         let no_mode = banner(
-            "0.1.0",
+            "x.y.z",
             Some(BannerAgent {
                 name: "kilo",
                 mode: None,
@@ -378,7 +378,7 @@ mod tests {
             Some(Path::new("/home/joao")),
         );
         let no_agent = banner(
-            "0.1.0",
+            "x.y.z",
             None,
             Path::new("/srv"),
             Some(Path::new("/home/joao")),
