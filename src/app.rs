@@ -67,7 +67,9 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let mut editor = Reedline::create();
+        // Bracketed paste: a pasted text with line breaks is one input, not
+        // one Enter per line.
+        let mut editor = Reedline::create().use_bracketed_paste(true);
         if let Some(path) = history_path() {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;

@@ -142,3 +142,30 @@ fn agent_switches_to_another_configured_agent() {
         "{screen}"
     );
 }
+
+/// A pasted text with line breaks is one input: nothing runs until Enter,
+/// then every line runs once. Without bracketed paste, each line break was
+/// an Enter and the rest of the paste was lost.
+#[test]
+fn a_multi_line_paste_is_one_input() {
+    let config = tempfile::tempdir().unwrap();
+
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/job_shell.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_parolsh"))
+        .arg(r"paste:!echo pasted-one\necho pasted-two")
+        .arg("")
+        .arg("#exit")
+        .env("TERM", "xterm-256color")
+        .env("XDG_CONFIG_HOME", config.path())
+        .env("XDG_STATE_HOME", config.path())
+        .output()
+        .unwrap();
+    let screen = String::from_utf8(output.stdout).unwrap();
+
+    assert!(screen.contains("\npasted-one\n"), "{screen}");
+    assert!(screen.contains("\npasted-two\n"), "{screen}");
+}
