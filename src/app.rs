@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::acp::AgentHandle;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, route};
-use crate::{config, project, setup, shell, turn, ui};
+use crate::{config, hints, project, setup, shell, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -84,6 +84,12 @@ impl App {
         // Bracketed paste: a pasted text with line breaks is one input, not
         // one Enter per line.
         let mut editor = Reedline::create().use_bracketed_paste(true);
+        if ui::is_ansi() {
+            // Tips while typing: the color and a hint of where the line goes.
+            editor = editor
+                .with_highlighter(Box::new(hints::InputHighlighter))
+                .with_hinter(Box::new(hints::PrefixHinter));
+        }
         if let Some(path) = history_path() {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;

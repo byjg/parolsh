@@ -19,6 +19,23 @@ character decides, always:
 `find files modified today` is always a question for the agent. To run the
 Unix `find`, type `!find . -mtime -1`.
 
+## While you type
+
+On an ANSI terminal the line shows where it will go before you press Enter:
+
+| Line | Color |
+|---|---|
+| `!command`, `!bash` | yellow |
+| `!+command` | green |
+| `#command` | magenta |
+| `/command` | blue |
+| text for the agent | the terminal's color |
+
+The marker (`!`, `!+`, `#`, `/`) is bold. While the line is only a marker, a
+dim hint says what it does, for example `!+  run a shell command and send its
+output with your next message`. The hint is a tip: the right arrow does not
+insert it into the line.
+
 ## `!command`
 
 The command runs as `bash -ic "<command>"` in Parolsh's current directory.
