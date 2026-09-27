@@ -16,6 +16,8 @@ Prompts:
 
 The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
+  fail   answers the prompt with an error, like Qwen's loop protection
+  die    exits without answering
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
@@ -149,6 +151,13 @@ def prompt(request):
                 "sessionUpdate": "agent_thought_chunk",
                 "content": {"type": "text", "text": chunk}}}})
         say(session_id, "done")
+    elif text == "fail":
+        send({"id": request["id"], "error": {
+            "code": -32603, "message": "Tool-call loop protection stopped this turn.",
+            "data": {"code": "LOOP_DETECTED"}}})
+        return
+    elif text == "die":
+        sys.exit(1)
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "slow":

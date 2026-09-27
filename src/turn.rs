@@ -24,6 +24,8 @@ pub fn install_interrupt_handler() -> Result<(), ctrlc::Error> {
 /// What happened to the agent during the turn.
 pub enum Outcome {
     Finished,
+    /// The agent answered with an error, and keeps running.
+    Failed,
     AgentStopped,
 }
 
@@ -98,6 +100,11 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
                     eprintln!("({message})");
                 }
                 return Outcome::Finished;
+            }
+            Event::TurnFailed(message) => {
+                out.finish();
+                eprintln!("parolsh: {message}");
+                return Outcome::Failed;
             }
         }
     }
