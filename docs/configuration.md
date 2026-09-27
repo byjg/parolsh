@@ -26,7 +26,7 @@ a ready block for each agent; the ones not installed stay commented out.
 `#config` shows the files in use and whether they exist:
 
 ```text
-[claude] ~/projects/wallet ❯ #config
+[claude] ~/projects/wallet ✦ #config
 Global:  /home/joao/.config/parolsh/config.toml
 Project: /home/joao/projects/wallet/.parolsh/config.toml  (not found)
 #config sample prints every option, with a block for each agent.
@@ -100,8 +100,8 @@ option without repeating the others.
 
 | `prompt` | Looks like |
 |---|---|
-| `parolsh` (default) | `[claude] ~/projects/wallet ❯ ` |
-| `minimal` | `❯ ` |
+| `parolsh` (default) | `[claude] ~/projects/wallet ✦ ` |
+| `minimal` | `✦ ` |
 | `starship` | Your [Starship](https://starship.rs) prompt, from `~/.config/starship.toml` |
 
 The `parolsh` prompt shows:
@@ -111,8 +111,10 @@ The `parolsh` prompt shows:
 - the current directory, with `~` for your home, and only its last two
   directories: `~/Projects/opensource/byjg/parolsh` shows as
   `~/…/byjg/parolsh`;
-- `❯`, red when the last `!` command, agent turn or `#` command failed. The
-  `minimal` `❯` turns red too.
+- where plain text goes: `✦` to the agent, `❯` to the shell (see
+  [Shell mode](input-routing.md#shell-mode)). It is red when the last `!`
+  command, agent turn or `#` command failed. `minimal` shows only this
+  symbol.
 
 `#prompt <name>` switches until you leave Parolsh; `#prompt` prints the style
 in use.
@@ -136,6 +138,9 @@ Starship does not know Parolsh, but it can show the agent in use. Parolsh sets
 format = "with [🤖 $env_value]($style) "
 style = "bold purple"
 ```
+
+`PAROLSH_INPUT` is `agent` or `shell`: where plain text goes (see
+[Shell mode](input-routing.md#shell-mode)).
 
 Your bash `PS1` is not used: Parolsh is not bash and cannot evaluate it.
 Starship is configured outside the shell, which is why it works in both.

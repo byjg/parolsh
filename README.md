@@ -19,11 +19,14 @@ What you type goes to an AI agent through the
 one `!` away.
 
 ```text
-[claude] ~/projects/wallet ❯ list the 10 most recently modified files     ← the agent
-[claude] ~/projects/wallet ❯ !git status                                  ← bash
-[claude] ~/projects/wallet ❯ !bash                                        ← a full Bash session
-[claude] ~/projects/wallet ❯ #cd ~/projects/billing                       ← Parolsh itself
+[claude] ~/projects/wallet ✦ list the 10 most recently modified files     ← the agent
+[claude] ~/projects/wallet ✦ !git status                                  ← bash
+[claude] ~/projects/wallet ✦ !bash                                        ← a full Bash session
+[claude] ~/projects/wallet ✦ #cd ~/projects/billing                       ← Parolsh itself
 ```
+
+`!` alone locks plain text to bash (the prompt shows `❯`), and `?` alone
+unlocks it back to the agent (`✦`).
 
 It runs inside your usual terminal emulator, prints to the normal scrollback
 (no full-screen UI), and works with any ACP agent: Claude Code, Codex, Qwen

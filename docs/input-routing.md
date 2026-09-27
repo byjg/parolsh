@@ -10,14 +10,44 @@ character decides, always:
 | Input | Route |
 |---|---|
 | `text` | The active ACP agent |
+| `?text` | The active ACP agent |
 | `/command` | The active ACP agent, unchanged |
 | `!command` | The configured shell, default `bash -ic` |
 | `!+command` | The same, and its output goes with your next message |
 | `!bash` | An interactive Bash session |
 | `#command` | Parolsh itself |
+| `!` alone | Lock: plain text goes to the shell, see [Shell mode](#shell-mode) |
+| `?` alone | Unlock: plain text goes to the agent again |
 
 `find files modified today` is always a question for the agent. To run the
 Unix `find`, type `!find . -mtime -1`.
+
+## Shell mode
+
+When you run many commands in a row, `!` alone locks plain text to the
+shell, and `?` alone unlocks it. The prompt's last symbol shows where plain
+text goes:
+
+```text
+[claude] ~/projects/wallet ✦ !
+[claude] ~/projects/wallet ❯ git status             ← bash
+[claude] ~/projects/wallet ❯ ?why is main behind?   ← the agent
+[claude] ~/projects/wallet ❯ ?
+[claude] ~/projects/wallet ✦ what changed today?    ← the agent
+```
+
+| Input | Agent mode `✦` (default) | Shell mode `❯` |
+|---|---|---|
+| `text` | the agent | the shell, like `!text` |
+| `?text` | the agent | the agent |
+| `/command` | the agent | the shell (`/usr/bin/ls` runs); `?/command` reaches the agent |
+| `!command`, `!+command`, `!bash` | the shell | the same |
+| `#command` | Parolsh | Parolsh |
+
+Unlike `!bash`, shell mode stays in Parolsh: the agent is a `?` away, `!+`
+shares output with it, and `#` commands work. Each command is still
+independent (see [`!command`](#command)). The mode lasts until you change it
+or leave Parolsh.
 
 ## While you type
 
@@ -31,14 +61,16 @@ On an ANSI terminal the line shows where it will go before you press Enter:
 | `/command` | blue |
 | text for the agent | the terminal's color |
 
-The marker (`!`, `!+`, `#`, `/`) is bold. While the line is only a marker, a
+In shell mode, plain text is a shell command, so it is yellow too. The marker
+(`!`, `!+`, `#`, `/`) is bold. While the line is only a marker, a
 dim hint says what it does, for example `!+  run a shell command and send its
 output with your next message`. The hint is a tip: the right arrow does not
 insert it into the line.
 
 ### Tab completion
 
-On `!command` and `!+command` lines, `Tab` completes the word at the cursor,
+On `!command` and `!+command` lines, and plain lines in shell mode, `Tab`
+completes the word at the cursor,
 as bash does: a single match goes into the line, several fill in what they
 have in common, and the next `Tab` shows them in a menu (`Tab` and
 `Shift+Tab` move through it, `Enter` picks one).
@@ -53,7 +85,7 @@ have in common, and the next `Tab` shows them in a menu (`Tab` and
 - A command's own arguments (git branches, `--flags`, ssh hosts) do not
   complete. `!bash` has your full bash completion.
 
-Text for the agent, `/command` and `#command` have no completion.
+Text for the agent, `?text`, `/command` and `#command` have no completion.
 
 ## `!command`
 
@@ -93,11 +125,11 @@ Runs the command like `!command`, shows its output, and keeps it for the
 agent: it is sent with your next message, then forgotten.
 
 ```text
-[claude] ~/projects/wallet ❯ !+docker ps
+[claude] ~/projects/wallet ✦ !+docker ps
 CONTAINER ID   IMAGE        STATUS
 ...
 (output of `docker ps` goes with your next message)
-[claude] ~/projects/wallet ❯ which of these containers looks unhealthy?
+[claude] ~/projects/wallet ✦ which of these containers looks unhealthy?
 ```
 
 The agent answers from that output instead of running the command again.
@@ -122,7 +154,7 @@ in before: changes made inside the session stay there.
 ## Text
 
 Anything that does not start with `!`, `#` or `/` is a question for the
-agent. The answer is printed as it arrives, with a status line showing what
+agent, in agent mode (in shell mode, start it with `?`). The answer is printed as it arrives, with a status line showing what
 the agent is doing (see [During a turn](agents.md#during-a-turn)). `Ctrl+C`
 cancels the turn.
 

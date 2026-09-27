@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::acp::Detail;
+use crate::input::Mode;
 
 const LOGO: [&str; 3] = [
     "┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻",
@@ -53,12 +54,15 @@ pub struct PromptContext<'a> {
     /// Exit code of the last `!` command or agent turn.
     pub status: i32,
     pub duration: Duration,
+    /// Where plain text goes.
+    pub mode: Mode,
     pub agent: Option<BannerAgent<'a>>,
 }
 
 impl Prompt {
-    /// The agent that answers, the directory and `❯`, as in
-    /// `[claude] ~/…/byjg/parolsh ❯ `. The `❯` is red after a failure.
+    /// The agent that answers, the directory and where plain text goes, as
+    /// in `[claude] ~/…/byjg/parolsh ✦ `: `✦` to the agent, `❯` to the
+    /// shell. The symbol is red after a failure.
     pub fn parolsh(context: &PromptContext, home: Option<&Path>, ansi: bool) -> Self {
         let agent = context
             .agent
@@ -73,16 +77,16 @@ impl Prompt {
         Self {
             left,
             right: String::new(),
-            indicator: indicator(" ❯ ", context.status, ansi),
+            indicator: format!(" {}", indicator(context, ansi)),
         }
     }
 
-    /// Only `❯`, red after a failure.
-    pub fn minimal(status: i32, ansi: bool) -> Self {
+    /// Only where plain text goes: `✦` or `❯`.
+    pub fn minimal(context: &PromptContext, ansi: bool) -> Self {
         Self {
             left: String::new(),
             right: String::new(),
-            indicator: indicator("❯ ", status, ansi),
+            indicator: indicator(context, ansi),
         }
     }
 
@@ -103,7 +107,14 @@ impl Prompt {
                 // Empty: plain ANSI, without the markers bash or zsh need.
                 .env("STARSHIP_SHELL", "")
                 .env_remove("PAROLSH_AGENT")
-                .env_remove("PAROLSH_MODE");
+                .env_remove("PAROLSH_MODE")
+                .env(
+                    "PAROLSH_INPUT",
+                    match context.mode {
+                        Mode::Agent => "agent",
+                        Mode::Shell => "shell",
+                    },
+                );
             if let Some(agent) = &context.agent {
                 command.env("PAROLSH_AGENT", agent.name);
                 if let Some(mode) = agent.mode {
@@ -331,9 +342,14 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// `symbol` in red when the last command failed.
-fn indicator(symbol: &str, status: i32, ansi: bool) -> String {
-    if ansi && status != 0 {
+/// Where plain text goes: `✦ ` to the agent, `❯ ` to the shell. Red when
+/// the last command failed.
+fn indicator(context: &PromptContext, ansi: bool) -> String {
+    let symbol = match context.mode {
+        Mode::Agent => "✦ ",
+        Mode::Shell => "❯ ",
+    };
+    if ansi && context.status != 0 {
         format!("{RED}{symbol}{RESET}")
     } else {
         symbol.to_string()
@@ -452,7 +468,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\n\
-             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}\"\n",
+             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT\"\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
@@ -462,6 +478,7 @@ mod tests {
             cwd: dir.path(),
             status: 3,
             duration: Duration::from_millis(1500),
+            mode: Mode::Shell,
             agent: Some(BannerAgent {
                 name: "codex",
                 mode: Some("agent"),
@@ -475,13 +492,13 @@ mod tests {
         assert_eq!(
             prompt.left,
             format!(
-                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent\n"
+                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell\n"
             )
         );
         assert_eq!(
             prompt.right,
             format!(
-                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent"
+                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell"
             )
         );
         assert_eq!(prompt.indicator, "");
@@ -492,6 +509,7 @@ mod tests {
             cwd,
             status,
             duration: Duration::ZERO,
+            mode: Mode::Agent,
             agent: agent.map(|name| BannerAgent { name, mode: None }),
         }
     }
@@ -504,7 +522,19 @@ mod tests {
         let prompt = Prompt::parolsh(&context(cwd, 0, Some("claude")), Some(home), false);
 
         assert_eq!(prompt.left, "[claude] ~/…/byjg/parolsh");
-        assert_eq!(prompt.indicator, " ❯ ");
+        assert_eq!(prompt.indicator, " ✦ ");
+    }
+
+    #[test]
+    fn the_symbol_says_where_plain_text_goes() {
+        let cwd = Path::new("/tmp");
+        let mut shell = context(cwd, 0, Some("claude"));
+        shell.mode = Mode::Shell;
+
+        assert_eq!(Prompt::parolsh(&shell, None, false).indicator, " ❯ ");
+        assert_eq!(Prompt::minimal(&shell, false).indicator, "❯ ");
+        let agent = context(cwd, 0, Some("claude"));
+        assert_eq!(Prompt::minimal(&agent, false).indicator, "✦ ");
     }
 
     #[test]
@@ -520,14 +550,15 @@ mod tests {
         let failed = Prompt::parolsh(&context(cwd, 1, Some("claude")), None, true);
         let fine = Prompt::parolsh(&context(cwd, 0, Some("claude")), None, true);
 
-        assert_eq!(failed.indicator, format!("{RED} ❯ {RESET}"));
-        assert_eq!(fine.indicator, " ❯ ");
+        assert_eq!(failed.indicator, format!(" {RED}✦ {RESET}"));
+        assert_eq!(fine.indicator, " ✦ ");
         assert_eq!(plain(&failed.left), "[claude] /tmp");
+        let failed = context(cwd, 2, None);
         assert_eq!(
-            Prompt::minimal(2, true).indicator,
-            format!("{RED}❯ {RESET}")
+            Prompt::minimal(&failed, true).indicator,
+            format!("{RED}✦ {RESET}")
         );
-        assert_eq!(Prompt::minimal(2, false).indicator, "❯ ");
+        assert_eq!(Prompt::minimal(&failed, false).indicator, "✦ ");
     }
 
     #[test]
@@ -550,6 +581,7 @@ mod tests {
             cwd: Path::new("/"),
             status: 0,
             duration: Duration::ZERO,
+            mode: Mode::Agent,
             agent: None,
         };
 

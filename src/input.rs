@@ -1,5 +1,35 @@
 //! Deterministic input routing: no classifier guesses what the user meant.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Where plain text goes. `!` alone locks it to the shell, `?` alone
+/// unlocks it back to the agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Agent,
+    Shell,
+}
+
+/// The mode, shared with the line editor's colors, hints and completion.
+#[derive(Debug, Clone, Default)]
+pub struct SharedMode(Arc<AtomicBool>);
+
+impl SharedMode {
+    pub fn get(&self) -> Mode {
+        if self.0.load(Ordering::Relaxed) {
+            Mode::Shell
+        } else {
+            Mode::Agent
+        }
+    }
+
+    pub fn set(&self, mode: Mode) {
+        self.0.store(mode == Mode::Shell, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Input {
     Empty,
@@ -16,25 +46,26 @@ pub enum Input {
         name: String,
         args: String,
     },
+    /// `!` or `?` alone: plain text goes to the shell, or to the agent.
+    Lock(Mode),
 }
 
-pub fn route(line: &str) -> Input {
+pub fn route(line: &str, mode: Mode) -> Input {
     let line = line.trim();
 
-    if line.is_empty() {
-        return Input::Empty;
+    match line {
+        "" => return Input::Empty,
+        "!" => return Input::Lock(Mode::Shell),
+        "?" => return Input::Lock(Mode::Agent),
+        _ => {}
     }
 
     if let Some(command) = line.strip_prefix('!') {
-        let command = command.trim();
-        if let Some(shared) = command.strip_prefix('+') {
-            return Input::Share(shared.trim().to_string());
-        }
-        return match command {
-            "" => Input::Empty,
-            "bash" => Input::Bash,
-            command => Input::Shell(command.to_string()),
-        };
+        return shell(command);
+    }
+
+    if let Some(text) = line.strip_prefix('?') {
+        return Input::Agent(text.trim().to_string());
     }
 
     if let Some(control) = line.strip_prefix('#') {
@@ -47,12 +78,37 @@ pub fn route(line: &str) -> Input {
         };
     }
 
-    Input::Agent(line.to_string())
+    match mode {
+        Mode::Agent => Input::Agent(line.to_string()),
+        // Plain text is a `!` line.
+        Mode::Shell => shell(line),
+    }
+}
+
+/// What follows `!`: a command, `+command` or `bash`.
+fn shell(command: &str) -> Input {
+    let command = command.trim();
+    if let Some(shared) = command.strip_prefix('+') {
+        return Input::Share(shared.trim().to_string());
+    }
+    match command {
+        "bash" => Input::Bash,
+        command => Input::Shell(command.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Routes in agent mode, the default.
+    fn route(line: &str) -> Input {
+        super::route(line, Mode::Agent)
+    }
+
+    fn shell_mode(line: &str) -> Input {
+        super::route(line, Mode::Shell)
+    }
 
     fn control(name: &str, args: &str) -> Input {
         Input::Control {
@@ -127,6 +183,43 @@ mod tests {
     fn blank_input_is_empty() {
         assert_eq!(route(""), Input::Empty);
         assert_eq!(route("   "), Input::Empty);
-        assert_eq!(route("!"), Input::Empty);
+        assert_eq!(shell_mode(""), Input::Empty);
+    }
+
+    #[test]
+    fn bang_alone_locks_to_the_shell_and_question_mark_unlocks() {
+        for line in ["!", " ! "] {
+            assert_eq!(route(line), Input::Lock(Mode::Shell));
+            assert_eq!(shell_mode(line), Input::Lock(Mode::Shell));
+        }
+        for line in ["?", " ? "] {
+            assert_eq!(route(line), Input::Lock(Mode::Agent));
+            assert_eq!(shell_mode(line), Input::Lock(Mode::Agent));
+        }
+    }
+
+    #[test]
+    fn in_shell_mode_plain_text_is_a_shell_command() {
+        assert_eq!(shell_mode("git status"), Input::Shell("git status".into()));
+        assert_eq!(
+            shell_mode("/usr/bin/ls"),
+            Input::Shell("/usr/bin/ls".into())
+        );
+        assert_eq!(shell_mode("bash"), Input::Bash);
+        assert_eq!(shell_mode("!ls"), Input::Shell("ls".into()));
+        assert_eq!(shell_mode("!+docker ps"), Input::Share("docker ps".into()));
+        assert_eq!(shell_mode("#new"), control("new", ""));
+    }
+
+    #[test]
+    fn question_mark_asks_the_agent_in_any_mode() {
+        for route in [route, shell_mode] {
+            assert_eq!(route("?why"), Input::Agent("why".into()));
+            assert_eq!(
+                route("? why did it fail"),
+                Input::Agent("why did it fail".into())
+            );
+            assert_eq!(route("?/compact"), Input::Agent("/compact".into()));
+        }
     }
 }

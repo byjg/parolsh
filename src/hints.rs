@@ -6,16 +6,18 @@
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, Hinter, History, StyledText};
 
-use crate::input::{Input, route};
+use crate::input::{Input, Mode, SharedMode, route};
 
 /// Colors the marker (`!`, `!+`, `#`, `/`) in bold and the rest of the line
 /// in the same color. Text for the agent keeps the terminal's color.
-pub struct InputHighlighter;
+pub struct InputHighlighter {
+    pub mode: SharedMode,
+}
 
 impl Highlighter for InputHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::new();
-        let Some(color) = color(line) else {
+        let Some(color) = color(line, self.mode.get()) else {
             styled.push((Style::new(), line.to_string()));
             return styled;
         };
@@ -29,17 +31,14 @@ impl Highlighter for InputHighlighter {
 }
 
 /// The color of the line's destination; `None` for text to the agent.
-fn color(line: &str) -> Option<Color> {
-    // A bare `!` runs nothing yet, but the line is already a shell command.
-    if line.trim() == "!" {
-        return Some(Color::Yellow);
-    }
-    match route(line) {
-        Input::Shell(_) | Input::Bash => Some(Color::Yellow),
+fn color(line: &str, mode: Mode) -> Option<Color> {
+    match route(line, mode) {
+        // A bare `!` runs nothing yet, but the line is already a shell command.
+        Input::Shell(_) | Input::Bash | Input::Lock(Mode::Shell) => Some(Color::Yellow),
         Input::Share(_) => Some(Color::Green),
         Input::Control { .. } => Some(Color::Magenta),
         Input::Agent(text) if text.starts_with('/') => Some(Color::Blue),
-        Input::Agent(_) | Input::Empty => None,
+        Input::Agent(_) | Input::Empty | Input::Lock(Mode::Agent) => None,
     }
 }
 
@@ -56,8 +55,9 @@ fn marker(line: &str) -> &str {
 
 /// While the line is only a marker, says in dim text what it does. The hint
 /// cannot be accepted into the line: it is a tip, not a completion.
-#[derive(Default)]
-pub struct PrefixHinter;
+pub struct PrefixHinter {
+    pub mode: SharedMode,
+}
 
 impl Hinter for PrefixHinter {
     fn handle(
@@ -68,7 +68,7 @@ impl Hinter for PrefixHinter {
         use_ansi_coloring: bool,
         _cwd: &str,
     ) -> String {
-        let hint = hint(line);
+        let hint = hint(line, self.mode.get());
         if hint.is_empty() || !use_ansi_coloring {
             return hint.to_string();
         }
@@ -85,12 +85,15 @@ impl Hinter for PrefixHinter {
 }
 
 /// What a bare marker does.
-fn hint(line: &str) -> &'static str {
-    match line.trim() {
-        "!" => "  run a shell command (!bash opens a Bash session)",
-        "!+" => "  run a shell command and send its output with your next message",
-        "#" => "  Parolsh command: #help lists them",
-        "/" => "  command for the agent, sent as typed",
+fn hint(line: &str, mode: Mode) -> &'static str {
+    match (line.trim(), mode) {
+        ("!", Mode::Agent) => "  run a shell command · Enter alone locks plain text to bash",
+        ("!", Mode::Shell) => "  run a shell command (!bash opens a Bash session)",
+        ("?", Mode::Agent) => "  ask the agent",
+        ("?", Mode::Shell) => "  ask the agent · Enter alone sends plain text back to the agent",
+        ("!+", _) => "  run a shell command and send its output with your next message",
+        ("#", _) => "  Parolsh command: #help lists them",
+        ("/", Mode::Agent) => "  command for the agent, sent as typed",
         _ => "",
     }
 }
@@ -100,8 +103,24 @@ mod tests {
     use super::*;
     use reedline::FileBackedHistory;
 
+    fn highlighter(mode: Mode) -> InputHighlighter {
+        let shared = SharedMode::default();
+        shared.set(mode);
+        InputHighlighter { mode: shared }
+    }
+
+    fn hinter(mode: Mode) -> PrefixHinter {
+        PrefixHinter {
+            mode: highlighter(mode).mode,
+        }
+    }
+
     fn segments(line: &str) -> Vec<(Style, String)> {
-        InputHighlighter
+        segments_in(Mode::Agent, line)
+    }
+
+    fn segments_in(mode: Mode, line: &str) -> Vec<(Style, String)> {
+        highlighter(mode)
             .highlight(line, line.len())
             .buffer
             .into_iter()
@@ -154,27 +173,41 @@ mod tests {
     }
 
     #[test]
+    fn in_shell_mode_plain_text_is_yellow_and_question_mark_is_for_the_agent() {
+        assert_eq!(
+            segments_in(Mode::Shell, "git status"),
+            [(Color::Yellow.normal(), "git status".into())]
+        );
+        assert_eq!(
+            segments_in(Mode::Shell, "?why"),
+            [(Style::new(), "?why".into())]
+        );
+    }
+
+    #[test]
     fn a_bare_marker_shows_what_it_does() {
         let history = FileBackedHistory::new(10).unwrap();
-        let mut hinter = PrefixHinter;
-        let plain = |hinter: &mut PrefixHinter, line: &str| {
-            hinter.handle(line, line.len(), &history, false, "/")
-        };
+        let plain =
+            |mode: Mode, line: &str| hinter(mode).handle(line, line.len(), &history, false, "/");
 
         assert_eq!(
-            plain(&mut hinter, "!+"),
+            plain(Mode::Agent, "!+"),
             "  run a shell command and send its output with your next message"
         );
-        assert!(plain(&mut hinter, "!").starts_with("  run a shell command"));
-        assert!(plain(&mut hinter, "#").contains("#help"));
-        assert_eq!(plain(&mut hinter, "!ls"), "");
-        assert_eq!(plain(&mut hinter, "hello"), "");
+        assert!(plain(Mode::Agent, "!").contains("locks plain text to bash"));
+        assert!(plain(Mode::Shell, "!").starts_with("  run a shell command"));
+        assert_eq!(plain(Mode::Agent, "?"), "  ask the agent");
+        assert!(plain(Mode::Shell, "?").contains("back to the agent"));
+        assert!(plain(Mode::Agent, "#").contains("#help"));
+        assert_eq!(plain(Mode::Shell, "/"), "");
+        assert_eq!(plain(Mode::Agent, "!ls"), "");
+        assert_eq!(plain(Mode::Agent, "hello"), "");
     }
 
     #[test]
     fn a_hint_is_never_inserted_into_the_line() {
         let history = FileBackedHistory::new(10).unwrap();
-        let mut hinter = PrefixHinter;
+        let mut hinter = hinter(Mode::Agent);
         hinter.handle("!+", 2, &history, true, "/");
 
         assert_eq!(hinter.complete_hint(), "");

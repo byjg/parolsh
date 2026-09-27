@@ -13,16 +13,19 @@ use std::time::{Duration, Instant};
 use crate::acp::AgentHandle;
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
-use crate::input::{Input, route};
+use crate::input::{Input, SharedMode, route};
 use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
-  <text>          ask the agent (natural language)
+  <text>          ask the agent (natural language); a shell command when locked
+  ?<text>         ask the agent, locked or not
   /<command>      forwarded unchanged to the agent
   !<command>      run a shell command (bash -ic)
   !+<command>     run it and send its output with your next message
   !bash           open an interactive Bash session
+  !               lock: plain text goes to bash (prompt ❯)
+  ?               unlock: plain text goes to the agent (prompt ✦)
   #<command>      Parolsh control command
 
 Control commands:
@@ -42,6 +45,8 @@ pub struct App {
     cwd: PathBuf,
     /// The same directory, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
+    /// Where plain text goes, shared with the colors, hints and completion.
+    mode: SharedMode,
     project_root: Option<PathBuf>,
     config: Config,
     /// Name of the agent in use: `default_agent`, until `#agent <name>`.
@@ -76,6 +81,7 @@ impl App {
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
+            mode: SharedMode::default(),
             cwd,
             project_root,
             active: config.default_agent.clone(),
@@ -98,8 +104,12 @@ impl App {
         if ui::is_ansi() {
             // Tips while typing: the color and a hint of where the line goes.
             editor = editor
-                .with_highlighter(Box::new(hints::InputHighlighter))
-                .with_hinter(Box::new(hints::PrefixHinter));
+                .with_highlighter(Box::new(hints::InputHighlighter {
+                    mode: self.mode.clone(),
+                }))
+                .with_hinter(Box::new(hints::PrefixHinter {
+                    mode: self.mode.clone(),
+                }));
             editor = self.with_completion(editor);
         }
         if let Some(path) = history_path() {
@@ -120,7 +130,7 @@ impl App {
             let prompt = self.prompt();
             match editor.read_line(&prompt)? {
                 Signal::Success(line) => {
-                    if let Flow::Exit = self.handle(route(&line)) {
+                    if let Flow::Exit = self.handle(route(&line, self.mode.get())) {
                         return Ok(());
                     }
                 }
@@ -139,6 +149,10 @@ impl App {
             Input::Shell(line) => run(shell::command(&self.config.shell, &line, &self.cwd)),
             Input::Bash => run(shell::bash(&self.cwd)),
             Input::Share(line) => self.share(line),
+            Input::Lock(mode) => {
+                self.mode.set(mode);
+                0
+            }
             Input::Control { name, args } => match self.control(&name, &args) {
                 Some(status) => status,
                 None => return Flow::Exit,
@@ -158,12 +172,13 @@ impl App {
             cwd: &self.cwd,
             status: self.last_status,
             duration: self.last_duration,
+            mode: self.mode.get(),
             // Only a running agent answers.
             agent: self.agent.as_ref().and(self.banner_agent()),
         };
         let mut fell_back = false;
         let prompt = match style {
-            PromptStyle::Minimal => ui::Prompt::minimal(self.last_status, ansi),
+            PromptStyle::Minimal => ui::Prompt::minimal(&context, ansi),
             // Starship prints ANSI colors: only on an ANSI terminal.
             PromptStyle::Starship if ansi => match ui::Prompt::starship("starship", &context) {
                 Ok(prompt) => prompt,
@@ -318,6 +333,7 @@ impl App {
         let completer = ShellCompleter {
             cwd: self.completion_cwd.clone(),
             names,
+            mode: self.mode.clone(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
