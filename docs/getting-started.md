@@ -55,7 +55,7 @@ The first time Parolsh starts, it creates your configuration,
 
 ```text
 Created /home/joao/.config/parolsh/config.toml with claude, qwen. Using claude; switch with #agent <name>.
-wallet ❯
+[claude] ~/projects/wallet ✦
 ```
 
 If no agent is found, the file is created with everything commented out:
@@ -90,7 +90,7 @@ mode and the directory:
   ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  x.y.z
   Speak to your terminal. Natural language first.
   agent: claude (auto) · ~/projects/wallet · #help
-wallet ❯
+[claude] ~/projects/wallet ✦
 ```
 
 Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
@@ -98,17 +98,22 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 ## First commands
 
 ```text
-wallet ❯ what changed today?    ask the agent
-wallet ❯ !git status            run a shell command
-wallet ❯ !+docker ps           run it, and share its output with your next question
-wallet ❯ !bash                  open a Bash session, `exit` to come back
-wallet ❯ #cd ~/projects/billing switch to another project
-wallet ❯ #project init          mark the current directory as a project
-wallet ❯ #new                   start a new conversation
+[claude] ~/projects/wallet ✦ what changed today?    ask the agent
+[claude] ~/projects/wallet ✦ !git status            run a shell command
+[claude] ~/projects/wallet ✦ !+docker ps           run it, and share its output with your next question
+[claude] ~/projects/wallet ✦ !bash                  open a Bash session, `exit` to come back
+[claude] ~/projects/wallet ✦ !                      lock: plain text goes to bash (❯), `?` unlocks
+[claude] ~/projects/wallet ✦ #cd ~/projects/billing switch to another project
+[claude] ~/projects/wallet ✦ #project init          mark the current directory as a project
+[claude] ~/projects/wallet ✦ #new                   start a new conversation
 ```
 
 The answer is printed as it arrives. `Ctrl+C` cancels it and returns to the
 prompt.
+
+To start with plain text going to bash, run `parolsh --input=shell` or set
+`input = "shell"` in the configuration (see
+[Shell mode](input-routing.md#shell-mode)).
 
 ## Use it from scripts
 

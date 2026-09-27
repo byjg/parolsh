@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::acp::Detail;
+use crate::input::Mode;
 
 const LOGO: [&str; 3] = [
     "┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻",
@@ -18,6 +19,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const CYAN: &str = "\x1b[36m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
+const BLUE: &str = "\x1b[34m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 /// Back to column 0 and erase the line.
@@ -43,7 +45,7 @@ pub fn width() -> usize {
 pub struct Prompt {
     left: String,
     right: String,
-    indicator: &'static str,
+    indicator: String,
 }
 
 /// What a prompt program may show: the last command's result and the agent.
@@ -52,25 +54,39 @@ pub struct PromptContext<'a> {
     /// Exit code of the last `!` command or agent turn.
     pub status: i32,
     pub duration: Duration,
+    /// Where plain text goes.
+    pub mode: Mode,
     pub agent: Option<BannerAgent<'a>>,
 }
 
 impl Prompt {
-    /// The directory name and `❯`, as in `wallet ❯ `.
-    pub fn parolsh(label: String) -> Self {
+    /// The agent that answers, the directory and where plain text goes, as
+    /// in `[claude] ~/…/byjg/parolsh ✦ `: `✦` to the agent, `❯` to the
+    /// shell. The symbol is red after a failure.
+    pub fn parolsh(context: &PromptContext, home: Option<&Path>, ansi: bool) -> Self {
+        let agent = context
+            .agent
+            .as_ref()
+            .map_or("no agent", |agent| agent.name);
+        let path = short_path(context.cwd, home);
+        let left = if ansi {
+            format!("{BLUE}[{agent}]{RESET} {GREEN}{path}{RESET}")
+        } else {
+            format!("[{agent}] {path}")
+        };
         Self {
-            left: label,
+            left,
             right: String::new(),
-            indicator: " ❯ ",
+            indicator: format!(" {}", indicator(context, ansi)),
         }
     }
 
-    /// Only `❯`.
-    pub fn minimal() -> Self {
+    /// Only where plain text goes: `✦` or `❯`.
+    pub fn minimal(context: &PromptContext, ansi: bool) -> Self {
         Self {
             left: String::new(),
             right: String::new(),
-            indicator: "❯ ",
+            indicator: indicator(context, ansi),
         }
     }
 
@@ -91,7 +107,14 @@ impl Prompt {
                 // Empty: plain ANSI, without the markers bash or zsh need.
                 .env("STARSHIP_SHELL", "")
                 .env_remove("PAROLSH_AGENT")
-                .env_remove("PAROLSH_MODE");
+                .env_remove("PAROLSH_MODE")
+                .env(
+                    "PAROLSH_INPUT",
+                    match context.mode {
+                        Mode::Agent => "agent",
+                        Mode::Shell => "shell",
+                    },
+                );
             if let Some(agent) = &context.agent {
                 command.env("PAROLSH_AGENT", agent.name);
                 if let Some(mode) = agent.mode {
@@ -111,7 +134,7 @@ impl Prompt {
         Ok(Self {
             left: run(false)?,
             right: run(true)?.trim_end().to_string(),
-            indicator: "",
+            indicator: String::new(),
         })
     }
 }
@@ -126,7 +149,7 @@ impl reedline::Prompt for Prompt {
     }
 
     fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed(self.indicator)
+        Cow::Borrowed(&self.indicator)
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
@@ -319,6 +342,38 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
+/// Where plain text goes: `✦ ` to the agent, `❯ ` to the shell. Red when
+/// the last command failed.
+fn indicator(context: &PromptContext, ansi: bool) -> String {
+    let symbol = match context.mode {
+        Mode::Agent => "✦ ",
+        Mode::Shell => "❯ ",
+    };
+    if ansi && context.status != 0 {
+        format!("{RED}{symbol}{RESET}")
+    } else {
+        symbol.to_string()
+    }
+}
+
+/// `path` with `~` for the home directory, and only its last two
+/// directories: `~/…/byjg/parolsh`.
+fn short_path(path: &Path, home: Option<&Path>) -> String {
+    let full = tilde(path, home);
+    let (anchor, rest) = match full.strip_prefix("~/") {
+        Some(rest) => ("~/", rest),
+        None => match full.strip_prefix('/') {
+            Some(rest) => ("/", rest),
+            None => ("", full.as_str()),
+        },
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() <= 2 {
+        return full;
+    }
+    format!("{anchor}…/{}", parts[parts.len() - 2..].join("/"))
+}
+
 fn tilde(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
@@ -413,7 +468,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\n\
-             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}\"\n",
+             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT\"\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
@@ -423,6 +478,7 @@ mod tests {
             cwd: dir.path(),
             status: 3,
             duration: Duration::from_millis(1500),
+            mode: Mode::Shell,
             agent: Some(BannerAgent {
                 name: "codex",
                 mode: Some("agent"),
@@ -436,16 +492,87 @@ mod tests {
         assert_eq!(
             prompt.left,
             format!(
-                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent\n"
+                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell\n"
             )
         );
         assert_eq!(
             prompt.right,
             format!(
-                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent"
+                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell"
             )
         );
         assert_eq!(prompt.indicator, "");
+    }
+
+    fn context<'a>(cwd: &'a Path, status: i32, agent: Option<&'a str>) -> PromptContext<'a> {
+        PromptContext {
+            cwd,
+            status,
+            duration: Duration::ZERO,
+            mode: Mode::Agent,
+            agent: agent.map(|name| BannerAgent { name, mode: None }),
+        }
+    }
+
+    #[test]
+    fn parolsh_prompt_shows_the_agent_and_the_short_path() {
+        let home = Path::new("/home/me");
+        let cwd = Path::new("/home/me/Projects/opensource/byjg/parolsh");
+
+        let prompt = Prompt::parolsh(&context(cwd, 0, Some("claude")), Some(home), false);
+
+        assert_eq!(prompt.left, "[claude] ~/…/byjg/parolsh");
+        assert_eq!(prompt.indicator, " ✦ ");
+    }
+
+    #[test]
+    fn the_symbol_says_where_plain_text_goes() {
+        let cwd = Path::new("/tmp");
+        let mut shell = context(cwd, 0, Some("claude"));
+        shell.mode = Mode::Shell;
+
+        assert_eq!(Prompt::parolsh(&shell, None, false).indicator, " ❯ ");
+        assert_eq!(Prompt::minimal(&shell, false).indicator, "❯ ");
+        let agent = context(cwd, 0, Some("claude"));
+        assert_eq!(Prompt::minimal(&agent, false).indicator, "✦ ");
+    }
+
+    #[test]
+    fn parolsh_prompt_without_an_agent() {
+        let prompt = Prompt::parolsh(&context(Path::new("/tmp"), 0, None), None, false);
+
+        assert_eq!(prompt.left, "[no agent] /tmp");
+    }
+
+    #[test]
+    fn prompts_turn_red_after_a_failure_on_ansi_terminals() {
+        let cwd = Path::new("/tmp");
+        let failed = Prompt::parolsh(&context(cwd, 1, Some("claude")), None, true);
+        let fine = Prompt::parolsh(&context(cwd, 0, Some("claude")), None, true);
+
+        assert_eq!(failed.indicator, format!(" {RED}✦ {RESET}"));
+        assert_eq!(fine.indicator, " ✦ ");
+        assert_eq!(plain(&failed.left), "[claude] /tmp");
+        let failed = context(cwd, 2, None);
+        assert_eq!(
+            Prompt::minimal(&failed, true).indicator,
+            format!("{RED}✦ {RESET}")
+        );
+        assert_eq!(Prompt::minimal(&failed, false).indicator, "✦ ");
+    }
+
+    #[test]
+    fn short_path_keeps_the_last_two_directories() {
+        let home = Some(Path::new("/home/me"));
+        let short = |path: &str| short_path(Path::new(path), home);
+
+        assert_eq!(short("/home/me"), "~");
+        assert_eq!(short("/home/me/Projects/wallet"), "~/Projects/wallet");
+        assert_eq!(short("/home/me/a/b/c"), "~/…/b/c");
+        assert_eq!(short("/"), "/");
+        assert_eq!(short("/etc/nginx"), "/etc/nginx");
+        assert_eq!(short("/usr/share/doc/parolsh"), "/…/doc/parolsh");
+        assert_eq!(short_path(Path::new("/home/me/x/y/z"), None), "/…/y/z");
     }
 
     #[test]
@@ -454,6 +581,7 @@ mod tests {
             cwd: Path::new("/"),
             status: 0,
             duration: Duration::ZERO,
+            mode: Mode::Agent,
             agent: None,
         };
 

@@ -13,16 +13,19 @@ use std::time::{Duration, Instant};
 use crate::acp::AgentHandle;
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
-use crate::input::{Input, route};
-use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
+use crate::input::{Input, Mode, SharedMode, route};
+use crate::{config, hints, input, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
-  <text>          ask the agent (natural language)
+  <text>          ask the agent (natural language); a shell command when locked
+  ?<text>         ask the agent, locked or not
   /<command>      forwarded unchanged to the agent
   !<command>      run a shell command (bash -ic)
   !+<command>     run it and send its output with your next message
   !bash           open an interactive Bash session
+  !               lock: plain text goes to bash (prompt ❯)
+  ?               unlock: plain text goes to the agent (prompt ✦)
   #<command>      Parolsh control command
 
 Control commands:
@@ -42,6 +45,8 @@ pub struct App {
     cwd: PathBuf,
     /// The same directory, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
+    /// Where plain text goes, shared with the colors, hints and completion.
+    mode: SharedMode,
     project_root: Option<PathBuf>,
     config: Config,
     /// Name of the agent in use: `default_agent`, until `#agent <name>`.
@@ -66,7 +71,9 @@ enum Flow {
 
 impl App {
     /// `notices` are shown after the banner, with the first run's.
-    pub fn new(cwd: PathBuf, mut notices: Vec<String>) -> Result<Self> {
+    /// `input` is `--input`: where plain text goes at start, over the
+    /// configuration's `input`.
+    pub fn new(cwd: PathBuf, mut notices: Vec<String>, input: Option<Mode>) -> Result<Self> {
         // Before loading: the first run may write the global configuration.
         let search_path = std::env::var("PATH").ok();
         notices.extend(
@@ -76,6 +83,7 @@ impl App {
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
+            mode: SharedMode::default(),
             cwd,
             project_root,
             active: config.default_agent.clone(),
@@ -87,6 +95,12 @@ impl App {
             last_status: 0,
             last_duration: Duration::ZERO,
         };
+        // Without an agent, plain text can only go to the shell.
+        app.mode.set(match (&app.active, input) {
+            (None, _) => Mode::Shell,
+            (Some(_), Some(input)) => input,
+            (Some(_), None) => app.config.input,
+        });
         app.start_agent();
         Ok(app)
     }
@@ -98,8 +112,12 @@ impl App {
         if ui::is_ansi() {
             // Tips while typing: the color and a hint of where the line goes.
             editor = editor
-                .with_highlighter(Box::new(hints::InputHighlighter))
-                .with_hinter(Box::new(hints::PrefixHinter));
+                .with_highlighter(Box::new(hints::InputHighlighter {
+                    mode: self.mode.clone(),
+                }))
+                .with_hinter(Box::new(hints::PrefixHinter {
+                    mode: self.mode.clone(),
+                }));
             editor = self.with_completion(editor);
         }
         if let Some(path) = history_path() {
@@ -120,7 +138,7 @@ impl App {
             let prompt = self.prompt();
             match editor.read_line(&prompt)? {
                 Signal::Success(line) => {
-                    if let Flow::Exit = self.handle(route(&line)) {
+                    if let Flow::Exit = self.handle(route(&line, self.mode.get())) {
                         return Ok(());
                     }
                 }
@@ -136,9 +154,24 @@ impl App {
         let status = match input {
             Input::Empty => return Flow::Continue,
             Input::Agent(text) => self.ask(text),
-            Input::Shell(line) => run(shell::command(&self.config.shell, &line, &self.cwd)),
+            Input::Shell(line) => {
+                let code = run(shell::command(&self.config.shell, &line, &self.cwd));
+                if code == 0
+                    && let Some(hash_cd) = input::cd_suggestion(&line)
+                {
+                    eprintln!(
+                        "parolsh: `{line}` moved only that command's shell. `{hash_cd}` moves \
+                         Parolsh (and starts a new conversation)."
+                    );
+                }
+                code
+            }
             Input::Bash => run(shell::bash(&self.cwd)),
             Input::Share(line) => self.share(line),
+            Input::Lock(mode) => {
+                self.mode.set(mode);
+                0
+            }
             Input::Control { name, args } => match self.control(&name, &args) {
                 Some(status) => status,
                 None => return Flow::Exit,
@@ -152,27 +185,34 @@ impl App {
     /// The prompt for the next line, in the configured style.
     fn prompt(&mut self) -> ui::Prompt {
         let style = self.prompt_override.unwrap_or(self.config.prompt);
-        match style {
-            PromptStyle::Minimal => ui::Prompt::minimal(),
+        let ansi = ui::is_ansi();
+        let home = home();
+        let context = ui::PromptContext {
+            cwd: &self.cwd,
+            status: self.last_status,
+            duration: self.last_duration,
+            mode: self.mode.get(),
+            // Only a running agent answers.
+            agent: self.agent.as_ref().and(self.banner_agent()),
+        };
+        let mut fell_back = false;
+        let prompt = match style {
+            PromptStyle::Minimal => ui::Prompt::minimal(&context, ansi),
             // Starship prints ANSI colors: only on an ANSI terminal.
-            PromptStyle::Starship if ui::is_ansi() => {
-                let context = ui::PromptContext {
-                    cwd: &self.cwd,
-                    status: self.last_status,
-                    duration: self.last_duration,
-                    agent: self.banner_agent(),
-                };
-                match ui::Prompt::starship("starship", &context) {
-                    Ok(prompt) => prompt,
-                    Err(e) => {
-                        eprintln!("parolsh: starship: {e}. Using the parolsh prompt.");
-                        self.prompt_override = Some(PromptStyle::Parolsh);
-                        ui::Prompt::parolsh(self.label())
-                    }
+            PromptStyle::Starship if ansi => match ui::Prompt::starship("starship", &context) {
+                Ok(prompt) => prompt,
+                Err(e) => {
+                    eprintln!("parolsh: starship: {e}. Using the parolsh prompt.");
+                    fell_back = true;
+                    ui::Prompt::parolsh(&context, home.as_deref(), ansi)
                 }
-            }
-            _ => ui::Prompt::parolsh(self.label()),
+            },
+            _ => ui::Prompt::parolsh(&context, home.as_deref(), ansi),
+        };
+        if fell_back {
+            self.prompt_override = Some(PromptStyle::Parolsh);
         }
+        prompt
     }
 
     fn options_command(&self, args: &str) -> Result<()> {
@@ -312,6 +352,7 @@ impl App {
         let completer = ShellCompleter {
             cwd: self.completion_cwd.clone(),
             names,
+            mode: self.mode.clone(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
@@ -349,6 +390,10 @@ impl App {
             .is_some_and(|name| config.agents.contains_key(name))
         {
             self.active = config.default_agent.clone();
+        }
+        // A project that sets another `input` brings it.
+        if config.input != self.config.input {
+            self.mode.set(config.input);
         }
         self.config = config;
         self.cwd = target;
@@ -548,18 +593,11 @@ impl App {
 
     fn print_banner(&self) {
         let agent = self.banner_agent();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = home();
         print!(
             "{}",
             ui::banner(env!("CARGO_PKG_VERSION"), agent, &self.cwd, home.as_deref())
         );
-    }
-
-    fn label(&self) -> String {
-        self.cwd
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.cwd.display().to_string())
     }
 }
 
@@ -618,8 +656,12 @@ fn run(command: Command) -> i32 {
     }
 }
 
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn resolve_dir(cwd: &Path, args: &str) -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = home();
     let path = match (args, &home) {
         ("" | "~", Some(home)) => home.clone(),
         (path, Some(home)) if path.starts_with("~/") => home.join(&path[2..]),

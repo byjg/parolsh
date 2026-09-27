@@ -281,12 +281,24 @@ fn with_fake_agent(extra: &str, lines: &[&str]) -> String {
 }
 
 fn with_fake_agent_on(extra: &str, lines: &[&str], term: &str) -> String {
-    let config = config_home(&format!(
+    with_fake_agent_flags(extra, "", lines, term)
+}
+
+/// Like `with_fake_agent_on`, with `flags` on Parolsh's command line.
+fn with_fake_agent_flags(extra: &str, flags: &str, lines: &[&str], term: &str) -> String {
+    let config = format!(
         "{extra}\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
-    ));
+    );
+    screen(&config, flags, lines, term)
+}
+
+/// Runs Parolsh with `config` and `flags`, and returns the screen after
+/// typing `lines`.
+fn screen(config: &str, flags: &str, lines: &[&str], term: &str) -> String {
+    let config = config_home(config);
     let output = Command::new("python3")
         .arg(JOB_SHELL)
-        .arg(env!("CARGO_BIN_EXE_parolsh"))
+        .arg(format!("{} {flags}", env!("CARGO_BIN_EXE_parolsh")))
         .args(lines)
         .arg("#exit")
         .env("TERM", term)
@@ -363,6 +375,49 @@ fn markdown_is_rendered_on_ansi_terminals() {
     );
     assert!(raw.contains("- **bold** and `code`\n"), "{raw}");
     assert!(raw.contains("## Title\n"), "{raw}");
+}
+
+/// Plain text goes where `input`, or `--input` over it, says. `echo $((6*7))`
+/// prints 42 only when the shell runs it.
+#[test]
+fn input_sets_where_plain_text_goes_at_start() {
+    let line = "echo $((6*7))";
+    let ran = |screen: String| screen.contains("\n42\n");
+
+    assert!(!ran(with_fake_agent("", &[line])));
+    assert!(ran(with_fake_agent("input = \"shell\"", &[line])));
+    assert!(ran(with_fake_agent_flags(
+        "",
+        "--input=shell",
+        &[line],
+        "dumb"
+    )));
+    assert!(!ran(with_fake_agent_flags(
+        "input = \"shell\"",
+        "--input=agent",
+        &[line],
+        "dumb"
+    )));
+}
+
+/// A plain `cd` only moves its own shell: Parolsh says how to move it.
+#[test]
+fn a_plain_cd_points_to_hash_cd() {
+    let screen = with_fake_agent("", &["!cd /tmp", "!cd /tmp && true"]);
+
+    assert_eq!(
+        screen.matches("`#cd /tmp` moves Parolsh").count(),
+        1,
+        "{screen}"
+    );
+}
+
+/// Without an agent configured, plain text can only go to the shell.
+#[test]
+fn without_an_agent_plain_text_goes_to_the_shell() {
+    let screen = screen("", "", &["echo $((6*7))"], "dumb");
+
+    assert!(screen.contains("\n42\n"), "{screen}");
 }
 
 /// `!+command` runs the command, shows its output, and sends it with the

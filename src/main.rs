@@ -24,6 +24,11 @@ struct Cli {
     #[arg(short = 'c', value_name = "COMMAND")]
     command: Option<String>,
 
+    /// Where plain text goes at start: to the agent, or to the shell
+    /// (overrides `input` in config.toml)
+    #[arg(long, value_enum, conflicts_with = "command")]
+    input: Option<input::Mode>,
+
     /// Arguments for COMMAND, available as $0, $1, ...
     #[arg(
         requires = "command",
@@ -62,7 +67,7 @@ fn main() -> ExitCode {
 
     let result = std::env::current_dir()
         .map_err(anyhow::Error::from)
-        .and_then(|cwd| app::App::new(cwd, notices))
+        .and_then(|cwd| app::App::new(cwd, notices, cli.input))
         .and_then(|mut app| app.run());
 
     match result {

@@ -1,4 +1,5 @@
-//! Tab completion for `!command` and `!+command`: command names from `PATH`
+//! Tab completion for `!command`, `!+command` and, in shell mode, plain
+//! lines: command names from `PATH`
 //! and from bash (aliases, functions, builtins), then file names. It knows
 //! no command's own arguments (git branches, flags): `!bash` has those.
 //! Text for the agent has nothing to complete.
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
+use crate::input::{Mode, SharedMode};
 use crate::shellenv::is_executable;
 
 /// Characters that end a word, besides whitespace.
@@ -22,6 +24,7 @@ pub struct ShellCompleter {
     /// Bash's aliases, functions and builtins, read in the background when
     /// Parolsh starts; not set until then.
     pub names: Arc<OnceLock<Vec<String>>>,
+    pub mode: SharedMode,
 }
 
 impl Completer for ShellCompleter {
@@ -29,7 +32,15 @@ impl Completer for ShellCompleter {
         let cwd = self.cwd.lock().expect("cwd lock").clone();
         let names = self.names.get().map(Vec::as_slice).unwrap_or_default();
         let search_path = std::env::var("PATH").ok();
-        CompletionResult::fresh(suggestions(line, pos, &cwd, search_path.as_deref(), names))
+        let found = suggestions(
+            line,
+            pos,
+            self.mode.get(),
+            &cwd,
+            search_path.as_deref(),
+            names,
+        );
+        CompletionResult::fresh(found)
     }
 }
 
@@ -37,11 +48,12 @@ impl Completer for ShellCompleter {
 fn suggestions(
     line: &str,
     pos: usize,
+    mode: Mode,
     cwd: &Path,
     search_path: Option<&str>,
     names: &[String],
 ) -> Vec<Suggestion> {
-    let Some(start) = command_start(line).filter(|&start| start <= pos) else {
+    let Some(start) = command_start(line, mode).filter(|&start| start <= pos) else {
         return Vec::new();
     };
     let word_start = start + word_start(&line[start..pos]);
@@ -59,9 +71,15 @@ fn suggestions(
 }
 
 /// Where the shell command starts: after `!` or `!+`, as `input::route`
-/// reads them. `None` for lines that do not go to the shell.
-fn command_start(line: &str) -> Option<usize> {
-    let command = line.trim_start().strip_prefix('!')?;
+/// reads them, or at the start of a plain line in shell mode. `None` for
+/// lines that do not go to the shell.
+fn command_start(line: &str, mode: Mode) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let command = match trimmed.strip_prefix('!') {
+        Some(command) => command,
+        None if mode == Mode::Shell && !trimmed.starts_with(['#', '?']) => trimmed,
+        None => return None,
+    };
     let command = command.trim_start().strip_prefix('+').unwrap_or(command);
     Some(line.len() - command.len())
 }
@@ -219,8 +237,18 @@ mod tests {
 
     /// The lines after completing at the end of `line`, one per suggestion.
     fn complete(line: &str, cwd: &Path, search_path: Option<&str>, names: &[&str]) -> Vec<String> {
+        complete_in(Mode::Agent, line, cwd, search_path, names)
+    }
+
+    fn complete_in(
+        mode: Mode,
+        line: &str,
+        cwd: &Path,
+        search_path: Option<&str>,
+        names: &[&str],
+    ) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-        suggestions(line, line.len(), cwd, search_path, &names)
+        suggestions(line, line.len(), mode, cwd, search_path, &names)
             .into_iter()
             .map(|s| {
                 let space = if s.append_whitespace { " " } else { "" };
@@ -321,12 +349,25 @@ mod tests {
     }
 
     #[test]
+    fn in_shell_mode_plain_lines_complete() {
+        let dir = fixture();
+        let path = dir.path().to_str();
+        let shell = |line| complete_in(Mode::Shell, line, dir.path(), path, &["tool"]);
+
+        assert_eq!(shell("too"), ["tool "]);
+        assert_eq!(shell("cat no"), ["cat notes.txt "]);
+        assert_eq!(shell("!too"), ["!tool "]);
+        assert!(shell("#to").is_empty());
+        assert!(shell("?to").is_empty());
+    }
+
+    #[test]
     fn completes_the_word_at_the_cursor() {
         let dir = fixture();
         let line = "!cat no | wc";
         let names = Vec::new();
 
-        let found = suggestions(line, "!cat no".len(), dir.path(), None, &names);
+        let found = suggestions(line, "!cat no".len(), Mode::Agent, dir.path(), None, &names);
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].value, "notes.txt");
