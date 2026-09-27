@@ -36,6 +36,7 @@ text goes:
 [claude] ~/projects/wallet ✦ what changed today?    ← the agent
 ```
 
+
 | Input | Agent mode `✦` (default) | Shell mode `❯` |
 |---|---|---|
 | `text` | the agent | the shell, like `!text` |
@@ -48,6 +49,12 @@ Unlike `!bash`, shell mode stays in Parolsh: the agent is a `?` away, `!+`
 shares output with it, and `#` commands work. Each command is still
 independent (see [`!command`](#command)). The mode lasts until you change it
 or leave Parolsh.
+
+To start in shell mode, set `input = "shell"` in `config.toml` (see
+[Configuration](configuration.md#keys)), or run `parolsh --input=shell`;
+`--input` wins over the file. A project's `.parolsh/config.toml` can set it
+too: `#cd` into a project whose `input` differs switches to it. Without an
+agent configured, Parolsh always starts in shell mode.
 
 ## While you type
 
@@ -97,7 +104,14 @@ The command runs as `bash -ic "<command>"` in Parolsh's current directory.
   right away when the shell is not interactive.
 - **Each command is independent.** `!cd /tmp` or `!export FOO=1` change
   nothing in Parolsh: the command runs and returns. Use `#cd` to change
-  directory, or `!bash` for a session that keeps its state.
+  directory, or `!bash` for a session that keeps its state. After a plain
+  `cd <dir>` (with `!` or in shell mode), Parolsh reminds you:
+
+  ```text
+  parolsh: `cd /tmp` moved only that command's shell. `#cd /tmp` moves Parolsh (and starts a new conversation).
+  ```
+
+  `cd dir && make` works as usual: both run in the same shell.
 - **Commands stay out of your bash history.** Parolsh sets `HISTFILE=/dev/null`
   for them and keeps its own history.
 - A non-zero exit code is printed after the output, for example `exit 1`.

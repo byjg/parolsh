@@ -28,6 +28,7 @@ one `!` away.
 `!` alone locks plain text to bash (the prompt shows `❯`), and `?` alone
 unlocks it back to the agent (`✦`).
 
+
 It runs inside your usual terminal emulator, prints to the normal scrollback
 (no full-screen UI), and works with any ACP agent: Claude Code, Codex, Qwen
 Code, Gemini CLI, OpenCode and others.

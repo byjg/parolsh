@@ -111,6 +111,10 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 The answer is printed as it arrives. `Ctrl+C` cancels it and returns to the
 prompt.
 
+To start with plain text going to bash, run `parolsh --input=shell` or set
+`input = "shell"` in the configuration (see
+[Shell mode](input-routing.md#shell-mode)).
+
 ## Use it from scripts
 
 `parolsh -c` runs a command with a plain, non-interactive `bash -c`, without

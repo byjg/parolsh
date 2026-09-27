@@ -79,6 +79,7 @@ launched as `claude-agent-acp`.
 |---|---|---|
 | `shell` | `["bash", "-ic"]` | Command line for `!command`; the command is added as the last argument. Must not be empty. |
 | `prompt` | `"parolsh"` | Prompt style: `parolsh`, `starship` or `minimal`. See [Prompt](#prompt). |
+| `input` | `"agent"` | Where plain text goes when Parolsh starts: `agent` or `shell`. `parolsh --input=agent\|shell` overrides it. See [Shell mode](input-routing.md#shell-mode). |
 | `default_agent` | none | Agent used when Parolsh starts. Must name a configured agent. `#agent <name>` switches until you leave Parolsh. |
 | `agents.<name>.command` | required | Program that speaks ACP over stdio |
 | `agents.<name>.args` | `[]` | Arguments for `command` |

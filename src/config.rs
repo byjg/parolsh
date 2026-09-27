@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::input::Mode;
 use crate::project::STATE_DIR;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,8 @@ pub struct Config {
     /// Command line that runs `!command`; the command is appended as the last argument.
     pub shell: Vec<String>,
     pub prompt: PromptStyle,
+    /// Where plain text goes when Parolsh starts.
+    pub input: Mode,
     pub thinking: ThinkingDisplay,
     /// Render the answers' markdown on ANSI terminals.
     pub markdown: bool,
@@ -136,6 +139,7 @@ pub struct Config {
 struct ConfigFile {
     shell: Option<Vec<String>>,
     prompt: Option<PromptStyle>,
+    input: Option<Mode>,
     thinking: Option<ThinkingDisplay>,
     markdown: Option<bool>,
     links: Option<LinkStyle>,
@@ -171,6 +175,7 @@ impl ConfigFile {
     fn merge(mut self, over: Self) -> Self {
         self.shell = over.shell.or(self.shell);
         self.prompt = over.prompt.or(self.prompt);
+        self.input = over.input.or(self.input);
         self.thinking = over.thinking.or(self.thinking);
         self.markdown = over.markdown.or(self.markdown);
         self.links = over.links.or(self.links);
@@ -244,6 +249,7 @@ impl Config {
         Ok(Self {
             shell,
             prompt: file.prompt.unwrap_or_default(),
+            input: file.input.unwrap_or_default(),
             thinking: file.thinking.unwrap_or_default(),
             markdown: file.markdown.unwrap_or(true),
             links: file.links.unwrap_or_default(),
@@ -287,6 +293,7 @@ mod tests {
 
         assert_eq!(config.shell, ["bash", "-ic"]);
         assert_eq!(config.prompt, PromptStyle::Parolsh);
+        assert_eq!(config.input, Mode::Agent);
         assert_eq!(config.thinking, ThinkingDisplay::Status);
         assert!(config.markdown);
         assert_eq!(config.links, LinkStyle::Both);
@@ -389,6 +396,7 @@ mod tests {
             "global.toml",
             r#"
             thinking = "hidden"
+            input = "agent"
 
             [agents.claude]
             command = "claude-agent-acp"
@@ -400,6 +408,7 @@ mod tests {
             "project.toml",
             r#"
             thinking = "show"
+            input = "shell"
             markdown = false
             links = "inline"
 
@@ -411,6 +420,7 @@ mod tests {
         let config = Config::load_files(Some(&global), Some(&project)).unwrap();
 
         assert_eq!(config.thinking, ThinkingDisplay::Show);
+        assert_eq!(config.input, Mode::Shell);
         assert!(!config.markdown);
         assert_eq!(config.links, LinkStyle::Inline);
         assert_eq!(
@@ -511,6 +521,7 @@ mod tests {
             "thinking = \"loud\"\n",
             "links = \"never\"\n",
             "shell_env = \"sometimes\"\n",
+            "input = \"bash\"\n",
             "[agents.qwen]\ncommand = \"qwen\"\noptions = { effort = 3 }\n",
             // The old mapping keys are not accepted any more.
             "[agents.qwen]\ncommand = \"qwen\"\npermission_mode = \"normal\"\n",

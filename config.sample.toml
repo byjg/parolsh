@@ -55,10 +55,18 @@
 
 
 # How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.
-#   parolsh   the directory name and ❯ (default)
+#   parolsh   the agent, the directory and ✦ or ❯ (default)
 #   starship  your Starship prompt (~/.config/starship.toml), on ANSI terminals
-#   minimal   only ❯
+#   minimal   only ✦ or ❯
 # prompt = "parolsh"
+
+
+# Where plain text goes when Parolsh starts. `!` alone locks it to the shell,
+# `?` alone unlocks it; `parolsh --input=shell|agent` overrides this.
+#   agent  the agent, prompt ✦ (default)
+#   shell  the shell, like `!text`, prompt ❯; `?text` asks the agent
+# Without an agent configured, Parolsh always starts in shell.
+# input = "agent"
 
 
 # --- Agent started with Parolsh ---------------------------------------------

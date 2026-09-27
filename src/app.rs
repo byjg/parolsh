@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use crate::acp::AgentHandle;
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
-use crate::input::{Input, SharedMode, route};
-use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
+use crate::input::{Input, Mode, SharedMode, route};
+use crate::{config, hints, input, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -71,7 +71,9 @@ enum Flow {
 
 impl App {
     /// `notices` are shown after the banner, with the first run's.
-    pub fn new(cwd: PathBuf, mut notices: Vec<String>) -> Result<Self> {
+    /// `input` is `--input`: where plain text goes at start, over the
+    /// configuration's `input`.
+    pub fn new(cwd: PathBuf, mut notices: Vec<String>, input: Option<Mode>) -> Result<Self> {
         // Before loading: the first run may write the global configuration.
         let search_path = std::env::var("PATH").ok();
         notices.extend(
@@ -93,6 +95,12 @@ impl App {
             last_status: 0,
             last_duration: Duration::ZERO,
         };
+        // Without an agent, plain text can only go to the shell.
+        app.mode.set(match (&app.active, input) {
+            (None, _) => Mode::Shell,
+            (Some(_), Some(input)) => input,
+            (Some(_), None) => app.config.input,
+        });
         app.start_agent();
         Ok(app)
     }
@@ -146,7 +154,18 @@ impl App {
         let status = match input {
             Input::Empty => return Flow::Continue,
             Input::Agent(text) => self.ask(text),
-            Input::Shell(line) => run(shell::command(&self.config.shell, &line, &self.cwd)),
+            Input::Shell(line) => {
+                let code = run(shell::command(&self.config.shell, &line, &self.cwd));
+                if code == 0
+                    && let Some(hash_cd) = input::cd_suggestion(&line)
+                {
+                    eprintln!(
+                        "parolsh: `{line}` moved only that command's shell. `{hash_cd}` moves \
+                         Parolsh (and starts a new conversation)."
+                    );
+                }
+                code
+            }
             Input::Bash => run(shell::bash(&self.cwd)),
             Input::Share(line) => self.share(line),
             Input::Lock(mode) => {
@@ -371,6 +390,10 @@ impl App {
             .is_some_and(|name| config.agents.contains_key(name))
         {
             self.active = config.default_agent.clone();
+        }
+        // A project that sets another `input` brings it.
+        if config.input != self.config.input {
+            self.mode.set(config.input);
         }
         self.config = config;
         self.cwd = target;
