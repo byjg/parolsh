@@ -36,6 +36,25 @@ dim hint says what it does, for example `!+  run a shell command and send its
 output with your next message`. The hint is a tip: the right arrow does not
 insert it into the line.
 
+### Tab completion
+
+On `!command` and `!+command` lines, `Tab` completes the word at the cursor,
+as bash does: a single match goes into the line, several fill in what they
+have in common, and the next `Tab` shows them in a menu (`Tab` and
+`Shift+Tab` move through it, `Enter` picks one).
+
+- **The command name** completes from the programs on your `PATH` and, when
+  the shell is bash, from the aliases, functions and builtins your
+  `~/.bashrc` sets up. That list is read once, in the background, when
+  Parolsh starts: an alias added later shows up the next time.
+- **Other words** complete as file and directory names, from Parolsh's
+  current directory. `~/` and absolute paths work, hidden files show up when
+  the name starts with `.`, and special characters are escaped (`My\ Files`).
+- A command's own arguments (git branches, `--flags`, ssh hosts) do not
+  complete. `!bash` has your full bash completion.
+
+Text for the agent, `/command` and `#command` have no completion.
+
 ## `!command`
 
 The command runs as `bash -ic "<command>"` in Parolsh's current directory.
