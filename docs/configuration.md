@@ -26,7 +26,7 @@ a ready block for each agent; the ones not installed stay commented out.
 `#config` shows the files in use and whether they exist:
 
 ```text
-wallet ❯ #config
+[claude] ~/projects/wallet ❯ #config
 Global:  /home/joao/.config/parolsh/config.toml
 Project: /home/joao/projects/wallet/.parolsh/config.toml  (not found)
 #config sample prints every option, with a block for each agent.
@@ -100,9 +100,19 @@ option without repeating the others.
 
 | `prompt` | Looks like |
 |---|---|
-| `parolsh` (default) | `wallet ❯ ` |
+| `parolsh` (default) | `[claude] ~/projects/wallet ❯ ` |
 | `minimal` | `❯ ` |
 | `starship` | Your [Starship](https://starship.rs) prompt, from `~/.config/starship.toml` |
+
+The `parolsh` prompt shows:
+
+- in brackets, the agent that answers text you type; `[no agent]` when none
+  is running (none configured, or it stopped);
+- the current directory, with `~` for your home, and only its last two
+  directories: `~/Projects/opensource/byjg/parolsh` shows as
+  `~/…/byjg/parolsh`;
+- `❯`, red when the last `!` command, agent turn or `#` command failed. The
+  `minimal` `❯` turns red too.
 
 `#prompt <name>` switches until you leave Parolsh; `#prompt` prints the style
 in use.
@@ -118,8 +128,8 @@ so the prompt looks as it does in your shell. Starship gets:
 - the terminal width, and the right prompt (`right_format`) when you have one.
 
 Starship does not know Parolsh, but it can show the agent in use. Parolsh sets
-`PAROLSH_AGENT` and `PAROLSH_MODE` for it, so an `env_var` module in
-`~/.config/starship.toml` shows them only inside Parolsh:
+`PAROLSH_AGENT` and `PAROLSH_MODE` for it while the agent runs, so an
+`env_var` module in `~/.config/starship.toml` shows them only inside Parolsh:
 
 ```toml
 [env_var.PAROLSH_AGENT]

@@ -90,7 +90,7 @@ pub enum ThinkingDisplay {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptStyle {
-    /// The directory name and `❯`.
+    /// The agent, the directory and `❯`.
     #[default]
     Parolsh,
     /// The user's Starship prompt (`starship prompt`).

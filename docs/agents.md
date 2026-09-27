@@ -31,7 +31,7 @@ options = { effort = "low" }    # the agent's own config options
 `default_agent` is the agent Parolsh starts. To use another one:
 
 ```text
-wallet ❯ #agent codex
+[claude] ~/projects/wallet ❯ #agent codex
 Agent changed to codex. Started a new conversation.
 ```
 
@@ -81,12 +81,12 @@ value, and `#options <id> <value>` changes one until you leave Parolsh (it is
 set again after `#new` and `#cd`):
 
 ```text
-wallet ❯ #options
+[claude] ~/projects/wallet ❯ #options
   mode               default*, acceptEdits, plan, auto, bypassPermissions
   model              default*, opus[1m], claude-fable-5-1[1m], sonnet, haiku
   effort             default, low*, medium, high, xhigh, max
   fast               on, off*
-wallet ❯ #options model sonnet
+[claude] ~/projects/wallet ❯ #options model sonnet
 model = sonnet, until you leave Parolsh.
 ```
 
@@ -460,7 +460,7 @@ A status line under the answer shows what the agent is doing, redrawn in place
 instead of adding lines:
 
 ```text
-wallet ❯ why is the API container restarting?
+[claude] ~/projects/wallet ❯ why is the API container restarting?
 ⠹ Running: Terminal · 12s
 ```
 

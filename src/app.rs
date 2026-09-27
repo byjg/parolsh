@@ -152,27 +152,33 @@ impl App {
     /// The prompt for the next line, in the configured style.
     fn prompt(&mut self) -> ui::Prompt {
         let style = self.prompt_override.unwrap_or(self.config.prompt);
-        match style {
-            PromptStyle::Minimal => ui::Prompt::minimal(),
+        let ansi = ui::is_ansi();
+        let home = home();
+        let context = ui::PromptContext {
+            cwd: &self.cwd,
+            status: self.last_status,
+            duration: self.last_duration,
+            // Only a running agent answers.
+            agent: self.agent.as_ref().and(self.banner_agent()),
+        };
+        let mut fell_back = false;
+        let prompt = match style {
+            PromptStyle::Minimal => ui::Prompt::minimal(self.last_status, ansi),
             // Starship prints ANSI colors: only on an ANSI terminal.
-            PromptStyle::Starship if ui::is_ansi() => {
-                let context = ui::PromptContext {
-                    cwd: &self.cwd,
-                    status: self.last_status,
-                    duration: self.last_duration,
-                    agent: self.banner_agent(),
-                };
-                match ui::Prompt::starship("starship", &context) {
-                    Ok(prompt) => prompt,
-                    Err(e) => {
-                        eprintln!("parolsh: starship: {e}. Using the parolsh prompt.");
-                        self.prompt_override = Some(PromptStyle::Parolsh);
-                        ui::Prompt::parolsh(self.label())
-                    }
+            PromptStyle::Starship if ansi => match ui::Prompt::starship("starship", &context) {
+                Ok(prompt) => prompt,
+                Err(e) => {
+                    eprintln!("parolsh: starship: {e}. Using the parolsh prompt.");
+                    fell_back = true;
+                    ui::Prompt::parolsh(&context, home.as_deref(), ansi)
                 }
-            }
-            _ => ui::Prompt::parolsh(self.label()),
+            },
+            _ => ui::Prompt::parolsh(&context, home.as_deref(), ansi),
+        };
+        if fell_back {
+            self.prompt_override = Some(PromptStyle::Parolsh);
         }
+        prompt
     }
 
     fn options_command(&self, args: &str) -> Result<()> {
@@ -548,18 +554,11 @@ impl App {
 
     fn print_banner(&self) {
         let agent = self.banner_agent();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = home();
         print!(
             "{}",
             ui::banner(env!("CARGO_PKG_VERSION"), agent, &self.cwd, home.as_deref())
         );
-    }
-
-    fn label(&self) -> String {
-        self.cwd
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.cwd.display().to_string())
     }
 }
 
@@ -618,8 +617,12 @@ fn run(command: Command) -> i32 {
     }
 }
 
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn resolve_dir(cwd: &Path, args: &str) -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = home();
     let path = match (args, &home) {
         ("" | "~", Some(home)) => home.clone(),
         (path, Some(home)) if path.starts_with("~/") => home.join(&path[2..]),

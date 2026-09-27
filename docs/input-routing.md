@@ -93,11 +93,11 @@ Runs the command like `!command`, shows its output, and keeps it for the
 agent: it is sent with your next message, then forgotten.
 
 ```text
-wallet ❯ !+docker ps
+[claude] ~/projects/wallet ❯ !+docker ps
 CONTAINER ID   IMAGE        STATUS
 ...
 (output of `docker ps` goes with your next message)
-wallet ❯ which of these containers looks unhealthy?
+[claude] ~/projects/wallet ❯ which of these containers looks unhealthy?
 ```
 
 The agent answers from that output instead of running the command again.
