@@ -28,6 +28,7 @@ one `!` away.
 `!` alone locks plain text to bash (the prompt shows `❯`), and `?` alone
 unlocks it back to the agent (`✦`).
 
+![A Parolsh session: ! locks plain text to bash and the prompt changes from ✦ to ❯; git status runs in bash; !+git diff shows the diff and keeps it for the agent; ?what did I change asks Claude, which explains the change; ? unlocks back to ✦](docs/images/shell-mode.png)
 
 It runs inside your usual terminal emulator, prints to the normal scrollback
 (no full-screen UI), and works with any ACP agent: Claude Code, Codex, Qwen

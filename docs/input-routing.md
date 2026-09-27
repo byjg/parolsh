@@ -36,6 +36,10 @@ text goes:
 [claude] ~/projects/wallet ✦ what changed today?    ← the agent
 ```
 
+A real session, locked to bash, sharing a diff with the agent, then
+unlocked:
+
+![A Parolsh session: ! locks plain text to bash and the prompt changes from ✦ to ❯; git status runs in bash; !+git diff shows the diff and keeps it for the agent; ?what did I change asks Claude, which explains the change; ? unlocks back to ✦](images/shell-mode.png)
 
 | Input | Agent mode `✦` (default) | Shell mode `❯` |
 |---|---|---|
