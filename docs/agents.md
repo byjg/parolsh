@@ -272,6 +272,10 @@ mode = "default"
 Qwen Code does not always start in `default` (it started in `auto` in our
 tests): set `mode` to be sure.
 
+Qwen Code stops a turn when its model loops, with *Tool-call loop protection
+stopped this turn*. The conversation continues, see
+[Troubleshooting](troubleshooting.md#tool-call-loop-protection-qwen-code).
+
 **Thinking off.** Set `"reasoning": false` in the `model.generationConfig`
 of `~/.qwen/settings.json`:
 
@@ -428,6 +432,10 @@ environment for that case; `shell_env = "always"` forces it.
 - **Restart:** `#cd` to a project configured with another agent restarts it.
   If the agent stops (it crashed, or its command does not exist), Parolsh
   prints the reason and `#new` starts it again.
+- **Failed turn:** when the agent answers a message with an error (for
+  example, Qwen Code's tool-call loop protection), Parolsh prints it and the
+  conversation continues: send another message. See
+  [Troubleshooting](troubleshooting.md).
 - **Exit:** leaving Parolsh stops the agent and everything it started.
 
 ## During a turn

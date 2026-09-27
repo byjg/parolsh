@@ -51,6 +51,8 @@ pub enum Event {
     },
     /// The prompt finished.
     TurnEnd(StopReason),
+    /// The agent answered the prompt with an error, and keeps running.
+    TurnFailed(String),
     /// Something worth telling the user, the agent keeps running.
     Notice(String),
     /// The agent stopped.
@@ -418,8 +420,11 @@ async fn serve(
                 while let Some(command) = commands.recv().await {
                     match command {
                         Command::Prompt(blocks) => {
-                            let stop_reason = prompt(&cx, &session, blocks, &mut commands).await?;
-                            let _ = events.send(Event::TurnEnd(stop_reason));
+                            let event = match prompt(&cx, &session, blocks, &mut commands).await {
+                                Ok(stop_reason) => Event::TurnEnd(stop_reason),
+                                Err(e) => Event::TurnFailed(e.to_string()),
+                            };
+                            let _ = events.send(event);
                         }
                         Command::NewSession(dir) => {
                             session = open_session(&cx, &dir, &wanted, &events, &shared).await?;
@@ -949,6 +954,35 @@ mod tests {
 
         match next(&agent) {
             Event::TurnEnd(reason) => assert_eq!(reason, StopReason::Cancelled),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_error_answer_fails_the_turn_and_the_session_keeps_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt("fail".to_string()));
+
+        match next(&agent) {
+            Event::TurnFailed(message) => {
+                assert!(message.contains("loop protection"), "{message}")
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let (text, _) = turn(&agent, "again");
+
+        assert!(text.contains("[s1|default|"), "{text}");
+    }
+
+    #[test]
+    fn an_agent_that_exits_during_a_turn_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt("die".to_string()));
+
+        match next(&agent) {
+            Event::Error(_) => {}
             other => panic!("unexpected event: {other:?}"),
         }
     }

@@ -354,6 +354,7 @@ impl App {
         };
         match turn::run(agent, blocks, display) {
             turn::Outcome::Finished => 0,
+            turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
                 eprintln!("parolsh: the agent stopped. Run #new to start it again.");
