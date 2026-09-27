@@ -1,5 +1,6 @@
 mod acp;
 mod app;
+mod complete;
 mod config;
 mod form;
 mod hints;

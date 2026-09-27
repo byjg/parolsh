@@ -6,7 +6,7 @@
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -54,14 +54,48 @@ pub unsafe fn load(mode: ShellEnv, shell: &str) -> Option<String> {
 /// Runs `shell -ilc 'env -0'` (a login and interactive shell reads both
 /// `~/.profile` and `~/.bashrc`) and returns the variables to import.
 /// Whatever the startup files print is ignored; only `env -0` is read.
+fn resolve(shell: &str, timeout: Duration) -> std::io::Result<Vec<(String, String)>> {
+    let (bytes, status) = capture(shell, &["-ilc", "env -0"], timeout)?;
+    let vars = parse(&bytes);
+    if vars.is_empty() {
+        return Err(std::io::Error::other(format!("no environment ({status})")));
+    }
+    Ok(vars)
+}
+
+/// The aliases, functions, builtins and keywords the interactive bash of
+/// `!command` knows, for completing command names. Functions starting with
+/// `_` are left out: they are bash-completion's helpers, not commands.
+pub fn bash_names(shell: &str) -> std::io::Result<Vec<String>> {
+    // What the startup files print comes before the NUL; the names after.
+    let script = "printf '\\0'; compgen -a -A function -b -k";
+    let (bytes, status) = capture(shell, &["-ic", script], TIMEOUT)?;
+    let Some(start) = bytes.iter().rposition(|&b| b == 0) else {
+        return Err(std::io::Error::other(format!("no names ({status})")));
+    };
+    let mut names: Vec<String> = String::from_utf8_lossy(&bytes[start + 1..])
+        .lines()
+        .filter(|name| !name.is_empty() && !name.starts_with('_'))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Runs `shell args` and returns its standard output and exit status.
 ///
 /// The shell runs in a new session, without a controlling terminal: an
 /// interactive shell would otherwise take the terminal for its job control
 /// and leave Parolsh in the background, stopped.
-fn resolve(shell: &str, timeout: Duration) -> std::io::Result<Vec<(String, String)>> {
+fn capture(
+    shell: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<(Vec<u8>, std::process::ExitStatus)> {
     let mut command = Command::new(shell);
     command
-        .args(["-ilc", "env -0"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -91,12 +125,7 @@ fn resolve(shell: &str, timeout: Duration) -> std::io::Result<Vec<(String, Strin
             )));
         }
     };
-    let status = child.wait()?;
-    let vars = parse(&bytes);
-    if vars.is_empty() {
-        return Err(std::io::Error::other(format!("no environment ({status})")));
-    }
-    Ok(vars)
+    Ok((bytes, child.wait()?))
 }
 
 /// `env -0` output: `KEY=value` entries separated by NUL, without the
@@ -143,18 +172,20 @@ fn parent_name() -> Option<String> {
 /// The first executable named `command` in the directories of `search_path`
 /// (a `PATH`-style list). A command with a `/` is checked as a path.
 pub fn find_command(command: &str, search_path: Option<&str>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |path: &PathBuf| {
-        path.metadata()
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-    };
     if command.contains('/') {
         let path = PathBuf::from(command);
-        return executable(&path).then_some(path);
+        return is_executable(&path).then_some(path);
     }
     std::env::split_paths(search_path?)
         .map(|dir| dir.join(command))
-        .find(executable)
+        .find(|path| is_executable(path))
+}
+
+/// A file (or a link to one) that the shell can run.
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]
@@ -196,24 +227,49 @@ mod tests {
             "echo noise from profile\nexport PAROLSH_FROM_PROFILE=yes\n",
         )
         .unwrap();
-        // The test runs bash with this HOME, like a user's login.
-        let shell = home.path().join("bash-with-home");
+        let shell = bash_with_home(home.path());
+
+        let vars = resolve(&shell, TIMEOUT).unwrap();
+
+        assert!(vars.contains(&("PAROLSH_FROM_PROFILE".to_string(), "yes".to_string())));
+        assert!(!vars.iter().any(|(key, _)| key.contains("noise")));
+    }
+
+    /// A bash that runs with `home` as HOME, like the user's own.
+    fn bash_with_home(home: &std::path::Path) -> String {
+        let shell = home.join("bash-with-home");
         std::fs::write(
             &shell,
-            format!(
-                "#!/bin/sh\nHOME={} exec bash \"$@\"\n",
-                home.path().display()
-            ),
+            format!("#!/bin/sh\nHOME={} exec bash \"$@\"\n", home.display()),
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
         std::fs::set_permissions(&shell, permissions).unwrap();
+        shell.to_str().unwrap().to_string()
+    }
 
-        let vars = resolve(shell.to_str().unwrap(), TIMEOUT).unwrap();
+    /// Aliases and functions from ~/.bashrc, and bash's builtins, without
+    /// the `_` helpers of bash-completion.
+    #[test]
+    fn lists_the_names_bash_knows() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".bashrc"),
+            "echo noise from bashrc\nalias ll='ls -l'\nmkcd() { :; }\n_helper() { :; }\n",
+        )
+        .unwrap();
 
-        assert!(vars.contains(&("PAROLSH_FROM_PROFILE".to_string(), "yes".to_string())));
-        assert!(!vars.iter().any(|(key, _)| key.contains("noise")));
+        let names = bash_names(&bash_with_home(home.path())).unwrap();
+
+        for name in ["ll", "mkcd", "cd", "export", "if"] {
+            assert!(names.contains(&name.to_string()), "{name} in {names:?}");
+        }
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with('_') || name.contains("noise"))
+        );
     }
 
     #[test]

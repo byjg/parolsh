@@ -1,15 +1,20 @@
 //! The interactive loop: read a line, route it, act on it.
 
 use anyhow::{Context, Result};
-use reedline::{FileBackedHistory, Reedline, Signal};
+use reedline::{
+    ColumnarMenu, Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::acp::AgentHandle;
+use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, route};
-use crate::{config, hints, project, setup, shell, turn, ui};
+use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -35,6 +40,8 @@ Control commands:
 
 pub struct App {
     cwd: PathBuf,
+    /// The same directory, shared with the Tab completion.
+    completion_cwd: Arc<Mutex<PathBuf>>,
     project_root: Option<PathBuf>,
     config: Config,
     /// Name of the agent in use: `default_agent`, until `#agent <name>`.
@@ -68,6 +75,7 @@ impl App {
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
         let mut app = Self {
+            completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             cwd,
             project_root,
             active: config.default_agent.clone(),
@@ -92,6 +100,7 @@ impl App {
             editor = editor
                 .with_highlighter(Box::new(hints::InputHighlighter))
                 .with_hinter(Box::new(hints::PrefixHinter));
+            editor = self.with_completion(editor);
         }
         if let Some(path) = history_path() {
             if let Some(dir) = path.parent() {
@@ -282,6 +291,51 @@ impl App {
         }
     }
 
+    /// Tab completes `!command` lines, as bash does: a single match goes into
+    /// the line, several fill in what they share, then show a menu.
+    fn with_completion(&self, editor: Reedline) -> Reedline {
+        let names = Arc::new(OnceLock::new());
+        let shell = self.config.shell[0].clone();
+        if Path::new(&shell)
+            .file_name()
+            .is_some_and(|name| name == "bash")
+        {
+            // In the background: loading ~/.bashrc takes a moment, and Tab
+            // works with the PATH commands until it is done.
+            let names = names.clone();
+            std::thread::spawn(move || {
+                if let Ok(list) = shellenv::bash_names(&shell) {
+                    let _ = names.set(list);
+                }
+            });
+        }
+        let completer = ShellCompleter {
+            cwd: self.completion_cwd.clone(),
+            names,
+        };
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::BackTab,
+            ReedlineEvent::MenuPrevious,
+        );
+        let menu = ColumnarMenu::default().with_name("completion_menu");
+        editor
+            .with_completer(Box::new(completer))
+            .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
+            .with_edit_mode(Box::new(Emacs::new(keybindings)))
+            .with_quick_completions(true)
+            .with_partial_completions(true)
+    }
+
     fn change_dir(&mut self, args: &str) -> Result<()> {
         let target = resolve_dir(&self.cwd, args)?;
         let project_root = project::find_root(&target);
@@ -298,6 +352,7 @@ impl App {
         }
         self.config = config;
         self.cwd = target;
+        *self.completion_cwd.lock().expect("cwd lock") = self.cwd.clone();
         self.project_root = project_root;
 
         // Same agent: a new conversation in the new directory. Otherwise the
