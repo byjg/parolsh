@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::acp::AgentHandle;
+use crate::audit::{self, Actor, Audit};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, Mode, SharedMode, route};
@@ -39,6 +40,7 @@ Control commands:
   #options <id> <value>  set one until you leave Parolsh
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
+  #audit          what ran here, what the agent got, and what it did
   #exit           leave Parolsh";
 
 pub struct App {
@@ -62,6 +64,8 @@ pub struct App {
     /// Exit code and duration of the last command, for the prompt.
     last_status: i32,
     last_duration: Duration,
+    /// What happened in this run, for `#audit`.
+    audit: Audit,
 }
 
 enum Flow {
@@ -81,6 +85,7 @@ impl App {
         );
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
+        let audit = Audit::new(config.audit_entries);
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             mode: SharedMode::default(),
@@ -94,6 +99,7 @@ impl App {
             notices,
             last_status: 0,
             last_duration: Duration::ZERO,
+            audit,
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -156,6 +162,10 @@ impl App {
             Input::Agent(text) => self.ask(text),
             Input::Shell(line) => {
                 let code = run(shell::command(&self.config.shell, &line, &self.cwd));
+                self.audit.add(
+                    Actor::User,
+                    format!("!{} · exit {code}", audit::excerpt(&line, 120)),
+                );
                 if code == 0
                     && let Some(hash_cd) = input::cd_suggestion(&line)
                 {
@@ -166,7 +176,11 @@ impl App {
                 }
                 code
             }
-            Input::Bash => run(shell::bash(&self.cwd)),
+            Input::Bash => {
+                let code = run(shell::bash(&self.cwd));
+                self.audit.add(Actor::User, format!("!bash · exit {code}"));
+                code
+            }
             Input::Share(line) => self.share(line),
             Input::Lock(mode) => {
                 self.mode.set(mode);
@@ -260,6 +274,17 @@ impl App {
         Ok(())
     }
 
+    /// `#audit`: the entries of this run, oldest first.
+    fn audit_command(&self) {
+        let lines = self.audit.lines(ui::width());
+        if lines.is_empty() {
+            println!("Nothing yet: commands, messages and what the agent does show up here.");
+        }
+        for line in lines {
+            println!("{line}");
+        }
+    }
+
     fn config_command(&self, args: &str) -> Result<()> {
         match args {
             "" => {
@@ -320,8 +345,18 @@ impl App {
             "prompt" => self.prompt_command(args),
             "config" => self.config_command(args),
             "options" => self.options_command(args),
+            "audit" => {
+                self.audit_command();
+                return Some(0);
+            }
             _ => Err(anyhow::anyhow!("unknown command `#{name}`, see #help")),
         };
+        if name != "help" {
+            let failed = if result.is_err() { " · failed" } else { "" };
+            let line = format!("#{name} {args}");
+            self.audit
+                .add(Actor::User, format!("{}{failed}", line.trim_end()));
+        }
         match result {
             Ok(()) => Some(0),
             Err(e) => {
@@ -398,6 +433,7 @@ impl App {
             self.mode.set(config.input);
         }
         self.config = config;
+        self.audit.set_limit(self.config.audit_entries);
         self.cwd = target;
         *self.completion_cwd.lock().expect("cwd lock") = self.cwd.clone();
         self.project_root = project_root;
@@ -425,6 +461,15 @@ impl App {
                     eprintln!("exit {code}");
                 }
                 println!("(output of `{line}` goes with your next message)");
+                let kept = audit::size(captured.text.len());
+                let last = if captured.truncated { " (its end)" } else { "" };
+                self.audit.add(
+                    Actor::User,
+                    format!(
+                        "!+{} · exit {code} · {kept} kept{last}",
+                        audit::excerpt(&line, 120)
+                    ),
+                );
                 self.shared.push(Shared {
                     command: line,
                     cwd: self.cwd.clone(),
@@ -447,6 +492,22 @@ impl App {
             eprintln!("parolsh: {}", no_agent());
             return 1;
         };
+        let name = self.active.as_deref().unwrap_or("the agent");
+        if !self.shared.is_empty() {
+            let bytes = self.shared.iter().map(|s| s.captured.text.len()).sum();
+            self.audit.add(
+                Actor::Shared,
+                format!(
+                    "{} output(s), {} → {name}",
+                    self.shared.len(),
+                    audit::size(bytes)
+                ),
+            );
+        }
+        self.audit.add(
+            Actor::User,
+            format!("→ {name}: {}", audit::excerpt(&text, 80)),
+        );
         let mut blocks: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
         blocks.push(text);
         let display = turn::Display {
@@ -454,11 +515,12 @@ impl App {
             markdown: self.config.markdown,
             links: self.config.links,
         };
-        match turn::run(agent, blocks, display) {
+        match turn::run(agent, blocks, display, &mut self.audit) {
             turn::Outcome::Finished => 0,
             turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
+                self.audit.add(Actor::Parolsh, "the agent stopped");
                 eprintln!("parolsh: the agent stopped. Run #new to start it again.");
                 self.agent = None;
                 1

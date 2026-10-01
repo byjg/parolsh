@@ -1,12 +1,15 @@
 //! Showing one agent turn: streamed text, tool calls and permission prompts.
 
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind, StopReason};
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Detail, Event, TurnId};
+use crate::audit::{self, Actor, Audit};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::markdown::Markdown;
@@ -47,10 +50,20 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Ctrl+C asks the agent to cancel. If it does not confirm within
 /// `CANCEL_GRACE`, or on a second Ctrl+C, the turn ends on Parolsh's side and
 /// the agent keeps running: its late events are dropped.
-pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcome {
+///
+/// What the agent does and what you answer go to `audit`.
+pub fn run(
+    agent: &AgentHandle,
+    blocks: Vec<String>,
+    display: Display,
+    audit: &mut Audit,
+) -> Outcome {
     let Some(turn) = agent.prompt_blocks(blocks) else {
         return Outcome::AgentStopped;
     };
+    let started = Instant::now();
+    // The audit entry of each tool call, updated when it finishes.
+    let mut tools: HashMap<String, (usize, ToolEntry)> = HashMap::new();
     INTERRUPTED.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
@@ -64,14 +77,14 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
     loop {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
             if cancelled.is_some() {
-                return give_up(agent, turn, &mut out);
+                return give_up(agent, turn, &mut out, audit);
             }
             agent.cancel();
             cancelled = Some(Instant::now());
             out.pin("Cancelling…");
         }
         if cancelled.is_some_and(|at| at.elapsed() >= CANCEL_GRACE) {
-            return give_up(agent, turn, &mut out);
+            return give_up(agent, turn, &mut out, audit);
         }
 
         let event = match agent.events.recv_timeout(Duration::from_millis(100)) {
@@ -106,12 +119,36 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
             Event::Permission { .. } | Event::Form { .. } if stale => {}
             Event::Text(text) => out.text(&text),
             Event::Thought(text) => out.thought(&text),
-            Event::Tool { id, title } => out.tool(id, title),
+            Event::Tool {
+                id,
+                title,
+                kind,
+                files,
+            } => {
+                let entry = ToolEntry {
+                    kind,
+                    title: title.clone(),
+                    files,
+                    finished: None,
+                };
+                let index = audit.add(Actor::Agent, entry.to_string());
+                tools.insert(id.clone(), (index, entry));
+                out.tool(id, title);
+            }
             Event::ToolUpdate {
                 id,
                 title,
                 finished,
-            } => out.tool_update(&id, title, finished),
+            } => {
+                if let Some((index, entry)) = tools.get_mut(&id) {
+                    if let Some(title) = &title {
+                        entry.title = title.clone();
+                    }
+                    entry.finished = finished.or(entry.finished);
+                    audit.replace(*index, entry.to_string());
+                }
+                out.tool_update(&id, title, finished);
+            }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
             Event::Activity => {}
             Event::Permission {
@@ -122,13 +159,37 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
             } => {
                 out.hide();
                 out.end_line();
-                let _ = reply.send(ask_permission(&title, &details, &options));
+                audit.add(
+                    Actor::Agent,
+                    format!("asks: {}", audit::excerpt(&title, 120)),
+                );
+                let choice = ask_permission(&title, &details, &options);
+                let answer = choice
+                    .as_ref()
+                    .and_then(|id| options.iter().find(|option| &option.option_id == id))
+                    .map_or("no choice".to_string(), |option| option.name.clone());
+                audit.add(Actor::User, format!("→ {answer}"));
+                let _ = reply.send(choice);
                 out.show();
             }
             Event::Form { form, reply } => {
                 out.hide();
                 out.end_line();
-                let _ = reply.send(ask_form(&form));
+                let questions = form.fields.len();
+                audit.add(
+                    Actor::Agent,
+                    format!("asks {questions} question(s): {}", form.message),
+                );
+                let answers = ask_form(&form);
+                audit.add(
+                    Actor::User,
+                    match &answers {
+                        None => "→ cancelled",
+                        Some(answers) if answers.is_empty() => "→ declined",
+                        Some(_) => "→ answered",
+                    },
+                );
+                let _ = reply.send(answers);
                 out.show();
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
@@ -139,14 +200,27 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
             }
             Event::TurnEnd(_, reason) => {
                 out.finish();
-                if let Some(message) = describe(reason) {
+                let how = describe(reason);
+                if let Some(message) = how {
                     eprintln!("({message})");
                 }
+                audit.add(
+                    Actor::Parolsh,
+                    format!(
+                        "turn ended{} · {}s",
+                        how.map(|how| format!(" ({how})")).unwrap_or_default(),
+                        started.elapsed().as_secs()
+                    ),
+                );
                 return Outcome::Finished;
             }
             Event::TurnFailed(_, message) => {
                 out.finish();
                 eprintln!("parolsh: {message}");
+                audit.add(
+                    Actor::Parolsh,
+                    format!("turn failed: {}", audit::excerpt(&message, 80)),
+                );
                 return Outcome::Failed;
             }
         }
@@ -154,11 +228,45 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
 }
 
 /// Ends the turn without the agent's confirmation; the agent keeps running.
-fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output) -> Outcome {
+fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audit) -> Outcome {
     agent.abandon(turn);
     out.finish();
     eprintln!("(cancelled — the agent did not confirm)");
+    audit.add(Actor::Parolsh, "cancelled, the agent did not confirm");
     Outcome::Finished
+}
+
+/// A tool call as `#audit` shows it: `edit: Write notes.txt [notes.txt] ·
+/// completed`.
+struct ToolEntry {
+    kind: String,
+    title: String,
+    files: Vec<PathBuf>,
+    /// `Some(true)` completed, `Some(false)` failed.
+    finished: Option<bool>,
+}
+
+impl std::fmt::Display for ToolEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `other` is ACP's kind when the agent gives none.
+        if !self.kind.is_empty() && self.kind != "other" {
+            write!(f, "{}: ", self.kind)?;
+        }
+        f.write_str(&audit::excerpt(&self.title, 120))?;
+        if !self.files.is_empty() {
+            let files: Vec<String> = self
+                .files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect();
+            write!(f, " [{}]", files.join(", "))?;
+        }
+        match self.finished {
+            Some(true) => f.write_str(" · completed"),
+            Some(false) => f.write_str(" · failed"),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Prints notices and errors that arrived while no turn was running, such as
@@ -692,6 +800,28 @@ mod tests {
         status.update_tool("t1", None, Some(false));
 
         assert_eq!(status.activity(), "Cancelling…");
+    }
+
+    #[test]
+    fn a_tool_entry_shows_kind_files_and_how_it_ended() {
+        let mut entry = ToolEntry {
+            kind: "edit".to_string(),
+            title: "Write notes".to_string(),
+            files: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            finished: None,
+        };
+        assert_eq!(entry.to_string(), "edit: Write notes [a.txt, b.txt]");
+
+        entry.finished = Some(true);
+        assert_eq!(
+            entry.to_string(),
+            "edit: Write notes [a.txt, b.txt] · completed"
+        );
+
+        entry.kind = "other".to_string();
+        entry.files.clear();
+        entry.finished = Some(false);
+        assert_eq!(entry.to_string(), "Write notes · failed");
     }
 
     #[test]

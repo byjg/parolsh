@@ -110,6 +110,7 @@ launched as `claude-agent-acp`.
 | `markdown` | `true` | Render the answers' markdown on ANSI terminals: `**bold**`, `` `code` `` in cyan, code blocks, `#` headings and `-` bullets, with the markers hidden. `false` prints the raw text. |
 | `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
 | `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
+| `audit_entries` | `1000` | How many entries [`#audit`](input-routing.md#audit) keeps, the oldest dropped first. `0` keeps none. |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a

@@ -554,3 +554,41 @@ fn ctrl_c_cancels_an_agent_that_streams_nonstop() {
     assert!(screen.contains("(cancelled)"), "{screen}");
     assert!(!screen.contains("did not confirm"), "{screen}");
 }
+
+/// `#audit` lists what ran, what was shared and sent, what the agent did and
+/// what was answered, in order.
+#[test]
+fn audit_shows_what_happened_in_this_run() {
+    let screen = with_fake_agent(
+        "",
+        &[
+            "!echo local",
+            "!+echo shared",
+            "perm",
+            "1",
+            "tools",
+            "#audit",
+        ],
+    );
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    let expected = [
+        "USER     !echo local · exit 0",
+        "USER     !+echo shared · exit 0 · 7 B kept",
+        "SHARED   1 output(s), 7 B → fake",
+        "USER     → fake: perm",
+        "AGENT    asks: Writing to notes.txt",
+        "USER     → Allow once",
+        "PAROLSH  turn ended · ",
+        "USER     → fake: tools",
+        "AGENT    read: Read a.rs [/tmp/a] · completed",
+        "AGENT    Read b · failed",
+    ];
+
+    let mut rest = audit;
+    for line in expected {
+        let at = rest
+            .find(line)
+            .unwrap_or_else(|| panic!("missing or out of order: {line}\n{audit}"));
+        rest = &rest[at + line.len()..];
+    }
+}

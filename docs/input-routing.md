@@ -207,4 +207,41 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#prompt <name>` | Switch the prompt: `parolsh`, `starship` or `minimal`, until you leave Parolsh |
 | `#project` | Show the project root |
 | `#project init` | Create `.parolsh/` in the current directory |
+| `#audit` | What happened since Parolsh started, see [`#audit`](#audit) |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works) |
+
+## `#audit`
+
+`#audit` lists what happened since Parolsh started, oldest first: what ran on
+your machine, what reached the agent, what the agent did, and what you
+answered.
+
+```text
+[claude] ~/projects/wallet ✦ #audit
+   0:12  USER     !kubectl get pods · exit 0
+   0:20  USER     !+kubectl logs api · exit 0 · 12 KB kept
+   0:31  SHARED   1 output(s), 12 KB → claude
+   0:31  USER     → claude: why is the api crashing?
+   0:44  AGENT    execute: kubectl describe pod api · completed
+   0:52  AGENT    asks: Writing to src/foo.rs
+   0:55  USER     → Allow once
+   0:58  AGENT    edit: Write src/foo.rs [src/foo.rs] · completed
+   1:03  PAROLSH  turn ended · 32s
+```
+
+| Who | What |
+|---|---|
+| `USER` | `!command`, `!+command` and `!bash` with their exit code, your messages (their first line) with the agent they went to, `#` commands, and your answers to the agent's questions |
+| `SHARED` | `!+` output sent with a message, and its size |
+| `AGENT` | Tool calls, with their kind, the files the agent names and how they ended; permission requests and questions |
+| `PAROLSH` | How each turn ended, a cancel the agent did not confirm, an agent that stopped |
+
+It keeps titles and commands only, the first line of each and at most 200
+characters: outputs and answers stay in the scrollback. It is in memory, and
+gone when you leave Parolsh; for a full record, see
+[Logging the agent's messages](troubleshooting.md#logging-the-agents-messages).
+It keeps the last 1000 entries and says how many older ones were dropped;
+`audit_entries` in the [configuration](configuration.md#keys) changes that,
+and `0` turns it off.
+What the agent does without telling (a tool it does not report) is not
+there: see [Security model](security.md).

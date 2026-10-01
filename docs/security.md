@@ -69,6 +69,12 @@ configured, but not what is executed: `shell` and the agents' `command`,
 `args` and `env` are only read from your global configuration. See
 [What a project can change](configuration.md#what-a-project-can-change).
 
+## Looking back
+
+`#audit` lists what ran on your machine, what reached the agent and what the
+agent reported doing, for the current run (see
+[`#audit`](input-routing.md#audit)).
+
 ## The ACP log
 
 `PAROLSH_ACP_LOG` writes the whole conversation to a file, including what you
