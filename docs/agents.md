@@ -95,7 +95,7 @@ offer, and the conversation keeps going. The list can change: Claude drops
 `fast` for models without a fast mode. Options are values the agent reports
 for your account and version, so check `#options` rather than this page.
 
-`options` merges key by key, like `env`: a project can change one option.
+`options` merges key by key: a project can change one option.
 
 ### Less thinking
 
@@ -123,9 +123,9 @@ export OPENAI_API_KEY=sk-...
 ```
 
 The agent inherits them through Parolsh. `env` works for keys too, but then
-the key sits in plain text in `config.toml`, and in a project's
-`.parolsh/config.toml` it can end up in git. Use `env` for base URLs, model
-names and switches.
+the key sits in plain text in `config.toml`. Use `env` for base URLs, model
+names and switches. `env` is only read from the global file, see
+[What a project can change](configuration.md#what-a-project-can-change).
 
 ## Summary
 

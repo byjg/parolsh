@@ -172,8 +172,25 @@ impl ConfigFile {
         }
     }
 
+    /// A project file comes with the directory, often from a cloned
+    /// repository: it may change how Parolsh looks and which configured agent
+    /// it uses, never what is executed.
+    fn check_project(&self) -> Result<()> {
+        if self.shell.is_some() {
+            bail!("`shell` can only be set in the global configuration");
+        }
+        for (name, agent) in &self.agents {
+            if agent.command.is_some() || agent.args.is_some() || !agent.env.is_empty() {
+                bail!(
+                    "agent `{name}`: `command`, `args` and `env` can only be set in the global configuration"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies a project file, already checked, on top of this one.
     fn merge(mut self, over: Self) -> Self {
-        self.shell = over.shell.or(self.shell);
         self.prompt = over.prompt.or(self.prompt);
         self.input = over.input.or(self.input);
         self.thinking = over.thinking.or(self.thinking);
@@ -183,9 +200,6 @@ impl ConfigFile {
         self.default_agent = over.default_agent.or(self.default_agent);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
-            base.command = agent.command.or(base.command.take());
-            base.args = agent.args.or(base.args.take());
-            base.env.extend(agent.env);
             base.mode = agent.mode.or(base.mode.take());
             base.options.extend(agent.options);
         }
@@ -208,9 +222,15 @@ impl Config {
     }
 
     fn load_files(global: Option<&Path>, project: Option<&Path>) -> Result<Self> {
-        let mut file = ConfigFile::default();
-        for path in [global, project].into_iter().flatten() {
-            file = file.merge(ConfigFile::read(path)?);
+        let mut file = global
+            .map(ConfigFile::read)
+            .transpose()?
+            .unwrap_or_default();
+        if let Some(path) = project {
+            let over = ConfigFile::read(path)?;
+            over.check_project()
+                .with_context(|| format!("invalid {}", path.display()))?;
+            file = file.merge(over);
         }
         Self::resolve(file)
     }
@@ -325,7 +345,6 @@ mod tests {
             "project.toml",
             r#"
             default_agent = "claude"
-            shell = ["zsh", "-ic"]
             prompt = "starship"
 
             [agents.claude]
@@ -335,7 +354,7 @@ mod tests {
 
         let config = Config::load_files(Some(&global), Some(&project)).unwrap();
 
-        assert_eq!(config.shell, ["zsh", "-ic"]);
+        assert_eq!(config.shell, ["bash", "-ic"]);
         assert_eq!(config.prompt, PromptStyle::Starship);
         assert_eq!(config.default_agent.as_deref(), Some("claude"));
         assert_eq!(
@@ -360,32 +379,36 @@ mod tests {
         );
     }
 
+    /// A cloned repository must not choose what Parolsh executes.
     #[test]
-    fn env_is_merged_key_by_key() {
+    fn a_project_cannot_change_what_is_executed() {
         let tmp = tempfile::tempdir().unwrap();
         let global = write(
             tmp.path(),
             "global.toml",
-            r#"
-            [agents.qwen]
-            command = "qwen"
-            env = { OPENAI_BASE_URL = "https://api.openai.com/v1", OPENAI_MODEL = "gpt-5" }
-            "#,
+            "[agents.claude]\ncommand = \"claude-agent-acp\"\n",
         );
-        let project = write(
-            tmp.path(),
-            "project.toml",
-            r#"
-            [agents.qwen]
-            env = { OPENAI_MODEL = "gpt-5-mini" }
-            "#,
-        );
+        let cases = [
+            ("shell = [\"./evil\"]\n", "`shell`"),
+            ("[agents.claude]\ncommand = \"./evil\"\n", "agent `claude`"),
+            ("[agents.claude]\nargs = [\"--evil\"]\n", "agent `claude`"),
+            (
+                "[agents.claude]\nenv = { LD_PRELOAD = \"./evil.so\" }\n",
+                "agent `claude`",
+            ),
+            // A new agent would need a command: it cannot be defined either.
+            (
+                "[agents.evil]\nmode = \"plan\"\n",
+                "agent `evil` has no `command`",
+            ),
+            ("default_agent = \"evil\"\n", "`default_agent` is `evil`"),
+        ];
 
-        let config = Config::load_files(Some(&global), Some(&project)).unwrap();
-        let qwen = &config.agents["qwen"];
-
-        assert_eq!(qwen.env["OPENAI_BASE_URL"], "https://api.openai.com/v1");
-        assert_eq!(qwen.env["OPENAI_MODEL"], "gpt-5-mini");
+        for (i, (text, message)) in cases.iter().enumerate() {
+            let project = write(tmp.path(), &format!("project{i}.toml"), text);
+            let error = Config::load_files(Some(&global), Some(&project)).unwrap_err();
+            assert!(format!("{error:#}").contains(message), "{text}: {error:#}");
+        }
     }
 
     #[test]

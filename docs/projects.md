@@ -35,7 +35,9 @@ the project root:
 
 The project root decides which configuration is used:
 `.parolsh/config.toml` is loaded on top of the global configuration (see
-[Configuration](configuration.md)).
+[Configuration](configuration.md)). It can pick one of your configured agents
+and change how Parolsh looks, but not what is executed: see
+[What a project can change](configuration.md#what-a-project-can-change).
 
 It does not change the working directory: that is always the directory where
 Parolsh started, or the last `#cd`.
