@@ -17,7 +17,7 @@ Prompts:
 The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
   fail   answers the prompt with an error, like Qwen's loop protection
-  die    exits without answering
+  die    prints "boom" on stderr and exits with status 1, without answering
   env X  replies the value of the environment variable X
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
@@ -157,6 +157,7 @@ def prompt(request):
             "data": {"code": "LOOP_DETECTED"}}})
         return
     elif text == "die":
+        print("boom", file=sys.stderr, flush=True)
         sys.exit(1)
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
