@@ -16,6 +16,9 @@ Prompts:
 
 The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
+  stuck  replies "working", ignores the first session/cancel and ends on the
+         second, like an agent blocked in an API call
+  stream sends a text chunk every 20 ms until session/cancel
   fail   answers the prompt with an error, like Qwen's loop protection
   die    prints "boom" on stderr and exits with status 1, without answering
   env X  replies the value of the environment variable X
@@ -29,6 +32,7 @@ Sessions offer config options `effort` (low/high), `fast` (boolean) and
 """
 import json
 import os
+import select
 import sys
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
@@ -161,6 +165,20 @@ def prompt(request):
         sys.exit(1)
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
+    elif text == "stuck":
+        say(session_id, "working")
+        cancels = 0
+        while cancels < 2:
+            if receive().get("method") == "session/cancel":
+                cancels += 1
+        stop_reason = "cancelled"
+    elif text == "stream":
+        while True:
+            say(session_id, ".")
+            ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if ready and receive().get("method") == "session/cancel":
+                stop_reason = "cancelled"
+                break
     elif text == "slow":
         say(session_id, "working")
         while True:

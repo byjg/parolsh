@@ -519,5 +519,13 @@ Claude and Codex ask through the standard ACP form request (elicitation), and
 Qwen Code through its own question tool; Parolsh answers both. Gemini CLI does
 not ask questions in ACP mode.
 
-`Ctrl+C` cancels the turn: the agent stops, Parolsh prints `(cancelled)` and
-returns to the prompt.
+`Ctrl+C` cancels the turn: the status line shows `Cancelling…`, the agent
+stops, Parolsh prints `(cancelled)` and returns to the prompt.
+
+An agent blocked in a request may not confirm the cancel. After 5 seconds, or
+at once on a second `Ctrl+C`, Parolsh stops waiting and prints
+`(cancelled — the agent did not confirm)`. The agent keeps running, and what
+it still sends for that turn is dropped. Your next message waits until that
+turn ends (the status line shows `Waiting for the previous turn to stop…`),
+and `Ctrl+C` there drops it. `#new` starts the agent again instead of
+waiting.
