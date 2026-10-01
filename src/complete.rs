@@ -1,16 +1,24 @@
 //! Tab completion for `!command`, `!+command` and, in shell mode, plain
 //! lines: command names from `PATH`
-//! and from bash (aliases, functions, builtins), then file names. It knows
-//! no command's own arguments (git branches, flags): `!bash` has those.
+//! and from bash (aliases, functions, builtins); then each command's own
+//! arguments (git branches, ssh hosts) from bash-completion, or file names.
 //! Text for the agent has nothing to complete.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
 use crate::input::{Mode, SharedMode};
-use crate::shellenv::is_executable;
+use crate::shellenv::{self, is_executable};
+
+/// Asks bash-completion for the arguments of a command line, see the script.
+const BASH_SCRIPT: &str = include_str!("complete.bash");
+
+/// How long bash-completion may take: the completer runs on each key while
+/// the menu is open. Slower, the file names are offered instead.
+const BASH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Characters that end a word, besides whitespace.
 const SEPARATORS: &str = "|;&()<>";
@@ -25,6 +33,8 @@ pub struct ShellCompleter {
     /// Parolsh starts; not set until then.
     pub names: Arc<OnceLock<Vec<String>>>,
     pub mode: SharedMode,
+    /// The bash that completes arguments, when `shell` is bash.
+    pub bash: Option<String>,
 }
 
 impl Completer for ShellCompleter {
@@ -39,6 +49,7 @@ impl Completer for ShellCompleter {
             &cwd,
             search_path.as_deref(),
             names,
+            self.bash.as_deref(),
         );
         CompletionResult::fresh(found)
     }
@@ -52,6 +63,7 @@ fn suggestions(
     cwd: &Path,
     search_path: Option<&str>,
     names: &[String],
+    bash: Option<&str>,
 ) -> Vec<Suggestion> {
     let Some(start) = command_start(line, mode).filter(|&start| start <= pos) else {
         return Vec::new();
@@ -61,6 +73,15 @@ fn suggestions(
     let command_position = is_command_position(&line[start..word_start]);
     let mut found = if command_position && !word.contains('/') {
         commands(&word, search_path, names)
+    } else if let Some(found) = bash.filter(|_| !command_position).and_then(|bash| {
+        arguments(
+            bash,
+            &line[start + segment_start(&line[start..word_start])..pos],
+            &word,
+            cwd,
+        )
+    }) {
+        found
     } else {
         files(&word, cwd, command_position)
     };
@@ -99,6 +120,54 @@ fn word_start(text: &str) -> usize {
         }
     }
     start
+}
+
+/// Where the last command of `before` starts: after the last `|`, `;`, `&`
+/// or `(`, and its blanks.
+fn segment_start(before: &str) -> usize {
+    let after = before.rfind(|c| "|;&(".contains(c)).map_or(0, |i| i + 1);
+    after + (before[after..].len() - before[after..].trim_start().len())
+}
+
+/// The completions bash-completion offers for the last word of `command`,
+/// run in `cwd`. `None` when there are none, when it takes longer than
+/// `BASH_TIMEOUT`, or when they do not continue `word` (bash splits words
+/// at `=` and `:` too): the file names are offered then.
+fn arguments(bash: &str, command: &str, word: &str, cwd: &Path) -> Option<Vec<Suggestion>> {
+    let (bytes, _) = shellenv::capture(
+        bash,
+        &["-c", BASH_SCRIPT, "parolsh", command],
+        Some(cwd),
+        BASH_TIMEOUT,
+    )
+    .ok()?;
+    let mut values: Vec<String> = String::from_utf8_lossy(&bytes)
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    if values.is_empty() || values.iter().any(|value| !value.starts_with(word)) {
+        return None;
+    }
+    values.sort();
+    values.dedup();
+    Some(
+        values
+            .into_iter()
+            .map(|value| {
+                // A trailing space is bash-completion's way to say the word
+                // is complete; `--option=`, `dir/` and `host:` go on.
+                if let Some(value) = value.strip_suffix(' ') {
+                    return suggestion(escape(value), true);
+                }
+                if directory(&value, cwd).is_dir() && !value.ends_with('/') {
+                    return suggestion(escape(&value) + "/", false);
+                }
+                let goes_on = value.ends_with(['/', '=', ':']);
+                suggestion(escape(&value), !goes_on)
+            })
+            .collect(),
+    )
 }
 
 /// True when the word after `before` is a command name: the first word, or
@@ -248,7 +317,7 @@ mod tests {
         names: &[&str],
     ) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-        suggestions(line, line.len(), mode, cwd, search_path, &names)
+        suggestions(line, line.len(), mode, cwd, search_path, &names, None)
             .into_iter()
             .map(|s| {
                 let space = if s.append_whitespace { " " } else { "" };
@@ -367,10 +436,110 @@ mod tests {
         let line = "!cat no | wc";
         let names = Vec::new();
 
-        let found = suggestions(line, "!cat no".len(), Mode::Agent, dir.path(), None, &names);
+        let found = suggestions(
+            line,
+            "!cat no".len(),
+            Mode::Agent,
+            dir.path(),
+            None,
+            &names,
+            None,
+        );
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].value, "notes.txt");
         assert_eq!(found[0].span, Span::new(5, 7));
+    }
+
+    /// A bash that knows a completion for `fake`, then runs the script.
+    fn fake_bash(dir: &Path) -> String {
+        let path = dir.join("fake-bash");
+        std::fs::write(
+            &path,
+            r#"#!/bin/bash
+script=$2; shift 2
+exec bash -c '
+_fake() {
+    case $2 in
+        sl*) sleep 5 ;;
+        do*) COMPREPLY=("done ") ;;
+        s*) COMPREPLY=(src) ;;
+        no*) COMPREPLY=(other) ;;
+        *) COMPREPLY=($(compgen -W "alpha beta branch --color=" -- "$2")) ;;
+    esac
+}
+complete -F _fake fake
+'"$script" "$@"
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn complete_with_bash(line: &str, cwd: &Path) -> Vec<String> {
+        let bash = fake_bash(cwd);
+        suggestions(line, line.len(), Mode::Agent, cwd, None, &[], Some(&bash))
+            .into_iter()
+            .map(|s| {
+                let space = if s.append_whitespace { " " } else { "" };
+                format!("{}{}{space}", &line[..s.span.start], s.value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn arguments_come_from_the_commands_bash_completion() {
+        let dir = fixture();
+
+        assert_eq!(
+            complete_with_bash("!fake b", dir.path()),
+            ["!fake beta ", "!fake branch "]
+        );
+        assert_eq!(
+            complete_with_bash("!ls | fake al", dir.path()),
+            ["!ls | fake alpha "]
+        );
+    }
+
+    #[test]
+    fn bash_completion_says_when_a_word_goes_on() {
+        let dir = fixture();
+
+        assert_eq!(
+            complete_with_bash("!fake --co", dir.path()),
+            ["!fake --color="]
+        );
+        assert_eq!(complete_with_bash("!fake do", dir.path()), ["!fake done "]);
+        assert_eq!(complete_with_bash("!fake s", dir.path()), ["!fake src/"]);
+    }
+
+    #[test]
+    fn without_bash_completion_arguments_are_files() {
+        let dir = fixture();
+
+        // No completion for the command, or one that does not continue the
+        // word.
+        assert_eq!(
+            complete_with_bash("!cat no", dir.path()),
+            ["!cat notes.txt "]
+        );
+        assert_eq!(
+            complete_with_bash("!fake no", dir.path()),
+            ["!fake notes.txt "]
+        );
+    }
+
+    #[test]
+    fn a_slow_bash_completion_gives_way_to_files() {
+        let dir = fixture();
+        let started = std::time::Instant::now();
+
+        let found = complete_with_bash("!fake sl", dir.path());
+
+        assert!(found.is_empty(), "{found:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

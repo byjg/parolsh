@@ -90,11 +90,19 @@ have in common, and the next `Tab` shows them in a menu (`Tab` and
   the shell is bash, from the aliases, functions and builtins your
   `~/.bashrc` sets up. That list is read once, in the background, when
   Parolsh starts: an alias added later shows up the next time.
-- **Other words** complete as file and directory names, from Parolsh's
-  current directory. `~/` and absolute paths work, hidden files show up when
-  the name starts with `.`, and special characters are escaped (`My\ Files`).
-- A command's own arguments (git branches, `--flags`, ssh hosts) do not
-  complete. `!bash` has your full bash completion.
+- **A command's arguments** complete as bash would, when the shell is bash
+  and [bash-completion](https://github.com/scop/bash-completion) is
+  installed: git branches and subcommands, ssh hosts, systemctl units,
+  `--flags`. It uses the completions bash-completion ships, those in
+  `~/.local/share/bash-completion/completions/` and `~/.bash_completion`,
+  but not the ones your `~/.bashrc` defines (`complete -C ...`,
+  `source <(kubectl completion bash)`): put those in `~/.bash_completion`
+  to get them. `!bash` has your full bash completion.
+- **Other words**, and arguments bash-completion has nothing for (or takes
+  more than half a second to find), complete as file and directory names,
+  from Parolsh's current directory. `~/` and absolute paths work, hidden
+  files show up when the name starts with `.`, and special characters are
+  escaped (`My\ Files`).
 
 Text for the agent, `?text`, `/command` and `#command` have no completion.
 

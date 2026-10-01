@@ -336,13 +336,14 @@ impl App {
     fn with_completion(&self, editor: Reedline) -> Reedline {
         let names = Arc::new(OnceLock::new());
         let shell = self.config.shell[0].clone();
-        if Path::new(&shell)
+        let is_bash = Path::new(&shell)
             .file_name()
-            .is_some_and(|name| name == "bash")
-        {
+            .is_some_and(|name| name == "bash");
+        if is_bash {
             // In the background: loading ~/.bashrc takes a moment, and Tab
             // works with the PATH commands until it is done.
             let names = names.clone();
+            let shell = shell.clone();
             std::thread::spawn(move || {
                 if let Ok(list) = shellenv::bash_names(&shell) {
                     let _ = names.set(list);
@@ -353,6 +354,7 @@ impl App {
             cwd: self.completion_cwd.clone(),
             names,
             mode: self.mode.clone(),
+            bash: is_bash.then_some(shell),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
