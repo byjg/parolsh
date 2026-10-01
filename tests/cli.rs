@@ -400,16 +400,17 @@ fn input_sets_where_plain_text_goes_at_start() {
     )));
 }
 
-/// A plain `cd` only moves its own shell: Parolsh says how to move it.
+/// A `cd` in a shell command moves where the next ones run, not the
+/// agent; `#cd .` brings the agent there.
 #[test]
-fn a_plain_cd_points_to_hash_cd() {
-    let screen = with_fake_agent("", &["!cd /tmp", "!cd /tmp && true"]);
+fn a_cd_moves_the_shell_and_hash_cd_brings_the_agent() {
+    let screen = with_fake_agent("", &["!cd / && exit 3", "!pwd", "where", "#cd .", "here"]);
 
-    assert_eq!(
-        screen.matches("`#cd /tmp` moves Parolsh").count(),
-        1,
-        "{screen}"
-    );
+    let start = env!("CARGO_MANIFEST_DIR");
+    assert!(screen.contains("exit 3\n"), "{screen}");
+    assert!(screen.contains("\n/\n"), "{screen}");
+    assert!(screen.contains(&format!("|{start}] where")), "{screen}");
+    assert!(screen.contains("|/] here"), "{screen}");
 }
 
 /// Without an agent configured, plain text can only go to the shell.

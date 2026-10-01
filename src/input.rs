@@ -86,27 +86,6 @@ pub fn route(line: &str, mode: Mode) -> Input {
     }
 }
 
-/// The `#cd` that does what a plain `cd <dir>` command was meant to: each
-/// command runs in its own shell, so its `cd` does not move Parolsh. `None`
-/// for anything `#cd` cannot do the same way (`cd -`, `$VARS`, quotes,
-/// several commands).
-pub fn cd_suggestion(command: &str) -> Option<String> {
-    let rest = command.trim().strip_prefix("cd")?;
-    let dir = rest.trim();
-    let plain = |c: char| !c.is_whitespace() && !";&|<>()$`'\"\\*?[]{}!#".contains(c);
-    if !(rest.is_empty() || rest.starts_with(char::is_whitespace))
-        || dir.starts_with('-')
-        || !dir.chars().all(plain)
-    {
-        return None;
-    }
-    Some(if dir.is_empty() {
-        "#cd".to_string()
-    } else {
-        format!("#cd {dir}")
-    })
-}
-
 /// What follows `!`: a command, `+command` or `bash`.
 fn shell(command: &str) -> Input {
     let command = command.trim();
@@ -231,39 +210,6 @@ mod tests {
         assert_eq!(shell_mode("!ls"), Input::Shell("ls".into()));
         assert_eq!(shell_mode("!+docker ps"), Input::Share("docker ps".into()));
         assert_eq!(shell_mode("#new"), control("new", ""));
-    }
-
-    #[test]
-    fn a_plain_cd_suggests_hash_cd() {
-        assert_eq!(cd_suggestion("cd src"), Some("#cd src".into()));
-        assert_eq!(
-            cd_suggestion(" cd  ~/projects/billing "),
-            Some("#cd ~/projects/billing".into())
-        );
-        assert_eq!(cd_suggestion("cd ../x.y"), Some("#cd ../x.y".into()));
-        assert_eq!(
-            cd_suggestion("cd my-project"),
-            Some("#cd my-project".into())
-        );
-        assert_eq!(cd_suggestion("cd"), Some("#cd".into()));
-    }
-
-    #[test]
-    fn anything_else_suggests_nothing() {
-        for command in [
-            "cd -",
-            "cd -P /tmp",
-            "cd $HOME",
-            "cd src && make",
-            "cd src; ls",
-            "cd My\\ Files",
-            "cd 'My Files'",
-            "cd a b",
-            "cdrecord disc.iso",
-            "ls",
-        ] {
-            assert_eq!(cd_suggestion(command), None, "{command}");
-        }
     }
 
     #[test]
