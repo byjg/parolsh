@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Detail, Event};
+use crate::acp::{AgentHandle, Detail, Event, TurnId};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::markdown::Markdown;
@@ -38,25 +38,45 @@ pub struct Display {
     pub links: LinkStyle,
 }
 
+/// How long the agent has to confirm a cancel before Parolsh stops waiting.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
 /// Sends one message (text blocks, the user's text last) and prints the
 /// agent's answer as it arrives.
+///
+/// Ctrl+C asks the agent to cancel. If it does not confirm within
+/// `CANCEL_GRACE`, or on a second Ctrl+C, the turn ends on Parolsh's side and
+/// the agent keeps running: its late events are dropped.
 pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcome {
-    if !agent.prompt_blocks(blocks) {
+    let Some(turn) = agent.prompt_blocks(blocks) else {
         return Outcome::AgentStopped;
-    }
+    };
     INTERRUPTED.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
     let mut out = Output::new(ansi, display.thinking, markdown);
+    if agent.abandoned().is_some() {
+        out.pin("Waiting for the previous turn to stop…");
+    }
     out.show();
+    let mut cancelled: Option<Instant> = None;
 
     loop {
+        if INTERRUPTED.swap(false, Ordering::SeqCst) {
+            if cancelled.is_some() {
+                return give_up(agent, turn, &mut out);
+            }
+            agent.cancel();
+            cancelled = Some(Instant::now());
+            out.pin("Cancelling…");
+        }
+        if cancelled.is_some_and(|at| at.elapsed() >= CANCEL_GRACE) {
+            return give_up(agent, turn, &mut out);
+        }
+
         let event = match agent.events.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => {
-                if INTERRUPTED.swap(false, Ordering::SeqCst) {
-                    agent.cancel();
-                }
                 out.tick();
                 continue;
             }
@@ -67,7 +87,17 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
             }
         };
 
+        // Until an abandoned turn ends, what arrives is still its own.
+        let stale = agent.abandoned().is_some();
         match event {
+            Event::TurnEnd(id, _) | Event::TurnFailed(id, _) if !agent.ended(id) => {
+                if agent.abandoned().is_none() && cancelled.is_none() {
+                    out.unpin("Thinking");
+                }
+            }
+            Event::Text(_) | Event::Thought(_) | Event::Tool(_) if stale => {}
+            // Dropping the reply cancels the request.
+            Event::Permission { .. } | Event::Form { .. } if stale => {}
             Event::Text(text) => out.text(&text),
             Event::Thought(text) => out.thought(&text),
             Event::Tool(title) => out.tool(&title),
@@ -94,20 +124,28 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
                 out.hide();
                 return Outcome::AgentStopped;
             }
-            Event::TurnEnd(reason) => {
+            Event::TurnEnd(_, reason) => {
                 out.finish();
                 if let Some(message) = describe(reason) {
                     eprintln!("({message})");
                 }
                 return Outcome::Finished;
             }
-            Event::TurnFailed(message) => {
+            Event::TurnFailed(_, message) => {
                 out.finish();
                 eprintln!("parolsh: {message}");
                 return Outcome::Failed;
             }
         }
     }
+}
+
+/// Ends the turn without the agent's confirmation; the agent keeps running.
+fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output) -> Outcome {
+    agent.abandon(turn);
+    out.finish();
+    eprintln!("(cancelled — the agent did not confirm)");
+    Outcome::Finished
 }
 
 /// Prints notices and errors that arrived while no turn was running, such as
@@ -119,6 +157,9 @@ pub fn drain(agent: &AgentHandle) -> bool {
             Event::Error(message) => {
                 eprintln!("parolsh: {message}");
                 return false;
+            }
+            Event::TurnEnd(id, _) | Event::TurnFailed(id, _) => {
+                agent.ended(id);
             }
             _ => {}
         }
@@ -256,6 +297,17 @@ struct Status {
     frame: usize,
     tools: usize,
     shown: bool,
+    /// The activity is Parolsh's own ("Cancelling…"): the agent's events do
+    /// not replace it.
+    pinned: bool,
+}
+
+impl Status {
+    fn set_activity(&mut self, activity: String) {
+        if !self.pinned {
+            self.activity = activity;
+        }
+    }
 }
 
 impl Output {
@@ -273,6 +325,7 @@ impl Output {
                 frame: 0,
                 tools: 0,
                 shown: false,
+                pinned: false,
             }),
         }
     }
@@ -300,7 +353,7 @@ impl Output {
         }
         let _ = std::io::stdout().flush();
         if let Some(status) = &mut self.status {
-            status.activity = "Writing".to_string();
+            status.set_activity("Writing".to_string());
             status.thoughts.clear();
         }
         self.show();
@@ -325,11 +378,11 @@ impl Output {
                 status.thoughts.drain(..cut);
             }
             let snippet = ui::thinking(&status.thoughts, ui::width().saturating_sub(24));
-            status.activity = if snippet.is_empty() {
+            status.set_activity(if snippet.is_empty() {
                 "Thinking".to_string()
             } else {
                 format!("Thinking: {snippet}")
-            };
+            });
         }
         self.show();
     }
@@ -357,7 +410,7 @@ impl Output {
         match &mut self.status {
             Some(status) => {
                 status.tools += 1;
-                status.activity = format!("Running: {title}");
+                status.set_activity(format!("Running: {title}"));
                 status.thoughts.clear();
                 self.hide();
                 self.end_line();
@@ -387,6 +440,24 @@ impl Output {
             println!();
             self.mid_line = false;
         }
+    }
+
+    /// Shows Parolsh's own activity, which the agent's events do not replace.
+    fn pin(&mut self, activity: &str) {
+        if let Some(status) = &mut self.status {
+            status.activity = activity.to_string();
+            status.pinned = true;
+        }
+        self.show();
+    }
+
+    /// Lets the agent's events set the activity again.
+    fn unpin(&mut self, activity: &str) {
+        if let Some(status) = &mut self.status {
+            status.pinned = false;
+            status.activity = activity.to_string();
+        }
+        self.show();
     }
 
     /// Advances the spinner; called while waiting for the agent.

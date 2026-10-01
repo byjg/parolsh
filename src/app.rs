@@ -465,8 +465,10 @@ impl App {
     }
 
     fn new_conversation(&mut self) {
+        // An agent that never ended a cancelled turn would only start the new
+        // conversation after it: start the agent again instead.
         let restarted = match &self.agent {
-            Some(agent) => !agent.new_session(self.cwd.clone()),
+            Some(agent) => agent.abandoned().is_some() || !agent.new_session(self.cwd.clone()),
             None => true,
         };
         if restarted {

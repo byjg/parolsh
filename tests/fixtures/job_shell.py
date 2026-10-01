@@ -15,6 +15,9 @@ shell).
 A LINE starting with "paste:" is pasted instead of typed: "\\n" becomes a line
 break, and, like a terminal, the paste is wrapped in bracketed-paste markers
 only if the program turned bracketed paste on. No Enter is added.
+
+A LINE starting with "key:" sends its bytes as typed, with "\\xNN" escapes
+(key:\\x03 is Ctrl+C), without an Enter. "wait:SECONDS" only waits.
 """
 import os
 import pty
@@ -62,7 +65,12 @@ def pump(seconds):
 
 pump(0.5)
 for line in args:
-    if line.startswith("paste:"):
+    if line.startswith("wait:"):
+        pump(float(line[len("wait:"):]))
+        continue
+    if line.startswith("key:"):
+        os.write(fd, line[len("key:"):].encode().decode("unicode_escape").encode("latin-1"))
+    elif line.startswith("paste:"):
         text = line[len("paste:"):].replace("\\n", "\n").encode()
         if bracketed:
             text = b"\x1b[200~" + text + b"\x1b[201~"

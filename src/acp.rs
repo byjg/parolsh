@@ -16,6 +16,8 @@ use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
     UntypedMessage, is_incoming_transport_closed,
 };
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -50,9 +52,9 @@ pub enum Event {
         reply: oneshot::Sender<Option<Answers>>,
     },
     /// The prompt finished.
-    TurnEnd(StopReason),
+    TurnEnd(TurnId, StopReason),
     /// The agent answered the prompt with an error, and keeps running.
-    TurnFailed(String),
+    TurnFailed(TurnId, String),
     /// Something worth telling the user, the agent keeps running.
     Notice(String),
     /// The agent stopped.
@@ -204,9 +206,13 @@ impl JsonRpcRequest for PermissionRequest {
     type Response = serde_json::Value;
 }
 
+/// Numbers the prompts, so the end of a turn Parolsh stopped waiting for is
+/// told apart from the end of the next one.
+pub type TurnId = u64;
+
 enum Command {
     /// Text blocks of one message: context first, the user's text last.
-    Prompt(Vec<String>),
+    Prompt(TurnId, Vec<String>),
     Cancel,
     NewSession(PathBuf),
     SetOption(String, OptionValue),
@@ -218,6 +224,10 @@ pub struct AgentHandle {
     pub events: mpsc::Receiver<Event>,
     shared: Shared,
     thread: Option<JoinHandle<()>>,
+    last_turn: Cell<TurnId>,
+    /// The last turn Parolsh stopped waiting for, while the agent has not
+    /// ended it yet.
+    abandoned: Cell<Option<TurnId>>,
 }
 
 impl AgentHandle {
@@ -267,6 +277,8 @@ impl AgentHandle {
             events: events_rx,
             shared,
             thread: Some(thread),
+            last_turn: Cell::new(0),
+            abandoned: Cell::new(None),
         }
     }
 
@@ -293,15 +305,42 @@ impl AgentHandle {
         self.send(Command::SetOption(id, value))
     }
 
-    /// Sends a prompt. False when the agent is no longer running.
+    /// Sends a prompt. `None` when the agent is no longer running.
     #[cfg(test)]
-    pub fn prompt(&self, text: String) -> bool {
+    pub fn prompt(&self, text: String) -> Option<TurnId> {
         self.prompt_blocks(vec![text])
     }
 
-    /// Sends one message made of several text blocks.
-    pub fn prompt_blocks(&self, blocks: Vec<String>) -> bool {
-        self.send(Command::Prompt(blocks))
+    /// Sends one message made of several text blocks. It waits for the
+    /// previous turn, if the agent has not ended it yet.
+    pub fn prompt_blocks(&self, blocks: Vec<String>) -> Option<TurnId> {
+        let turn = self.last_turn.get() + 1;
+        self.last_turn.set(turn);
+        self.send(Command::Prompt(turn, blocks)).then_some(turn)
+    }
+
+    /// Stops waiting for `turn`: the agent did not confirm its cancel. Its
+    /// events are dropped until it ends.
+    pub fn abandon(&self, turn: TurnId) {
+        self.abandoned.set(Some(turn));
+    }
+
+    /// The abandoned turn the agent has not ended yet.
+    pub fn abandoned(&self) -> Option<TurnId> {
+        self.abandoned.get()
+    }
+
+    /// Called with each turn end: false when it belongs to an abandoned turn.
+    pub fn ended(&self, turn: TurnId) -> bool {
+        match self.abandoned.get() {
+            Some(abandoned) if turn <= abandoned => {
+                if turn == abandoned {
+                    self.abandoned.set(None);
+                }
+                false
+            }
+            _ => true,
+        }
     }
 
     /// Cancels the running prompt, if any.
@@ -434,16 +473,28 @@ async fn serve(
                 .block_task()
                 .await?;
                 let mut session = open_session(&cx, &cwd, &wanted, &events, &shared).await?;
+                // Commands that arrived during a turn, run after it.
+                let mut pending = VecDeque::new();
 
-                while let Some(command) = commands.recv().await {
+                loop {
+                    let command = match pending.pop_front() {
+                        Some(command) => command,
+                        None => match commands.recv().await {
+                            Some(command) => command,
+                            None => break,
+                        },
+                    };
                     match command {
-                        Command::Prompt(blocks) => {
-                            let event = match prompt(&cx, &session, blocks, &mut commands).await {
-                                Ok(stop_reason) => Event::TurnEnd(stop_reason),
+                        Command::Prompt(turn, blocks) => {
+                            let result =
+                                prompt(&cx, &session, blocks, &mut commands, &mut pending, &events)
+                                    .await;
+                            let event = match result {
+                                Ok(stop_reason) => Event::TurnEnd(turn, stop_reason),
                                 // The agent's output closed: it stopped, the
                                 // turn did not fail.
                                 Err(e) if is_incoming_transport_closed(&e) => return Err(e),
-                                Err(e) => Event::TurnFailed(e.to_string()),
+                                Err(e) => Event::TurnFailed(turn, e.to_string()),
                             };
                             let _ = events.send(event);
                         }
@@ -514,12 +565,17 @@ async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
 }
 
 /// Runs one prompt turn. A `Cancel` received meanwhile is sent to the agent,
-/// which then ends the turn with `StopReason::Cancelled`.
+/// which then ends the turn with `StopReason::Cancelled`. Other commands are
+/// kept in `pending`, to run after the turn; a new prompt means Parolsh
+/// stopped waiting for this one, so it cancels it again, and a `Cancel`
+/// drops the prompts waiting.
 async fn prompt(
     cx: &ConnectionTo<Agent>,
     session: &SessionId,
     blocks: Vec<String>,
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    pending: &mut VecDeque<Command>,
+    events: &mpsc::Sender<Event>,
 ) -> Result<StopReason, agent_client_protocol::Error> {
     let blocks = blocks
         .into_iter()
@@ -533,11 +589,23 @@ async fn prompt(
     loop {
         tokio::select! {
             response = &mut turn => return Ok(response?.stop_reason),
-            Some(command) = commands.recv() => {
-                if let Command::Cancel = command {
+            Some(command) = commands.recv() => match command {
+                Command::Cancel => {
+                    pending.retain(|command| match command {
+                        Command::Prompt(turn, _) => {
+                            let _ = events.send(Event::TurnEnd(*turn, StopReason::Cancelled));
+                            false
+                        }
+                        _ => true,
+                    });
                     cx.send_notification(CancelNotification::new(session.clone()))?;
                 }
-            }
+                Command::Prompt(..) => {
+                    pending.push_back(command);
+                    cx.send_notification(CancelNotification::new(session.clone()))?;
+                }
+                command => pending.push_back(command),
+            },
         }
     }
 }
@@ -728,13 +796,13 @@ mod tests {
 
     /// Text of the turn, with tool calls as `• title` lines, until it ends.
     fn turn(agent: &AgentHandle, prompt: &str) -> (String, StopReason) {
-        assert!(agent.prompt(prompt.to_string()));
+        assert!(agent.prompt(prompt.to_string()).is_some());
         let mut text = String::new();
         loop {
             match next(agent) {
                 Event::Text(chunk) => text.push_str(&chunk),
                 Event::Tool(title) => text.push_str(&format!("• {title}\n")),
-                Event::TurnEnd(reason) => return (text, reason),
+                Event::TurnEnd(_, reason) => return (text, reason),
                 other => panic!("unexpected event: {other:?}"),
             }
         }
@@ -784,7 +852,7 @@ mod tests {
     fn permission_requests_are_answered_with_the_chosen_option() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("perm".to_string()));
+        assert!(agent.prompt("perm".to_string()).is_some());
 
         match next(&agent) {
             Event::Permission {
@@ -818,7 +886,7 @@ mod tests {
     fn raw_input_is_the_detail_when_there_is_no_content() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("ask".to_string()));
+        assert!(agent.prompt("ask".to_string()).is_some());
 
         match next(&agent) {
             Event::Permission { details, reply, .. } => {
@@ -838,7 +906,7 @@ mod tests {
     fn reasoning_arrives_as_thoughts_before_the_answer() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("think".to_string()));
+        assert!(agent.prompt("think".to_string()).is_some());
 
         let mut thoughts = String::new();
         loop {
@@ -859,7 +927,7 @@ mod tests {
     fn answer_form(prompt: &str, answers: Option<form::Answers>) -> (Form, String) {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt(prompt.to_string()));
+        assert!(agent.prompt(prompt.to_string()).is_some());
         let form = match next(&agent) {
             Event::Form { form, reply } => {
                 reply.send(answers).unwrap();
@@ -932,11 +1000,15 @@ mod tests {
     fn a_message_can_carry_several_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt_blocks(vec![
-            "output one".to_string(),
-            "output two".to_string(),
-            "blocks".to_string(),
-        ]));
+        assert!(
+            agent
+                .prompt_blocks(vec![
+                    "output one".to_string(),
+                    "output two".to_string(),
+                    "blocks".to_string(),
+                ])
+                .is_some()
+        );
 
         match next(&agent) {
             Event::Text(text) => assert_eq!(text, r#"["output one", "output two"]"#),
@@ -948,7 +1020,7 @@ mod tests {
     fn an_unanswered_permission_request_is_cancelled() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("perm".to_string()));
+        assert!(agent.prompt("perm".to_string()).is_some());
 
         match next(&agent) {
             Event::Permission { reply, .. } => drop(reply),
@@ -965,7 +1037,7 @@ mod tests {
     fn cancel_ends_the_running_turn() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("slow".to_string()));
+        assert!(agent.prompt("slow".to_string()).is_some());
 
         match next(&agent) {
             Event::Text(text) => assert_eq!(text, "working"),
@@ -974,19 +1046,84 @@ mod tests {
         agent.cancel();
 
         match next(&agent) {
-            Event::TurnEnd(reason) => assert_eq!(reason, StopReason::Cancelled),
+            Event::TurnEnd(_, reason) => assert_eq!(reason, StopReason::Cancelled),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    fn turn_end(agent: &AgentHandle) -> (TurnId, StopReason) {
+        match next(agent) {
+            Event::TurnEnd(turn, reason) => (turn, reason),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// A prompt sent while the agent still runs a turn Parolsh gave up on
+    /// cancels that turn again, and runs once it ends: it is not lost.
+    #[test]
+    fn a_prompt_waits_for_the_turn_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        let stuck = agent.prompt("stuck".to_string()).unwrap();
+        assert!(matches!(next(&agent), Event::Text(text) if text == "working"));
+        agent.cancel(); // ignored by the agent
+
+        let hello = agent.prompt("hello".to_string()).unwrap();
+
+        assert_eq!(turn_end(&agent), (stuck, StopReason::Cancelled));
+        let mut text = String::new();
+        let end = loop {
+            match next(&agent) {
+                Event::Text(chunk) => text.push_str(&chunk),
+                Event::Tool(_) => {}
+                Event::TurnEnd(turn, reason) => break (turn, reason),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        };
+        assert_eq!(end, (hello, StopReason::EndTurn));
+        assert!(text.ends_with("hello"), "{text}");
+    }
+
+    /// Cancel while a prompt waits for the turn before it: the waiting
+    /// prompt is dropped at once, and never reaches the agent.
+    #[test]
+    fn cancel_drops_the_waiting_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        let stuck = agent.prompt("stuck".to_string()).unwrap();
+        assert!(matches!(next(&agent), Event::Text(text) if text == "working"));
+        let waiting = agent.prompt("hello".to_string()).unwrap();
+
+        agent.cancel();
+
+        assert_eq!(turn_end(&agent), (waiting, StopReason::Cancelled));
+        assert_eq!(turn_end(&agent), (stuck, StopReason::Cancelled));
+        let (text, _) = turn(&agent, "again");
+        assert!(text.ends_with("again"), "{text}");
+    }
+
+    #[test]
+    fn the_end_of_an_abandoned_turn_is_not_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+
+        agent.abandon(3);
+
+        assert!(!agent.ended(2));
+        assert_eq!(agent.abandoned(), Some(3));
+        assert!(!agent.ended(3));
+        assert_eq!(agent.abandoned(), None);
+        assert!(agent.ended(4));
     }
 
     #[test]
     fn an_error_answer_fails_the_turn_and_the_session_keeps_working() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("fail".to_string()));
+        assert!(agent.prompt("fail".to_string()).is_some());
 
         match next(&agent) {
-            Event::TurnFailed(message) => {
+            Event::TurnFailed(_, message) => {
                 assert!(message.contains("loop protection"), "{message}")
             }
             other => panic!("unexpected event: {other:?}"),
@@ -1000,7 +1137,7 @@ mod tests {
     fn an_agent_that_exits_during_a_turn_stops() {
         let dir = tempfile::tempdir().unwrap();
         let agent = start(None, &[], dir.path());
-        assert!(agent.prompt("die".to_string()));
+        assert!(agent.prompt("die".to_string()).is_some());
 
         // Whichever the crate notices first: the exit, or the closed output.
         match next(&agent) {

@@ -520,3 +520,37 @@ fn the_shell_environment_makes_profile_agents_reachable() {
     );
     assert!(!not_imported.contains("Internal error"), "{not_imported}");
 }
+
+/// An agent that ignores the cancel: after 5 s Parolsh stops waiting and the
+/// prompt is back. The next message waits for that turn, then runs.
+#[test]
+fn a_cancel_the_agent_ignores_ends_the_turn_after_a_while() {
+    let screen = with_fake_agent("", &["stuck", "key:\\x03", "wait:5", "hello"]);
+
+    assert!(
+        screen.contains("(cancelled — the agent did not confirm)"),
+        "{screen}"
+    );
+    // The fake agent answers "[<session>|<mode>|<cwd>] <text>".
+    assert!(screen.contains("] hello\n"), "{screen}");
+}
+
+/// A second Ctrl+C stops waiting at once.
+#[test]
+fn a_second_ctrl_c_stops_waiting_for_the_cancel() {
+    let screen = with_fake_agent("", &["stuck", "key:\\x03", "key:\\x03"]);
+
+    assert!(
+        screen.contains("(cancelled — the agent did not confirm)"),
+        "{screen}"
+    );
+}
+
+/// Ctrl+C is seen even when the agent never pauses between events.
+#[test]
+fn ctrl_c_cancels_an_agent_that_streams_nonstop() {
+    let screen = with_fake_agent("", &["stream", "key:\\x03"]);
+
+    assert!(screen.contains("(cancelled)"), "{screen}");
+    assert!(!screen.contains("did not confirm"), "{screen}");
+}
