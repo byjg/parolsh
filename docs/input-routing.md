@@ -50,9 +50,9 @@ unlocked:
 | `#command` | Parolsh | Parolsh |
 
 Unlike `!bash`, shell mode stays in Parolsh: the agent is a `?` away, `!+`
-shares output with it, and `#` commands work. Each command is still
-independent (see [`!command`](#command)). The mode lasts until you change it
-or leave Parolsh.
+shares output with it, and `#` commands work. Each command runs in its own
+shell, but a `cd` carries over to the next (see [`!command`](#command)). The
+mode lasts until you change it or leave Parolsh.
 
 To start in shell mode, set `input = "shell"` in `config.toml` (see
 [Configuration](configuration.md#keys)), or run `parolsh --input=shell`;
@@ -100,7 +100,7 @@ have in common, and the next `Tab` shows them in a menu (`Tab` and
   to get them. `!bash` has your full bash completion.
 - **Other words**, and arguments bash-completion has nothing for (or takes
   more than half a second to find), complete as file and directory names,
-  from Parolsh's current directory. `~/` and absolute paths work, hidden
+  from the directory your commands run in. `~/` and absolute paths work, hidden
   files show up when the name starts with `.`, and special characters are
   escaped (`My\ Files`).
 
@@ -108,22 +108,33 @@ Text for the agent, `?text`, `/command` and `#command` have no completion.
 
 ## `!command`
 
-The command runs as `bash -ic "<command>"` in Parolsh's current directory.
+The command runs as `bash -ic "<command>"`, in the directory the last
+command ended in.
 
 - **Your `~/.bashrc` is loaded**, so aliases, functions and shell options work
   as in your normal terminal. The shell is interactive (`-i`) because a plain
   `bash -c` ignores aliases, and the stock Debian/Ubuntu `~/.bashrc` stops
   right away when the shell is not interactive.
-- **Each command is independent.** `!cd /tmp` or `!export FOO=1` change
-  nothing in Parolsh: the command runs and returns. Use `#cd` to change
-  directory, or `!bash` for a session that keeps its state. After a plain
-  `cd <dir>` (with `!` or in shell mode), Parolsh reminds you:
+- **A `cd` carries over.** When a command ends, its shell tells Parolsh the
+  directory it ended in, and the next command runs there: `cd src`,
+  `cd - && make`, `pushd`, a `cd` before `exit 1`. Nothing else does:
+  `export FOO=1`, a variable or an alias defined in the line is gone when
+  the command ends. Use `!bash` for a session that keeps all of its state.
+- **The agent stays where it is.** A `cd` moves your commands, not the
+  conversation: the agent keeps working in the directory it started in, and
+  the prompt shows both while they differ:
 
   ```text
-  parolsh: `cd /tmp` moved only that command's shell. `#cd /tmp` moves Parolsh (and starts a new conversation).
+  [claude] ~/projects/wallet ✦ !cd /var/log
+  [claude ~/projects/wallet] /var/log ✦ #cd .       ← brings the agent here
+  [claude] /var/log ✦
   ```
 
-  `cd dir && make` works as usual: both run in the same shell.
+  `#cd .` starts a new conversation in the directory of your commands. The
+  outputs you share with `!+` say where they ran.
+- The directory comes back through the shell's `EXIT` trap, so the
+  `shell` must understand `trap` (bash, zsh, dash do). A command that ends
+  with `exec`, or is killed, leaves the directory as it was.
 - **Commands stay out of your bash history.** Parolsh sets `HISTFILE=/dev/null`
   for them and keeps its own history.
 - A non-zero exit code is printed after the output, for example `exit 1`.
@@ -173,7 +184,7 @@ The agent answers from that output instead of running the command again.
 
 ## `!bash`
 
-Opens a real interactive Bash in the current directory, with your full
+Opens a real interactive Bash in the directory of your commands, with your full
 `~/.bashrc` and completions. `exit` returns to Parolsh, in the directory it was
 in before: changes made inside the session stay there.
 
@@ -194,8 +205,8 @@ and forwards the line as typed, so the agent's own slash commands work.
 | Command | What it does |
 |---|---|
 | `#help` | Show the input rules and commands |
-| `#new` | Start a new conversation with the agent, in the current directory |
-| `#cd <path>` | Change Parolsh's directory and start a new conversation there. `~` and relative paths work; no path means your home directory. Reloads the configuration of the project found there. An agent chosen with `#agent` stays when that project configures it; otherwise the project's `default_agent` is used, and the agent restarts if it changed. |
+| `#new` | Start a new conversation with the agent, in the agent's directory |
+| `#cd <path>` | Change Parolsh's directory, for the agent and your commands, and start a new conversation there. `~` and relative paths work, from the directory of your commands, so `#cd .` brings the agent where a `cd` took them; no path means your home directory. Reloads the configuration of the project found there. An agent chosen with `#agent` stays when that project configures it; otherwise the project's `default_agent` is used, and the agent restarts if it changed. |
 | `#agent` | Show the agent in use |
 | `#agent list` | List configured agents; `*` marks the one in use |
 | `#agent <name>` | Switch to another configured agent, with a new conversation. `default_agent` does not change. |

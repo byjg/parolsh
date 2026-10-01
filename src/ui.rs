@@ -50,7 +50,10 @@ pub struct Prompt {
 
 /// What a prompt program may show: the last command's result and the agent.
 pub struct PromptContext<'a> {
+    /// Where shell commands run.
     pub cwd: &'a Path,
+    /// The agent's directory, when shell commands moved away from it.
+    pub agent_cwd: Option<&'a Path>,
     /// Exit code of the last `!` command or agent turn.
     pub status: i32,
     pub duration: Duration,
@@ -62,12 +65,18 @@ pub struct PromptContext<'a> {
 impl Prompt {
     /// The agent that answers, the directory and where plain text goes, as
     /// in `[claude] ~/…/byjg/parolsh ✦ `: `✦` to the agent, `❯` to the
-    /// shell. The symbol is red after a failure.
+    /// shell. The symbol is red after a failure. When shell commands moved
+    /// away from the agent's directory, it shows both:
+    /// `[claude ~/…/byjg/parolsh] /tmp ❯ `.
     pub fn parolsh(context: &PromptContext, home: Option<&Path>, ansi: bool) -> Self {
-        let agent = context
+        let name = context
             .agent
             .as_ref()
             .map_or("no agent", |agent| agent.name);
+        let agent = match context.agent_cwd {
+            Some(dir) => format!("{name} {}", short_path(dir, home)),
+            None => name.to_string(),
+        };
         let path = short_path(context.cwd, home);
         let left = if ansi {
             format!("{BLUE}[{agent}]{RESET} {GREEN}{path}{RESET}")
@@ -107,6 +116,7 @@ impl Prompt {
                 // Empty: plain ANSI, without the markers bash or zsh need.
                 .env("STARSHIP_SHELL", "")
                 .env_remove("PAROLSH_AGENT")
+                .env_remove("PAROLSH_AGENT_DIR")
                 .env_remove("PAROLSH_MODE")
                 .env(
                     "PAROLSH_INPUT",
@@ -115,6 +125,9 @@ impl Prompt {
                         Mode::Shell => "shell",
                     },
                 );
+            if let Some(dir) = context.agent_cwd {
+                command.env("PAROLSH_AGENT_DIR", dir);
+            }
             if let Some(agent) = &context.agent {
                 command.env("PAROLSH_AGENT", agent.name);
                 if let Some(mode) = agent.mode {
@@ -524,7 +537,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\n\
-             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT\"\n",
+             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT|${PAROLSH_AGENT_DIR-unset}\"\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
@@ -532,6 +545,7 @@ mod tests {
         std::fs::set_permissions(&fake, permissions).unwrap();
         let context = PromptContext {
             cwd: dir.path(),
+            agent_cwd: Some(Path::new("/srv/wallet")),
             status: 3,
             duration: Duration::from_millis(1500),
             mode: Mode::Shell,
@@ -548,13 +562,13 @@ mod tests {
         assert_eq!(
             prompt.left,
             format!(
-                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell\n"
+                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet\n"
             )
         );
         assert_eq!(
             prompt.right,
             format!(
-                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell"
+                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet"
             )
         );
         assert_eq!(prompt.indicator, "");
@@ -563,6 +577,7 @@ mod tests {
     fn context<'a>(cwd: &'a Path, status: i32, agent: Option<&'a str>) -> PromptContext<'a> {
         PromptContext {
             cwd,
+            agent_cwd: None,
             status,
             duration: Duration::ZERO,
             mode: Mode::Agent,
@@ -591,6 +606,17 @@ mod tests {
         assert_eq!(Prompt::minimal(&shell, false).indicator, "❯ ");
         let agent = context(cwd, 0, Some("claude"));
         assert_eq!(Prompt::minimal(&agent, false).indicator, "✦ ");
+    }
+
+    #[test]
+    fn parolsh_prompt_shows_the_agent_directory_when_the_shell_moved() {
+        let home = Path::new("/home/me");
+        let mut moved = context(Path::new("/tmp"), 0, Some("claude"));
+        moved.agent_cwd = Some(Path::new("/home/me/Projects/wallet"));
+
+        let prompt = Prompt::parolsh(&moved, Some(home), false);
+
+        assert_eq!(prompt.left, "[claude ~/Projects/wallet] /tmp");
     }
 
     #[test]
@@ -635,6 +661,7 @@ mod tests {
     fn starship_failures_are_errors() {
         let context = PromptContext {
             cwd: Path::new("/"),
+            agent_cwd: None,
             status: 0,
             duration: Duration::ZERO,
             mode: Mode::Agent,

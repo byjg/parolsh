@@ -131,9 +131,11 @@ The `parolsh` prompt shows:
 
 - in brackets, the agent that answers text you type; `[no agent]` when none
   is running (none configured, or it stopped);
-- the current directory, with `~` for your home, and only its last two
-  directories: `~/Projects/opensource/byjg/parolsh` shows as
-  `~/…/byjg/parolsh`;
+- the directory your commands run in, with `~` for your home, and only its
+  last two directories: `~/Projects/opensource/byjg/parolsh` shows as
+  `~/…/byjg/parolsh`. After a `cd` moved them away from the agent, the
+  agent's directory goes in the brackets: `[claude ~/…/byjg/parolsh] /tmp`
+  (see [`!command`](input-routing.md#command));
 - where plain text goes: `✦` to the agent, `❯` to the shell (see
   [Shell mode](input-routing.md#shell-mode)). It is red when the last `!`
   command, agent turn or `#` command failed. `minimal` shows only this
@@ -163,7 +165,9 @@ style = "bold purple"
 ```
 
 `PAROLSH_INPUT` is `agent` or `shell`: where plain text goes (see
-[Shell mode](input-routing.md#shell-mode)).
+[Shell mode](input-routing.md#shell-mode)). Starship runs in the directory of
+your commands; after a `cd` moved them away from the agent,
+`PAROLSH_AGENT_DIR` is the agent's directory.
 
 Your bash `PS1` is not used: Parolsh is not bash and cannot evaluate it.
 Starship is configured outside the shell, which is why it works in both.

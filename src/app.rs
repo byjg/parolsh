@@ -6,7 +6,6 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,7 +14,7 @@ use crate::audit::{self, Actor, Audit};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, Mode, SharedMode, route};
-use crate::{config, hints, input, project, setup, shell, shellenv, turn, ui};
+use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -44,8 +43,12 @@ Control commands:
   #exit           leave Parolsh";
 
 pub struct App {
+    /// Parolsh's directory: the agent's and the project's, set by `#cd`.
     cwd: PathBuf,
-    /// The same directory, shared with the Tab completion.
+    /// Where shell commands run: `cwd` until a command ends in another
+    /// directory (`cd`), and again after `#cd`.
+    shell_cwd: PathBuf,
+    /// `shell_cwd`, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
@@ -89,6 +92,7 @@ impl App {
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             mode: SharedMode::default(),
+            shell_cwd: cwd.clone(),
             cwd,
             project_root,
             active: config.default_agent.clone(),
@@ -161,23 +165,20 @@ impl App {
             Input::Empty => return Flow::Continue,
             Input::Agent(text) => self.ask(text),
             Input::Shell(line) => {
-                let code = run(shell::command(&self.config.shell, &line, &self.cwd));
+                let code = report(shell::run(&self.config.shell, &line, &self.shell_cwd).map(
+                    |(code, dir)| {
+                        self.move_shell(dir);
+                        code
+                    },
+                ));
                 self.audit.add(
                     Actor::User,
                     format!("!{} · exit {code}", audit::excerpt(&line, 120)),
                 );
-                if code == 0
-                    && let Some(hash_cd) = input::cd_suggestion(&line)
-                {
-                    eprintln!(
-                        "parolsh: `{line}` moved only that command's shell. `{hash_cd}` moves \
-                         Parolsh (and starts a new conversation)."
-                    );
-                }
                 code
             }
             Input::Bash => {
-                let code = run(shell::bash(&self.cwd));
+                let code = report(shell::run_foreground(shell::bash(&self.shell_cwd)));
                 self.audit.add(Actor::User, format!("!bash · exit {code}"));
                 code
             }
@@ -202,7 +203,8 @@ impl App {
         let ansi = ui::is_ansi();
         let home = home();
         let context = ui::PromptContext {
-            cwd: &self.cwd,
+            cwd: &self.shell_cwd,
+            agent_cwd: (self.shell_cwd != self.cwd).then_some(self.cwd.as_path()),
             status: self.last_status,
             duration: self.last_duration,
             mode: self.mode.get(),
@@ -415,7 +417,7 @@ impl App {
     }
 
     fn change_dir(&mut self, args: &str) -> Result<()> {
-        let target = resolve_dir(&self.cwd, args)?;
+        let target = resolve_dir(&self.shell_cwd, args)?;
         let project_root = project::find_root(&target);
         // A different project brings its own config; fail before moving.
         let config = Config::load(project_root.as_deref())?;
@@ -434,8 +436,8 @@ impl App {
         }
         self.config = config;
         self.audit.set_limit(self.config.audit_entries);
-        self.cwd = target;
-        *self.completion_cwd.lock().expect("cwd lock") = self.cwd.clone();
+        self.cwd = target.clone();
+        self.move_shell(Some(target));
         self.project_root = project_root;
 
         // Same agent: a new conversation in the new directory. Otherwise the
@@ -449,14 +451,25 @@ impl App {
         Ok(())
     }
 
+    /// Where the next shell command runs: the directory the last one ended
+    /// in, when the shell said.
+    fn move_shell(&mut self, dir: Option<PathBuf>) {
+        if let Some(dir) = dir {
+            *self.completion_cwd.lock().expect("cwd lock") = dir.clone();
+            self.shell_cwd = dir;
+        }
+    }
+
     /// `!+command`: runs it, keeping its output for the next message.
     fn share(&mut self, line: String) -> i32 {
         if line.is_empty() {
             eprintln!("parolsh: usage: !+<command>, e.g. !+docker ps");
             return 1;
         }
-        match shell::run_shared(&self.config.shell, &line, &self.cwd, SHARED_LIMIT) {
-            Ok((code, captured)) => {
+        let cwd = self.shell_cwd.clone();
+        match shell::run_shared(&self.config.shell, &line, &cwd, SHARED_LIMIT) {
+            Ok((code, captured, dir)) => {
+                self.move_shell(dir);
                 if code != 0 {
                     eprintln!("exit {code}");
                 }
@@ -472,7 +485,7 @@ impl App {
                 );
                 self.shared.push(Shared {
                     command: line,
-                    cwd: self.cwd.clone(),
+                    cwd,
                     code,
                     captured,
                 });
@@ -667,7 +680,6 @@ impl App {
     }
 }
 
-/// Runs a `!` command or `!bash`. Returns its exit code.
 /// Most of a `!+` command's output kept for the agent: the end of it.
 const SHARED_LIMIT: usize = 16 * 1024;
 
@@ -708,8 +720,9 @@ fn no_agent() -> String {
     }
 }
 
-fn run(command: Command) -> i32 {
-    match shell::run_foreground(command) {
+/// The exit code of a `!` command or `!bash`, printed when it failed.
+fn report(result: std::io::Result<i32>) -> i32 {
+    match result {
         Ok(0) => 0,
         Ok(code) => {
             eprintln!("exit {code}");

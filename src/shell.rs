@@ -4,10 +4,12 @@ use nix::errno::Errno;
 use nix::sys::signal::{SigSet, Signal, killpg};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, getpgrp, tcsetpgrp};
-use std::io::{IsTerminal, Read, Stdin, Write};
-use std::os::fd::AsRawFd;
+use std::ffi::OsString;
+use std::io::{IsTerminal, PipeReader, Read, Stdin, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -23,6 +25,77 @@ pub fn command(shell: &[String], line: &str, cwd: &Path) -> Command {
         // Keep `!` commands out of the user's bash history.
         .env("HISTFILE", "/dev/null");
     command
+}
+
+/// The descriptor on which the shell reports the directory it ended in.
+const DIR_FD: RawFd = 5;
+
+/// `line` in a script that reports, on exit, the directory the shell ended
+/// in (`cd` moves where the next command runs), whatever the line does:
+/// `cd dir && exit 3` still reports `dir`. The line runs with descriptor 5
+/// closed, so nothing it starts keeps it. `redirects` go on the line too.
+fn tracked(line: &str, redirects: &str) -> String {
+    format!("trap 'command pwd -P >&{DIR_FD}' EXIT\n{{ {line}\n}} {redirects}{DIR_FD}>&-")
+}
+
+/// `!command`: runs `line` as the terminal's foreground job. Returns its
+/// exit code and the directory the shell ended in: `None` when the shell
+/// did not say (killed, `exec`, a shell without `trap`).
+pub fn run(shell: &[String], line: &str, cwd: &Path) -> std::io::Result<(i32, Option<PathBuf>)> {
+    let (dir_read, dir_write) = std::io::pipe()?;
+    let mut command = self::command(shell, &tracked(line, ""), cwd);
+    pass_fds(&mut command, vec![(dir_write.as_raw_fd(), DIR_FD)]);
+    let code = run_job(command, move |_| drop(dir_write))?;
+    Ok((code, final_dir(dir_read)))
+}
+
+/// Gives the child `fds`, each `(ours, its number)`. Ours are first copied
+/// above every target, so that moving one in place never overwrites
+/// another; dup2 then clears close-on-exec on the targets.
+fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
+    const MAX: usize = 3;
+    assert!(fds.len() <= MAX);
+    // SAFETY: between fork and exec only fcntl and dup2 run, which are
+    // async-signal-safe; nothing allocates.
+    unsafe {
+        command.pre_exec(move || {
+            let mut high = [0; MAX];
+            for (i, (from, _)) in fds.iter().enumerate() {
+                high[i] = libc::fcntl(*from, libc::F_DUPFD_CLOEXEC, 10);
+                if high[i] < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for (i, (_, to)) in fds.iter().enumerate() {
+                if libc::dup2(high[i], *to) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The directory the shell wrote on exit. Read without waiting: what it
+/// wrote is already in the pipe, and a process started by `~/.bashrc` may
+/// keep the pipe open.
+fn final_dir(pipe: PipeReader) -> Option<PathBuf> {
+    // SAFETY: fcntl on a descriptor we own.
+    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut pipe = pipe;
+    while let Ok(read) = pipe.read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    let bytes = bytes.strip_suffix(b"\n")?;
+    let dir = PathBuf::from(OsString::from_vec(bytes.to_vec()));
+    (dir.is_absolute() && dir.is_dir()).then_some(dir)
 }
 
 /// `!bash`: a real interactive Bash session.
@@ -67,31 +140,26 @@ pub struct Captured {
 /// Only the command is captured, not the shell around it: the pipes are its
 /// file descriptors 3 and 4, and the line runs as `{ line } >&3 2>&4`. What
 /// the shell prints itself (an interactive bash reading `~/.bashrc`) goes to
-/// the terminal as usual.
+/// the terminal as usual. Also returns the directory the shell ended in, as
+/// [`run`] does.
 pub fn run_shared(
     shell: &[String],
     line: &str,
     cwd: &Path,
     limit: usize,
-) -> std::io::Result<(i32, Captured)> {
+) -> std::io::Result<(i32, Captured, Option<PathBuf>)> {
     let (out_read, out_write) = std::io::pipe()?;
     let (err_read, err_write) = std::io::pipe()?;
-    let wrapped = format!("{{ {line}\n}} >&3 2>&4 3>&- 4>&-");
-    let mut command = self::command(shell, &wrapped, cwd);
-    let (out_fd, err_fd) = (out_write.as_raw_fd(), err_write.as_raw_fd());
-    // SAFETY: between fork and exec only dup2 runs, which is
-    // async-signal-safe. dup2 clears close-on-exec on the new descriptors,
-    // so the child keeps 3 and 4; the originals close on exec.
-    unsafe {
-        command.pre_exec(move || {
-            for (from, to) in [(out_fd, 3), (err_fd, 4)] {
-                if libc::dup2(from, to) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
+    let (dir_read, dir_write) = std::io::pipe()?;
+    let mut command = self::command(shell, &tracked(line, ">&3 2>&4 3>&- 4>&- "), cwd);
+    pass_fds(
+        &mut command,
+        vec![
+            (out_write.as_raw_fd(), 3),
+            (err_write.as_raw_fd(), 4),
+            (dir_write.as_raw_fd(), DIR_FD),
+        ],
+    );
 
     let tail = Arc::new(Mutex::new(Tail::new(limit)));
     let (done_tx, done_rx) = mpsc::channel();
@@ -99,7 +167,7 @@ pub fn run_shared(
     copy(err_read, std::io::stderr(), tail.clone(), done_tx);
     let code = run_job(command, move |_| {
         // Our write ends, so the reads end when the command's do.
-        drop((out_write, err_write));
+        drop((out_write, err_write, dir_write));
     })?;
     // The copies end when the pipes close. A background process started by
     // the command may keep them open: do not wait for it.
@@ -112,7 +180,7 @@ pub fn run_shared(
         text: String::new(),
         truncated: false,
     });
-    Ok((code, tail))
+    Ok((code, tail, final_dir(dir_read)))
 }
 
 /// Runs `command` as the terminal's foreground job. `start` runs right
@@ -297,6 +365,60 @@ mod tests {
     }
 
     #[test]
+    fn a_command_reports_the_directory_it_ended_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let shell = ["bash".to_string(), "-c".to_string()];
+
+        // `exit` still reports, and keeps its code.
+        assert_eq!(
+            run(&shell, "cd sub && exit 3", dir.path()).unwrap(),
+            (3, Some(sub.canonicalize().unwrap()))
+        );
+        assert_eq!(
+            run(&shell, "true", dir.path()).unwrap(),
+            (0, Some(dir.path().canonicalize().unwrap()))
+        );
+        // A shell replaced with `exec` cannot say.
+        assert_eq!(run(&shell, "exec true", dir.path()).unwrap(), (0, None));
+    }
+
+    /// A process started before the command, as by `~/.bashrc`, keeps the
+    /// directory pipe open: the directory is still read, without waiting.
+    #[test]
+    fn a_process_started_by_the_shell_does_not_block_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join(".bashrc");
+        std::fs::write(&rc, "sleep 30 &\n").unwrap();
+        let shell = [
+            "bash".to_string(),
+            "--rcfile".to_string(),
+            rc.display().to_string(),
+            "-ic".to_string(),
+        ];
+        let started = std::time::Instant::now();
+
+        let (code, dir_after) = run(&shell, "cd /", dir.path()).unwrap();
+
+        assert_eq!((code, dir_after), (0, Some(PathBuf::from("/"))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn shared_commands_report_the_directory_without_sharing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = ["bash".to_string(), "-c".to_string()];
+
+        let (code, captured, dir_after) =
+            run_shared(&shell, "cd / && echo moved", dir.path(), 1024).unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(captured.text, "moved\n");
+        assert_eq!(dir_after, Some(PathBuf::from("/")));
+    }
+
+    #[test]
     fn passthrough_forwards_positional_arguments() {
         let args = ["name".to_string(), "first".to_string()];
 
@@ -308,7 +430,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = ["bash".to_string(), "-c".to_string()];
 
-        let (code, captured) =
+        let (code, captured, _) =
             run_shared(&shell, "echo out; echo err >&2; exit 3", dir.path(), 1024).unwrap();
 
         assert_eq!(code, 3);
@@ -322,7 +444,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = ["bash".to_string(), "-c".to_string()];
 
-        let (_, captured) = run_shared(&shell, "seq 1 10000", dir.path(), 100).unwrap();
+        let (_, captured, _) = run_shared(&shell, "seq 1 10000", dir.path(), 100).unwrap();
 
         assert!(captured.truncated);
         assert!(captured.text.len() <= 100);
@@ -335,7 +457,7 @@ mod tests {
         let shell = ["bash".to_string(), "-c".to_string()];
         let started = std::time::Instant::now();
 
-        let (code, captured) =
+        let (code, captured, _) =
             run_shared(&shell, "echo now; sleep 30 &", dir.path(), 1024).unwrap();
 
         assert_eq!(code, 0);
@@ -360,7 +482,7 @@ mod tests {
             "-ic".to_string(),
         ];
 
-        let (code, captured) = run_shared(&shell, "hello; (exit 5)", home.path(), 1024).unwrap();
+        let (code, captured, _) = run_shared(&shell, "hello; (exit 5)", home.path(), 1024).unwrap();
 
         assert_eq!(code, 5);
         // The alias from the rc file works, and its output is captured.
