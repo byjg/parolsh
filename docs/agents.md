@@ -155,8 +155,23 @@ Claude Code, through the ACP adapter. Needs Node.js 22 or newer.
 npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-It reuses your Claude Code login (`~/.claude/`), or uses `ANTHROPIC_API_KEY`
-when it is set.
+It uses your Claude Code login, or `ANTHROPIC_API_KEY` when it is set. The
+adapter does not log in by itself: without either, every message fails with
+*Authentication required*.
+
+To use your Claude subscription (Pro, Max) or Console account, log in once
+with the Claude Code CLI:
+
+```bash
+npm install -g @anthropic-ai/claude-code   # or another install method of Claude Code
+claude auth login                          # or run `claude` and type /login
+claude auth status --text                  # check that you are logged in
+```
+
+The login is kept in `~/.claude/.credentials.json` on Linux and in the
+Keychain on macOS, where the adapter finds it. When `ANTHROPIC_API_KEY` is
+also set, the key wins: turns are billed to the API, not to your
+subscription.
 
 ```toml
 [agents.claude]
