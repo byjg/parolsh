@@ -87,6 +87,7 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
             }
         };
 
+        out.heard();
         // Until an abandoned turn ends, what arrives is still its own.
         let stale = agent.abandoned().is_some();
         match event {
@@ -95,12 +96,24 @@ pub fn run(agent: &AgentHandle, blocks: Vec<String>, display: Display) -> Outcom
                     out.unpin("Thinking");
                 }
             }
-            Event::Text(_) | Event::Thought(_) | Event::Tool(_) if stale => {}
+            Event::Text(_)
+            | Event::Thought(_)
+            | Event::Tool { .. }
+            | Event::ToolUpdate { .. }
+            | Event::Plan { .. }
+                if stale => {}
             // Dropping the reply cancels the request.
             Event::Permission { .. } | Event::Form { .. } if stale => {}
             Event::Text(text) => out.text(&text),
             Event::Thought(text) => out.thought(&text),
-            Event::Tool(title) => out.tool(&title),
+            Event::Tool { id, title } => out.tool(id, title),
+            Event::ToolUpdate {
+                id,
+                title,
+                finished,
+            } => out.tool_update(&id, title, finished),
+            Event::Plan { step, total, entry } => out.plan(step, total, &entry),
+            Event::Activity => {}
             Event::Permission {
                 title,
                 details,
@@ -291,7 +304,15 @@ struct Output {
 
 struct Status {
     started: Instant,
+    /// When the agent last sent anything.
+    heard: Instant,
+    /// What the agent does, unless tools are shown.
     activity: String,
+    /// The tool calls started and not finished, oldest first.
+    running: Vec<Tool>,
+    /// The last thing the agent did concerns its tools: they are shown
+    /// instead of `activity`.
+    on_tools: bool,
     /// The agent's reasoning since the last answer text or tool call.
     thoughts: String,
     frame: usize,
@@ -302,10 +323,86 @@ struct Status {
     pinned: bool,
 }
 
+struct Tool {
+    id: String,
+    title: String,
+    started: Instant,
+}
+
 impl Status {
     fn set_activity(&mut self, activity: String) {
         if !self.pinned {
             self.activity = activity;
+            self.on_tools = false;
+        }
+    }
+
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            heard: Instant::now(),
+            activity: "Thinking".to_string(),
+            running: Vec::new(),
+            on_tools: false,
+            thoughts: String::new(),
+            frame: 0,
+            tools: 0,
+            shown: false,
+            pinned: false,
+        }
+    }
+
+    fn start_tool(&mut self, id: String, title: String) {
+        self.tools += 1;
+        self.running.push(Tool {
+            id,
+            title,
+            started: Instant::now(),
+        });
+        self.on_tools = true;
+        self.thoughts.clear();
+    }
+
+    /// A tool call got a new title, or finished. A failure is shown until the
+    /// agent does something else.
+    fn update_tool(&mut self, id: &str, title: Option<String>, finished: Option<bool>) {
+        let Some(i) = self.running.iter().position(|tool| tool.id == id) else {
+            return;
+        };
+        if let Some(title) = title {
+            self.running[i].title = title;
+        }
+        match finished {
+            None => self.on_tools = true,
+            Some(true) => {
+                self.running.remove(i);
+                if self.running.is_empty() {
+                    self.set_activity("Thinking".to_string());
+                } else {
+                    self.on_tools = true;
+                }
+            }
+            Some(false) => {
+                let tool = self.running.remove(i);
+                self.set_activity(format!("Failed: {}", tool.title));
+            }
+        }
+    }
+
+    /// The activity shown: Parolsh's own, the running tools, or what the
+    /// agent does.
+    fn activity(&self) -> String {
+        if self.pinned || !self.on_tools {
+            return self.activity.clone();
+        }
+        match self.running.as_slice() {
+            [] => self.activity.clone(),
+            [tool] => format!(
+                "Running: {} ({}s)",
+                tool.title,
+                tool.started.elapsed().as_secs()
+            ),
+            tools => format!("{} tools running", tools.len()),
         }
     }
 }
@@ -318,15 +415,7 @@ impl Output {
             ansi,
             in_thought: false,
             mid_line: false,
-            status: ansi.then(|| Status {
-                started: Instant::now(),
-                activity: "Thinking".to_string(),
-                thoughts: String::new(),
-                frame: 0,
-                tools: 0,
-                shown: false,
-                pinned: false,
-            }),
+            status: ansi.then(Status::new),
         }
     }
 
@@ -406,17 +495,37 @@ impl Output {
         self.show();
     }
 
-    fn tool(&mut self, title: &str) {
+    fn tool(&mut self, id: String, title: String) {
         match &mut self.status {
             Some(status) => {
-                status.tools += 1;
-                status.set_activity(format!("Running: {title}"));
-                status.thoughts.clear();
+                status.start_tool(id, title);
                 self.hide();
                 self.end_line();
                 self.show();
             }
             None => self.line(&format!("• {title}")),
+        }
+    }
+
+    fn tool_update(&mut self, id: &str, title: Option<String>, finished: Option<bool>) {
+        if let Some(status) = &mut self.status {
+            status.update_tool(id, title, finished);
+        }
+        self.show();
+    }
+
+    /// The agent's plan, at its entry in progress.
+    fn plan(&mut self, step: usize, total: usize, entry: &str) {
+        if let Some(status) = &mut self.status {
+            status.set_activity(format!("Plan {step}/{total}: {entry}"));
+        }
+        self.show();
+    }
+
+    /// The agent sent something: it is not quiet.
+    fn heard(&mut self) {
+        if let Some(status) = &mut self.status {
+            status.heard = Instant::now();
         }
     }
 
@@ -447,6 +556,7 @@ impl Output {
         if let Some(status) = &mut self.status {
             status.activity = activity.to_string();
             status.pinned = true;
+            status.on_tools = false;
         }
         self.show();
     }
@@ -455,7 +565,7 @@ impl Output {
     fn unpin(&mut self, activity: &str) {
         if let Some(status) = &mut self.status {
             status.pinned = false;
-            status.activity = activity.to_string();
+            status.set_activity(activity.to_string());
         }
         self.show();
     }
@@ -476,8 +586,9 @@ impl Output {
         if let Some(status) = &mut self.status {
             let line = ui::status(
                 status.frame,
-                &status.activity,
+                &status.activity(),
                 status.started.elapsed(),
+                status.heard.elapsed(),
                 ui::width(),
             );
             print!("{}{line}", ui::CLEAR_LINE);
@@ -520,6 +631,67 @@ mod tests {
 
     fn chosen(answer: &str) -> Option<String> {
         choose(&options(), answer).map(|option| option.option_id.to_string())
+    }
+
+    fn tool(status: &mut Status, id: &str, title: &str) {
+        status.start_tool(id.to_string(), title.to_string());
+    }
+
+    #[test]
+    fn one_running_tool_shows_its_title_and_time() {
+        let mut status = Status::new();
+        tool(&mut status, "t1", "Read a");
+
+        assert_eq!(status.activity(), "Running: Read a (0s)");
+        status.update_tool("t1", Some("Read a.rs".to_string()), None);
+        assert_eq!(status.activity(), "Running: Read a.rs (0s)");
+    }
+
+    #[test]
+    fn several_running_tools_are_counted_until_they_finish() {
+        let mut status = Status::new();
+        tool(&mut status, "t1", "Read a");
+        tool(&mut status, "t2", "Read b");
+
+        assert_eq!(status.activity(), "2 tools running");
+        status.update_tool("t1", None, Some(true));
+        assert_eq!(status.activity(), "Running: Read b (0s)");
+        status.update_tool("t2", None, Some(true));
+        assert_eq!(status.activity(), "Thinking");
+        assert_eq!(status.tools, 2);
+    }
+
+    #[test]
+    fn a_failed_tool_is_shown_until_the_agent_does_something_else() {
+        let mut status = Status::new();
+        tool(&mut status, "t1", "Fetch url");
+        status.update_tool("t1", None, Some(false));
+
+        assert_eq!(status.activity(), "Failed: Fetch url");
+        status.set_activity("Writing".to_string());
+        assert_eq!(status.activity(), "Writing");
+    }
+
+    #[test]
+    fn text_while_a_tool_runs_shows_the_text_until_the_tool_changes() {
+        let mut status = Status::new();
+        tool(&mut status, "t1", "Read a");
+        status.set_activity("Writing".to_string());
+
+        assert_eq!(status.activity(), "Writing");
+        status.update_tool("t1", None, None);
+        assert_eq!(status.activity(), "Running: Read a (0s)");
+    }
+
+    #[test]
+    fn a_pinned_activity_stays_over_tools() {
+        let mut status = Status::new();
+        status.activity = "Cancelling…".to_string();
+        status.pinned = true;
+        tool(&mut status, "t1", "Read a");
+        status.update_tool("t1", None, Some(false));
+
+        assert_eq!(status.activity(), "Cancelling…");
     }
 
     #[test]
