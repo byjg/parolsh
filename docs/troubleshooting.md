@@ -11,6 +11,22 @@ Find the message you see below.
 *cannot start `claude-agent-acp`: not found on PATH*: see
 [When an agent cannot start](agents.md#when-an-agent-cannot-start).
 
+## Authentication required
+
+```text
+parolsh: Authentication required
+```
+
+The agent started, but is not logged in. Each agent logs in its own way, see
+its section in [Agents](agents.md). For Claude: log in once with the Claude
+Code CLI (`claude auth login`), or set `ANTHROPIC_API_KEY`, see
+[Claude](agents.md#claude).
+
+*This integration does not support using claude.ai subscriptions* (or *Sign
+in with an API key or a Console account*) comes from `claude-agent-acp`
+started with `--hide-claude-auth`, which refuses subscription logins. Remove
+it from the agent's `args`, or use an API key.
+
 ## The agent stopped
 
 ```text
