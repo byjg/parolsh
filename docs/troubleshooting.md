@@ -19,7 +19,9 @@ parolsh: the agent stopped. Run #new to start it again.
 ```
 
 The agent's process ended: it crashed, was killed, or closed the connection.
-The line before it is the reason, as Parolsh got it. The conversation is
+The line before it is the reason, as Parolsh got it: usually
+`Process exited with exit status: 1: <the end of what the agent printed on
+stderr>`, or `the agent closed the connection`. The conversation is
 lost: `#new` starts the agent again with a new one, in the current directory.
 
 ## A turn failed

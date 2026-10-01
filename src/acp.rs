@@ -14,7 +14,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
-    UntypedMessage,
+    UntypedMessage, is_incoming_transport_closed,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -255,7 +255,7 @@ impl AgentHandle {
                             events_tx.clone(),
                             session_state,
                         ))
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| stop_reason(&e))
                 });
             if let Err(e) = result {
                 let _ = events_tx.send(Event::Error(e));
@@ -330,6 +330,24 @@ impl Drop for AgentHandle {
             let _ = thread.join();
         }
     }
+}
+
+/// Why the agent stopped. The crate's errors carry the reason (the exit status
+/// and the end of the agent's stderr) as text in `data`, next to where in the
+/// crate they were raised: only that text is shown.
+fn stop_reason(error: &agent_client_protocol::Error) -> String {
+    if is_incoming_transport_closed(error) {
+        return "the agent closed the connection".to_string();
+    }
+    let text = match &error.data {
+        Some(serde_json::Value::String(text)) => text,
+        Some(data) => match data.get("data") {
+            Some(serde_json::Value::String(text)) => text,
+            _ => return error.to_string(),
+        },
+        None => return error.to_string(),
+    };
+    text.trim_end().to_string()
 }
 
 /// Why `command` cannot be started, or `None` when it can be found.
@@ -422,6 +440,9 @@ async fn serve(
                         Command::Prompt(blocks) => {
                             let event = match prompt(&cx, &session, blocks, &mut commands).await {
                                 Ok(stop_reason) => Event::TurnEnd(stop_reason),
+                                // The agent's output closed: it stopped, the
+                                // turn did not fail.
+                                Err(e) if is_incoming_transport_closed(&e) => return Err(e),
                                 Err(e) => Event::TurnFailed(e.to_string()),
                             };
                             let _ = events.send(event);
@@ -981,8 +1002,13 @@ mod tests {
         let agent = start(None, &[], dir.path());
         assert!(agent.prompt("die".to_string()));
 
+        // Whichever the crate notices first: the exit, or the closed output.
         match next(&agent) {
-            Event::Error(_) => {}
+            Event::Error(message) => assert!(
+                message == "Process exited with exit status: 1: boom"
+                    || message == "the agent closed the connection",
+                "{message}"
+            ),
             other => panic!("unexpected event: {other:?}"),
         }
     }
