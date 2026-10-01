@@ -35,8 +35,14 @@ pub enum Event {
     Text(String),
     /// A piece of the agent's reasoning ("thinking"), before or between answers.
     Thought(String),
-    /// The agent started a tool call.
-    Tool { id: String, title: String },
+    /// The agent started a tool call: what kind (`edit`, `read`, `execute`,
+    /// ...) and the files it concerns, when the agent says.
+    Tool {
+        id: String,
+        title: String,
+        kind: String,
+        files: Vec<PathBuf>,
+    },
     /// A tool call changed: a new title, or it finished.
     ToolUpdate {
         id: String,
@@ -829,6 +835,15 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
         SessionUpdate::ToolCall(call) => Event::Tool {
             id: call.tool_call_id.to_string(),
             title: call.title,
+            kind: serde_json::to_value(call.kind)
+                .ok()
+                .and_then(|kind| kind.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            files: call
+                .locations
+                .into_iter()
+                .map(|location| location.path)
+                .collect(),
         },
         SessionUpdate::ToolCallUpdate(update) => Event::ToolUpdate {
             id: update.tool_call_id.to_string(),
@@ -1243,8 +1258,8 @@ mod tests {
         assert_eq!(
             events,
             [
-                r#"Tool { id: "t1", title: "Read a" }"#,
-                r#"Tool { id: "t2", title: "Read b" }"#,
+                r#"Tool { id: "t1", title: "Read a", kind: "read", files: ["/tmp/a"] }"#,
+                r#"Tool { id: "t2", title: "Read b", kind: "other", files: [] }"#,
                 r#"ToolUpdate { id: "t1", title: Some("Read a.rs"), finished: None }"#,
                 r#"ToolUpdate { id: "t1", title: None, finished: Some(true) }"#,
                 r#"ToolUpdate { id: "t2", title: None, finished: Some(false) }"#,

@@ -130,6 +130,8 @@ pub struct Config {
     pub shell_env: ShellEnv,
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, Agent>,
+    /// How many entries `#audit` keeps; 0 keeps none.
+    pub audit_entries: usize,
 }
 
 /// One config file as written on disk: every field is optional so a project
@@ -147,6 +149,7 @@ struct ConfigFile {
     default_agent: Option<String>,
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
+    audit_entries: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -198,6 +201,7 @@ impl ConfigFile {
         self.links = over.links.or(self.links);
         self.shell_env = over.shell_env.or(self.shell_env);
         self.default_agent = over.default_agent.or(self.default_agent);
+        self.audit_entries = over.audit_entries.or(self.audit_entries);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
             base.mode = agent.mode.or(base.mode.take());
@@ -276,6 +280,7 @@ impl Config {
             shell_env: file.shell_env.unwrap_or_default(),
             default_agent: file.default_agent,
             agents,
+            audit_entries: file.audit_entries.unwrap_or(1000),
         })
     }
 }
@@ -320,6 +325,7 @@ mod tests {
         assert_eq!(config.shell_env, ShellEnv::Auto);
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
+        assert_eq!(config.audit_entries, 1000);
     }
 
     #[test]
@@ -545,6 +551,7 @@ mod tests {
             "links = \"never\"\n",
             "shell_env = \"sometimes\"\n",
             "input = \"bash\"\n",
+            "audit_entries = -1\n",
             "[agents.qwen]\ncommand = \"qwen\"\noptions = { effort = 3 }\n",
             // The old mapping keys are not accepted any more.
             "[agents.qwen]\ncommand = \"qwen\"\npermission_mode = \"normal\"\n",

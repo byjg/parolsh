@@ -170,7 +170,8 @@ def prompt(request):
         def update(fields):
             send({"method": "session/update", "params": {"sessionId": session_id,
                                                           "update": fields}})
-        update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a"})
+        update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a",
+                "kind": "read", "locations": [{"path": "/tmp/a"}]})
         update({"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read b"})
         update({"sessionUpdate": "tool_call_update", "toolCallId": "t1",
                 "title": "Read a.rs"})
