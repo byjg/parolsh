@@ -15,6 +15,27 @@ The project file is applied on top of the global one, field by field: it only
 needs the values it changes. Unknown keys are an error, so a typo is reported
 instead of being ignored.
 
+## What a project can change
+
+A project file comes with the directory, often from a repository you cloned,
+so it can change how Parolsh looks and which configured agent it uses, but
+never what is executed. These keys are **global only**:
+
+- `shell`
+- `agents.<name>.command`, `agents.<name>.args` and `agents.<name>.env`
+
+A project can only refer to agents defined in the global file: it cannot add
+one. A project file that sets a global-only key is reported as an error and
+nothing is started:
+
+```text
+parolsh: invalid /home/joao/projects/wallet/.parolsh/config.toml: `shell` can only be set in the global configuration
+```
+
+To use other variables or arguments in one project, define a second agent in
+the global file (for example `qwen-mini` with its own `env`) and pick it with
+the project's `default_agent`.
+
 ## The first run creates it
 
 When `~/.config/parolsh/config.toml` does not exist, Parolsh writes it from
@@ -94,8 +115,8 @@ launched as `claude-agent-acp`.
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
 plain `bash -c`.
 
-`env` and `options` merge key by key: a project can change one variable or
-option without repeating the others.
+`options` merges key by key: a project can change one option without
+repeating the others.
 
 ## Prompt
 

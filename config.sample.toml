@@ -10,9 +10,10 @@
 #
 # With Homebrew, the sample is in $(brew --prefix)/share/parolsh/.
 #
-# The same keys work in a project's `.parolsh/config.toml`, which overrides
-# this file field by field. Full reference: docs/configuration.md and
-# docs/agents.md, or https://opensource.byjg.com/docs/ai/parolsh
+# A project's `.parolsh/config.toml` overrides this file field by field,
+# except `shell` and the agents' `command`, `args` and `env`, which are global
+# only: a cloned repository cannot choose what runs. Full reference:
+# docs/configuration.md and docs/agents.md, or https://opensource.byjg.com/docs/ai/parolsh
 
 
 # --- Shell ------------------------------------------------------------------
