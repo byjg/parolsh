@@ -55,7 +55,7 @@ pub unsafe fn load(mode: ShellEnv, shell: &str) -> Option<String> {
 /// `~/.profile` and `~/.bashrc`) and returns the variables to import.
 /// Whatever the startup files print is ignored; only `env -0` is read.
 fn resolve(shell: &str, timeout: Duration) -> std::io::Result<Vec<(String, String)>> {
-    let (bytes, status) = capture(shell, &["-ilc", "env -0"], timeout)?;
+    let (bytes, status) = capture(shell, &["-ilc", "env -0"], None, timeout)?;
     let vars = parse(&bytes);
     if vars.is_empty() {
         return Err(std::io::Error::other(format!("no environment ({status})")));
@@ -69,7 +69,7 @@ fn resolve(shell: &str, timeout: Duration) -> std::io::Result<Vec<(String, Strin
 pub fn bash_names(shell: &str) -> std::io::Result<Vec<String>> {
     // What the startup files print comes before the NUL; the names after.
     let script = "printf '\\0'; compgen -a -A function -b -k";
-    let (bytes, status) = capture(shell, &["-ic", script], TIMEOUT)?;
+    let (bytes, status) = capture(shell, &["-ic", script], None, TIMEOUT)?;
     let Some(start) = bytes.iter().rposition(|&b| b == 0) else {
         return Err(std::io::Error::other(format!("no names ({status})")));
     };
@@ -83,17 +83,22 @@ pub fn bash_names(shell: &str) -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// Runs `shell args` and returns its standard output and exit status.
+/// Runs `shell args`, in `cwd` when given, and returns its standard output
+/// and exit status.
 ///
 /// The shell runs in a new session, without a controlling terminal: an
 /// interactive shell would otherwise take the terminal for its job control
 /// and leave Parolsh in the background, stopped.
-fn capture(
+pub fn capture(
     shell: &str,
     args: &[&str],
+    cwd: Option<&Path>,
     timeout: Duration,
 ) -> std::io::Result<(Vec<u8>, std::process::ExitStatus)> {
     let mut command = Command::new(shell);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -117,11 +122,13 @@ fn capture(
     let bytes = match rx.recv_timeout(timeout) {
         Ok(read) => read?,
         Err(_) => {
-            // A startup file waiting for input, or a very slow one.
-            let _ = child.kill();
+            // A startup file waiting for input, or a very slow one. The
+            // whole session goes: what the shell started too.
+            let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+            let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
+            let _ = child.wait();
             return Err(std::io::Error::other(format!(
-                "no answer after {}s",
-                timeout.as_secs()
+                "no answer after {timeout:?}"
             )));
         }
     };
