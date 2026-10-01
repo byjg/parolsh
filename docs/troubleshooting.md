@@ -78,3 +78,27 @@ What to do:
   which are always on.
 
 Checked against Qwen Code 0.24.5.
+
+## Logging the agent's messages
+
+To see what passes between Parolsh and the agent, for example when a turn
+seems stuck, start Parolsh with `PAROLSH_ACP_LOG`:
+
+```bash
+PAROLSH_ACP_LOG=/tmp/parolsh-acp.log parolsh
+```
+
+Each line sent to the agent (`send`), received from it (`recv`) and printed on
+its stderr (`stderr`) is appended to the file, after the seconds since the
+agent started. A `--- agent started` line marks each start (`#new`, `#agent`,
+`#cd` to another project):
+
+```text
+--- agent started
+     0.002 send   {..."method":"initialize",...}
+     0.341 recv   {..."result":{"protocolVersion":1,...}}
+    12.870 stderr retrying the API request (attempt 2)
+```
+
+The log holds the whole conversation, including what you share with `!+`:
+Parolsh creates it readable only by you, but delete it when you are done.

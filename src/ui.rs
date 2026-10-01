@@ -202,11 +202,35 @@ pub fn banner(
     out
 }
 
-/// The status line text: spinner, activity and elapsed time, cut to fit
-/// `width` so it never wraps (a wrapped line cannot be redrawn in place).
-pub fn status(frame: usize, activity: &str, elapsed: Duration, width: usize) -> String {
+/// Silence after which the status line says how long the agent has been quiet.
+const QUIET: Duration = Duration::from_secs(15);
+/// Silence after which it also says how to cancel.
+const QUIET_HINT: Duration = Duration::from_secs(60);
+
+/// The status line text: spinner, activity, elapsed time and, once the agent
+/// has been silent for `QUIET`, for how long. Cut to fit `width` so it never
+/// wraps (a wrapped line cannot be redrawn in place): the activity first,
+/// then the hint and the quiet time.
+pub fn status(
+    frame: usize,
+    activity: &str,
+    elapsed: Duration,
+    quiet: Duration,
+    width: usize,
+) -> String {
     let spinner = SPINNER[frame % SPINNER.len()];
-    let tail = format!(" · {}s", elapsed.as_secs());
+    let mut parts = vec![format!(" · {}s", elapsed.as_secs())];
+    if quiet >= QUIET {
+        parts.push(format!(" · quiet {}s", quiet.as_secs()));
+    }
+    if quiet >= QUIET_HINT {
+        parts.push(" · Ctrl+C to cancel".to_string());
+    }
+    // Keep room for the spinner and a few characters of activity.
+    while parts.len() > 1 && 2 + 10 + parts.concat().chars().count() >= width {
+        parts.pop();
+    }
+    let tail = parts.concat();
     let room = width.saturating_sub(2 + tail.chars().count() + 1);
     let activity = one_line(activity);
     let activity: String = if activity.chars().count() > room {
@@ -445,16 +469,48 @@ mod tests {
 
     #[test]
     fn status_shows_spinner_activity_and_seconds() {
-        let text = status(2, "Running: Terminal", Duration::from_secs(12), 80);
+        let text = status(2, "Running: Terminal", Duration::from_secs(12), ZERO, 80);
 
         assert_eq!(plain(&text), "⠹ Running: Terminal · 12s");
+    }
+
+    const ZERO: Duration = Duration::ZERO;
+
+    #[test]
+    fn status_says_how_long_the_agent_has_been_quiet() {
+        let secs = Duration::from_secs;
+        let line = |quiet| plain(&status(0, "Thinking", secs(376), quiet, 80));
+
+        assert_eq!(line(secs(14)), "⠋ Thinking · 376s");
+        assert_eq!(line(secs(15)), "⠋ Thinking · 376s · quiet 15s");
+        assert_eq!(
+            line(secs(340)),
+            "⠋ Thinking · 376s · quiet 340s · Ctrl+C to cancel"
+        );
+    }
+
+    #[test]
+    fn a_narrow_status_drops_the_hint_then_the_quiet_time() {
+        let line = |width| {
+            plain(&status(
+                0,
+                "Thinking",
+                Duration::from_secs(376),
+                Duration::from_secs(340),
+                width,
+            ))
+        };
+
+        assert_eq!(line(40), "⠋ Thinking · 376s · quiet 340s");
+        assert_eq!(line(24), "⠋ Thinking · 376s");
+        assert!(line(24).chars().count() < 24);
     }
 
     #[test]
     fn status_never_wraps_and_keeps_one_line() {
         let long = "Terminal: find / -name '*.rs'\nsecond line";
 
-        let text = plain(&status(0, long, Duration::from_secs(3), 24));
+        let text = plain(&status(0, long, Duration::from_secs(3), ZERO, 24));
 
         assert_eq!(text, "⠋ Terminal: find … · 3s");
         assert!(text.chars().count() < 24);

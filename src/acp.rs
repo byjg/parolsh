@@ -6,15 +6,16 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationMode, InitializeRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
+    ToolCallStatus,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
-    UntypedMessage, is_incoming_transport_closed,
+    LineDirection, UntypedMessage, is_incoming_transport_closed,
 };
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -35,7 +36,22 @@ pub enum Event {
     /// A piece of the agent's reasoning ("thinking"), before or between answers.
     Thought(String),
     /// The agent started a tool call.
-    Tool(String),
+    Tool { id: String, title: String },
+    /// A tool call changed: a new title, or it finished.
+    ToolUpdate {
+        id: String,
+        title: Option<String>,
+        /// `Some(true)` when it completed, `Some(false)` when it failed.
+        finished: Option<bool>,
+    },
+    /// The agent's plan, at its entry in progress: `step` of `total`.
+    Plan {
+        step: usize,
+        total: usize,
+        entry: String,
+    },
+    /// Anything else the agent sent: it is still working.
+    Activity,
     /// The agent asks for permission. Reply with the chosen option, or
     /// `None` to cancel.
     Permission {
@@ -234,6 +250,14 @@ impl AgentHandle {
     /// Starts the agent and opens a session in `cwd`, in the background:
     /// this returns immediately, and prompts sent meanwhile wait for it.
     pub fn start(agent: &config::Agent, cwd: PathBuf) -> Self {
+        let log = std::env::var_os(LOG_VAR)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        Self::spawn(agent, cwd, log)
+    }
+
+    /// `start`, logging the agent's stdio to `log`.
+    fn spawn(agent: &config::Agent, cwd: PathBuf, log: Option<PathBuf>) -> Self {
         let missing = missing_command(&agent.command);
         let config = AcpAgentConfig::new(&agent.command)
             .args(agent.args.clone())
@@ -244,6 +268,18 @@ impl AgentHandle {
         };
         let (commands_tx, commands_rx) = tokio_mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::channel();
+        let mut acp_agent = AcpAgent::new(config);
+        if let Some(path) = log {
+            match open_log(&path) {
+                Ok(log) => acp_agent = acp_agent.with_debug(log),
+                Err(e) => {
+                    let _ = events_tx.send(Event::Notice(format!(
+                        "cannot write {LOG_VAR} to {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
         let shared = Shared::default();
         let session_state = shared.clone();
 
@@ -258,7 +294,7 @@ impl AgentHandle {
                 .and_then(|runtime| {
                     runtime
                         .block_on(serve(
-                            config,
+                            acp_agent,
                             wanted,
                             cwd,
                             commands_rx,
@@ -389,6 +425,41 @@ fn stop_reason(error: &agent_client_protocol::Error) -> String {
     text.trim_end().to_string()
 }
 
+/// Names the file that gets the agent's stdio, for diagnostics.
+const LOG_VAR: &str = "PAROLSH_ACP_LOG";
+
+/// Opens the log for appending, and returns the callback that writes each
+/// line sent to the agent, received from it and printed on its stderr, after
+/// the seconds since it started. The log holds the whole conversation, so it
+/// is created readable by the user only.
+fn open_log(path: &Path) -> std::io::Result<impl Fn(&str, LineDirection) + Send + Sync + 'static> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    writeln!(file, "--- agent started")?;
+    let file = Mutex::new(file);
+    let started = std::time::Instant::now();
+    Ok(move |line: &str, direction: LineDirection| {
+        let direction = match direction {
+            LineDirection::Stdin => "send",
+            LineDirection::Stdout => "recv",
+            LineDirection::Stderr => "stderr",
+        };
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(
+                file,
+                "{:10.3} {direction:<6} {line}",
+                started.elapsed().as_secs_f64()
+            );
+        }
+    })
+}
+
 /// Why `command` cannot be started, or `None` when it can be found.
 fn missing_command(command: &str) -> Option<String> {
     let path = std::env::var("PATH").ok();
@@ -408,7 +479,7 @@ fn missing_command(command: &str) -> Option<String> {
 }
 
 async fn serve(
-    config: AcpAgentConfig,
+    agent: AcpAgent,
     mut wanted: Wanted,
     cwd: PathBuf,
     mut commands: tokio_mpsc::UnboundedReceiver<Command>,
@@ -460,57 +531,54 @@ async fn serve(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(
-            AcpAgent::new(config),
-            async move |cx: ConnectionTo<Agent>| {
-                // Forms let agents ask the user questions (elicitation).
-                let capabilities = ClientCapabilities::new().elicitation(
-                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
-                );
-                cx.send_request(
-                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
-                )
-                .block_task()
-                .await?;
-                let mut session = open_session(&cx, &cwd, &wanted, &events, &shared).await?;
-                // Commands that arrived during a turn, run after it.
-                let mut pending = VecDeque::new();
+        .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
+            // Forms let agents ask the user questions (elicitation).
+            let capabilities = ClientCapabilities::new().elicitation(
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+            );
+            cx.send_request(
+                InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
+            )
+            .block_task()
+            .await?;
+            let mut session = open_session(&cx, &cwd, &wanted, &events, &shared).await?;
+            // Commands that arrived during a turn, run after it.
+            let mut pending = VecDeque::new();
 
-                loop {
-                    let command = match pending.pop_front() {
+            loop {
+                let command = match pending.pop_front() {
+                    Some(command) => command,
+                    None => match commands.recv().await {
                         Some(command) => command,
-                        None => match commands.recv().await {
-                            Some(command) => command,
-                            None => break,
-                        },
-                    };
-                    match command {
-                        Command::Prompt(turn, blocks) => {
-                            let result =
-                                prompt(&cx, &session, blocks, &mut commands, &mut pending, &events)
-                                    .await;
-                            let event = match result {
-                                Ok(stop_reason) => Event::TurnEnd(turn, stop_reason),
-                                // The agent's output closed: it stopped, the
-                                // turn did not fail.
-                                Err(e) if is_incoming_transport_closed(&e) => return Err(e),
-                                Err(e) => Event::TurnFailed(turn, e.to_string()),
-                            };
-                            let _ = events.send(event);
-                        }
-                        Command::NewSession(dir) => {
-                            session = open_session(&cx, &dir, &wanted, &events, &shared).await?;
-                        }
-                        Command::SetOption(id, value) => {
-                            wanted.options.insert(id.clone(), value.clone());
-                            set_option(&cx, &session, &id, &value, &events, &shared).await;
-                        }
-                        Command::Cancel => {}
+                        None => break,
+                    },
+                };
+                match command {
+                    Command::Prompt(turn, blocks) => {
+                        let result =
+                            prompt(&cx, &session, blocks, &mut commands, &mut pending, &events)
+                                .await;
+                        let event = match result {
+                            Ok(stop_reason) => Event::TurnEnd(turn, stop_reason),
+                            // The agent's output closed: it stopped, the
+                            // turn did not fail.
+                            Err(e) if is_incoming_transport_closed(&e) => return Err(e),
+                            Err(e) => Event::TurnFailed(turn, e.to_string()),
+                        };
+                        let _ = events.send(event);
                     }
+                    Command::NewSession(dir) => {
+                        session = open_session(&cx, &dir, &wanted, &events, &shared).await?;
+                    }
+                    Command::SetOption(id, value) => {
+                        wanted.options.insert(id.clone(), value.clone());
+                        set_option(&cx, &session, &id, &value, &events, &shared).await;
+                    }
+                    Command::Cancel => {}
                 }
-                Ok(())
-            },
-        )
+            }
+            Ok(())
+        })
         .await
 }
 
@@ -758,8 +826,36 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
             content: ContentBlock::Text(text),
             ..
         }) => Event::Thought(text.text),
-        SessionUpdate::ToolCall(call) => Event::Tool(call.title),
-        _ => return,
+        SessionUpdate::ToolCall(call) => Event::Tool {
+            id: call.tool_call_id.to_string(),
+            title: call.title,
+        },
+        SessionUpdate::ToolCallUpdate(update) => Event::ToolUpdate {
+            id: update.tool_call_id.to_string(),
+            title: update.fields.title,
+            finished: match update.fields.status {
+                Some(ToolCallStatus::Completed) => Some(true),
+                Some(ToolCallStatus::Failed) => Some(false),
+                _ => None,
+            },
+        },
+        SessionUpdate::Plan(plan) => {
+            let total = plan.entries.len();
+            match plan
+                .entries
+                .into_iter()
+                .enumerate()
+                .find(|(_, entry)| entry.status == PlanEntryStatus::InProgress)
+            {
+                Some((i, entry)) => Event::Plan {
+                    step: i + 1,
+                    total,
+                    entry: entry.content,
+                },
+                None => Event::Activity,
+            }
+        }
+        _ => Event::Activity,
     };
     let _ = events.send(event);
 }
@@ -801,7 +897,7 @@ mod tests {
         loop {
             match next(agent) {
                 Event::Text(chunk) => text.push_str(&chunk),
-                Event::Tool(title) => text.push_str(&format!("• {title}\n")),
+                Event::Tool { title, .. } => text.push_str(&format!("• {title}\n")),
                 Event::TurnEnd(_, reason) => return (text, reason),
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -1075,7 +1171,7 @@ mod tests {
         let end = loop {
             match next(&agent) {
                 Event::Text(chunk) => text.push_str(&chunk),
-                Event::Tool(_) => {}
+                Event::Tool { .. } => {}
                 Event::TurnEnd(turn, reason) => break (turn, reason),
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -1100,6 +1196,63 @@ mod tests {
         assert_eq!(turn_end(&agent), (stuck, StopReason::Cancelled));
         let (text, _) = turn(&agent, "again");
         assert!(text.ends_with("again"), "{text}");
+    }
+
+    #[test]
+    fn the_log_has_what_was_sent_received_and_printed_on_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("acp.log");
+        let agent = AgentHandle::spawn(
+            &fake_agent(None, vec![FAKE_AGENT.to_string()]),
+            dir.path().to_path_buf(),
+            Some(log.clone()),
+        );
+        let (text, _) = turn(&agent, "warn");
+        assert_eq!(text, "warned");
+        drop(agent);
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let has = |direction: &str, part: &str| {
+            text.lines()
+                .any(|line| line.contains(&format!(" {direction} ")) && line.contains(part))
+        };
+        assert!(text.starts_with("--- agent started\n"), "{text}");
+        assert!(has("send", r#""method":"session/prompt""#), "{text}");
+        assert!(has("recv", "warned"), "{text}");
+        assert!(has("stderr", "fake warning"), "{text}");
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn tool_updates_plans_and_other_updates_are_forwarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert!(agent.prompt("tools".to_string()).is_some());
+
+        let mut events = Vec::new();
+        loop {
+            match next(&agent) {
+                Event::TurnEnd(..) => break,
+                event => events.push(format!("{event:?}")),
+            }
+        }
+
+        assert_eq!(
+            events,
+            [
+                r#"Tool { id: "t1", title: "Read a" }"#,
+                r#"Tool { id: "t2", title: "Read b" }"#,
+                r#"ToolUpdate { id: "t1", title: Some("Read a.rs"), finished: None }"#,
+                r#"ToolUpdate { id: "t1", title: None, finished: Some(true) }"#,
+                r#"ToolUpdate { id: "t2", title: None, finished: Some(false) }"#,
+                r#"Plan { step: 2, total: 3, entry: "Write tests" }"#,
+                "Activity",
+                r#"Text("done")"#,
+            ]
+        );
     }
 
     #[test]

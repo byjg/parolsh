@@ -22,6 +22,9 @@ The prompt is the text of the last block; earlier blocks are context.
   fail   answers the prompt with an error, like Qwen's loop protection
   die    prints "boom" on stderr and exits with status 1, without answering
   env X  replies the value of the environment variable X
+  warn   prints "fake warning" on stderr and replies "warned"
+  tools  starts two tool calls, renames the first, completes it, fails the
+         second, sends a plan and a usage update, then replies "done"
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
 With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
@@ -163,6 +166,26 @@ def prompt(request):
     elif text == "die":
         print("boom", file=sys.stderr, flush=True)
         sys.exit(1)
+    elif text == "tools":
+        def update(fields):
+            send({"method": "session/update", "params": {"sessionId": session_id,
+                                                          "update": fields}})
+        update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a"})
+        update({"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read b"})
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "Read a.rs"})
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "status": "completed"})
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "failed"})
+        update({"sessionUpdate": "plan", "entries": [
+            {"content": "Read", "priority": "high", "status": "completed"},
+            {"content": "Write tests", "priority": "high", "status": "in_progress"},
+            {"content": "Ship", "priority": "low", "status": "pending"}]})
+        update({"sessionUpdate": "usage_update", "used": 10, "size": 100})
+        say(session_id, "done")
+    elif text == "warn":
+        print("fake warning", file=sys.stderr, flush=True)
+        say(session_id, "warned")
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "stuck":
