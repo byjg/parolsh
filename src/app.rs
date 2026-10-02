@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::acp::AgentHandle;
+use crate::acp::{AgentHandle, Block};
 use crate::audit::{self, Actor, Audit};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
-use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
+use crate::{config, hints, mention, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
 Input:
@@ -52,6 +52,8 @@ pub struct App {
     shell_cwd: PathBuf,
     /// `shell_cwd`, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
+    /// `cwd`, shared with the Tab completion of `@path`.
+    agent_cwd: Arc<Mutex<PathBuf>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
     project_root: Option<PathBuf>,
@@ -99,6 +101,7 @@ impl App {
         let audit = Audit::new(config.audit_entries);
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
+            agent_cwd: Arc::new(Mutex::new(cwd.clone())),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
             cwd,
@@ -477,6 +480,7 @@ impl App {
         }
         let completer = ShellCompleter {
             cwd: self.completion_cwd.clone(),
+            agent_cwd: self.agent_cwd.clone(),
             names,
             mode: self.mode.clone(),
             bash: is_bash.then_some(shell),
@@ -525,6 +529,7 @@ impl App {
         self.config = config;
         self.audit.set_limit(self.config.audit_entries);
         self.cwd = target.clone();
+        *self.agent_cwd.lock().expect("cwd lock") = target.clone();
         self.move_shell(Some(target));
         self.project_root = project_root;
 
@@ -605,12 +610,23 @@ impl App {
                 ),
             );
         }
+        let files = mention::mentioned(&text, &self.cwd, home().as_deref());
+        let linked = match files.len() {
+            0 => String::new(),
+            1 => " · 1 file linked".to_string(),
+            n => format!(" · {n} files linked"),
+        };
         self.audit.add(
             Actor::User,
-            format!("→ {name}: {}", audit::excerpt(&text, 80)),
+            format!("→ {name}: {}{linked}", audit::excerpt(&text, 80)),
         );
-        let mut blocks: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
-        blocks.push(text);
+        let mut blocks: Vec<Block> = self
+            .shared
+            .drain(..)
+            .map(|s| Block::Text(s.block()))
+            .collect();
+        blocks.extend(files.into_iter().map(Block::File));
+        blocks.push(Block::Text(text));
         match turn::run(agent, blocks, self.display(), &mut self.audit) {
             turn::Outcome::Finished => 0,
             turn::Outcome::Failed => 1,

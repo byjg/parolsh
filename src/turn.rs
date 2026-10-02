@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Detail, Event, TurnId};
+use crate::acp::{AgentHandle, Block, Detail, Event, TurnId};
 use crate::audit::{self, Actor, Audit};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
@@ -55,7 +55,7 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// What the agent does and what you answer go to `audit`.
 pub fn run(
     agent: &AgentHandle,
-    blocks: Vec<String>,
+    blocks: Vec<Block>,
     display: Display,
     audit: &mut Audit,
 ) -> Outcome {

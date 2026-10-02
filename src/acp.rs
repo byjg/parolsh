@@ -6,7 +6,7 @@ use agent_client_protocol::schema::v1::{
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationMode, InitializeRequest, NewSessionRequest,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
@@ -374,9 +374,33 @@ fn set_prompting(shared: &Shared, prompting: bool) {
 /// told apart from the end of the next one.
 pub type TurnId = u64;
 
+/// A part of a message to the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    Text(String),
+    /// A file or directory the message mentions (`@path`), sent as a link
+    /// the agent reads itself.
+    File(PathBuf),
+}
+
+impl Block {
+    fn to_acp(&self) -> ContentBlock {
+        match self {
+            Self::Text(text) => ContentBlock::Text(TextContent::new(text.clone())),
+            Self::File(path) => {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                ContentBlock::ResourceLink(ResourceLink::new(name, crate::mention::uri(path)))
+            }
+        }
+    }
+}
+
 enum Command {
-    /// Text blocks of one message: context first, the user's text last.
-    Prompt(TurnId, Vec<String>),
+    /// The blocks of one message: context first, the user's text last.
+    Prompt(TurnId, Vec<Block>),
     Cancel,
     NewSession(PathBuf),
     SetOption(String, OptionValue),
@@ -498,12 +522,12 @@ impl AgentHandle {
     /// Sends a prompt. `None` when the agent is no longer running.
     #[cfg(test)]
     pub fn prompt(&self, text: String) -> Option<TurnId> {
-        self.prompt_blocks(vec![text])
+        self.prompt_blocks(vec![Block::Text(text)])
     }
 
-    /// Sends one message made of several text blocks. It waits for the
-    /// previous turn, if the agent has not ended it yet.
-    pub fn prompt_blocks(&self, blocks: Vec<String>) -> Option<TurnId> {
+    /// Sends one message made of several blocks. It waits for the previous
+    /// turn, if the agent has not ended it yet.
+    pub fn prompt_blocks(&self, blocks: Vec<Block>) -> Option<TurnId> {
         let turn = self.last_turn.fetch_add(1, Ordering::SeqCst) + 1;
         self.send(Command::Prompt(turn, blocks)).then_some(turn)
     }
@@ -817,15 +841,12 @@ async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
 async fn prompt(
     cx: &ConnectionTo<Agent>,
     session: &SessionId,
-    blocks: Vec<String>,
+    blocks: Vec<Block>,
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending: &mut VecDeque<Command>,
     events: &mpsc::Sender<Event>,
 ) -> Result<StopReason, agent_client_protocol::Error> {
-    let blocks = blocks
-        .into_iter()
-        .map(|text| ContentBlock::Text(TextContent::new(text)))
-        .collect();
+    let blocks = blocks.iter().map(Block::to_acp).collect();
     let turn = cx
         .send_request(PromptRequest::new(session.clone(), blocks))
         .block_task();
@@ -1297,15 +1318,18 @@ mod tests {
         assert!(
             agent
                 .prompt_blocks(vec![
-                    "output one".to_string(),
-                    "output two".to_string(),
-                    "blocks".to_string(),
+                    Block::Text("output one".to_string()),
+                    Block::File(PathBuf::from("/tmp/My notes.md")),
+                    Block::Text("blocks".to_string()),
                 ])
                 .is_some()
         );
 
         match next(&agent) {
-            Event::Text(text) => assert_eq!(text, r#"["output one", "output two"]"#),
+            Event::Text(text) => assert_eq!(
+                text,
+                r#"["output one", "My notes.md file:///tmp/My%20notes.md"]"#
+            ),
             other => panic!("unexpected event: {other:?}"),
         }
     }

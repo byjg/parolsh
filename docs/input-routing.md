@@ -109,7 +109,10 @@ On `#` lines, `Tab` completes the command's name (`#a` gives `#agent` and
 in. `#cd` takes the path as typed, so names with spaces are not escaped there
 (`#cd My Projects/`). Other `#` commands have no arguments to complete.
 
-Text for the agent, `?text` and `/command` have no completion.
+In text for the agent (`?text` in shell mode), `Tab` completes `@path` with a
+file or directory name from the agent's directory, escaped like on a shell
+line (`@My\ Notes.md`); see [Mentioning files](#mentioning-files). Other
+words of the text have no completion.
 
 ## `!command`
 
@@ -199,6 +202,24 @@ Anything that does not start with `!`, `#` or `/` is a question for the
 agent, in agent mode (in shell mode, start it with `?`). The answer is printed as it arrives, with a status line showing what
 the agent is doing (see [During a turn](agents.md#during-a-turn)). `Ctrl+C`
 cancels the turn.
+
+### Mentioning files
+
+`@path` names a file or directory for the agent:
+
+```text
+[claude] ~/projects/wallet ✦ why does @src/api/client.rs retry twice?
+```
+
+The text goes as typed, and each `@path` that exists goes with it as a link
+(an ACP `resource_link` with the absolute `file://` path), which the agent
+reads itself. Paths start at the agent's directory, even after a `cd` moved
+your commands elsewhere; `~/` and absolute paths work. `@words` that name
+nothing (`@team`, an email address) are only text, and punctuation right after
+a path (`@notes.txt.`) is not part of it. `#audit` shows how many files a
+message linked.
+
+Not on `!` lines: there, `@` is the shell's.
 
 ## `/command`
 

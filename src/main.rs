@@ -7,6 +7,7 @@ mod form;
 mod hints;
 mod input;
 mod markdown;
+mod mention;
 mod project;
 mod setup;
 mod shell;

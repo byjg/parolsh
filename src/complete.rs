@@ -2,8 +2,9 @@
 //! lines: command names from `PATH`
 //! and from bash (aliases, functions, builtins); then each command's own
 //! arguments (git branches, ssh hosts) from bash-completion, or file names.
-//! `#` lines complete the command's name, and `#cd` a directory. Text for
-//! the agent has nothing to complete.
+//! `#` lines complete the command's name, and `#cd` a directory. In text
+//! for the agent, `@` completes a file or directory from the agent's
+//! directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
-use crate::input::{Mode, SharedMode};
+use crate::input::{Input, Mode, SharedMode, route};
 use crate::shellenv::{self, is_executable};
 
 /// Asks bash-completion for the arguments of a command line, see the script.
@@ -33,8 +34,10 @@ pub const CONTROL_COMMANDS: [&str; 10] = [
 ];
 
 pub struct ShellCompleter {
-    /// Parolsh's current directory, which `#cd` changes.
+    /// Where shell commands run.
     pub cwd: Arc<Mutex<PathBuf>>,
+    /// The agent's directory, for `@path` in text for the agent.
+    pub agent_cwd: Arc<Mutex<PathBuf>>,
     /// Bash's aliases, functions and builtins, read in the background when
     /// Parolsh starts; not set until then.
     pub names: Arc<OnceLock<Vec<String>>>,
@@ -46,22 +49,47 @@ pub struct ShellCompleter {
 impl Completer for ShellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let cwd = self.cwd.lock().expect("cwd lock").clone();
+        let agent_cwd = self.agent_cwd.lock().expect("cwd lock").clone();
         let names = self.names.get().map(Vec::as_slice).unwrap_or_default();
         let search_path = std::env::var("PATH").ok();
-        let found = suggestions(
-            line,
-            pos,
-            self.mode.get(),
-            &cwd,
-            search_path.as_deref(),
-            names,
-            self.bash.as_deref(),
-        );
+        let mode = self.mode.get();
+        let found = completions(line, pos, mode, &cwd, &agent_cwd, || {
+            suggestions(
+                line,
+                pos,
+                mode,
+                &cwd,
+                search_path.as_deref(),
+                names,
+                self.bash.as_deref(),
+            )
+        });
         CompletionResult::fresh(found)
     }
 }
 
-/// The completions of the word before `pos`, replacing that word.
+/// What Tab completes at `pos`: a `#` line's command name or `#cd`
+/// directory, an `@path` in text for the agent, or else the word of a shell
+/// line (`shell`).
+fn completions(
+    line: &str,
+    pos: usize,
+    mode: Mode,
+    cwd: &Path,
+    agent_cwd: &Path,
+    shell: impl FnOnce() -> Vec<Suggestion>,
+) -> Vec<Suggestion> {
+    if let Some(found) = control(line, pos, cwd) {
+        return found;
+    }
+    if let Input::Agent(_) = route(line, mode) {
+        return mention(line, pos, agent_cwd);
+    }
+    shell()
+}
+
+/// The completions of the word of a shell line before `pos`, replacing that
+/// word.
 fn suggestions(
     line: &str,
     pos: usize,
@@ -71,9 +99,6 @@ fn suggestions(
     names: &[String],
     bash: Option<&str>,
 ) -> Vec<Suggestion> {
-    if let Some(found) = control(line, pos, cwd) {
-        return found;
-    }
     let Some(start) = command_start(line, mode).filter(|&start| start <= pos) else {
         return Vec::new();
     };
@@ -126,6 +151,21 @@ fn control(line: &str, pos: usize, cwd: &Path) -> Option<Vec<Suggestion>> {
         Some(_) => Vec::new(),
     };
     Some(found)
+}
+
+/// The files and directories an `@path` word at `pos` may name, from the
+/// agent's directory. Other words of the agent's text complete nothing.
+fn mention(line: &str, pos: usize, agent_cwd: &Path) -> Vec<Suggestion> {
+    let start = word_start(&line[..pos]);
+    let Some(path) = line[start..pos].strip_prefix('@') else {
+        return Vec::new();
+    };
+    let mut found = files(&unescape(path), agent_cwd, false);
+    for suggestion in &mut found {
+        suggestion.value.insert(0, '@');
+        suggestion.span = Span::new(start, pos);
+    }
+    found
 }
 
 /// Where the shell command starts: after `!` or `!+`, as `input::route`
@@ -329,7 +369,7 @@ fn escape(name: &str) -> String {
     escaped
 }
 
-fn unescape(word: &str) -> String {
+pub fn unescape(word: &str) -> String {
     let mut plain = String::with_capacity(word.len());
     let mut chars = word.chars();
     while let Some(c) = chars.next() {
@@ -373,7 +413,8 @@ mod tests {
         names: &[&str],
     ) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-        suggestions(line, line.len(), mode, cwd, search_path, &names, None)
+        let shell = || suggestions(line, line.len(), mode, cwd, search_path, &names, None);
+        completions(line, line.len(), mode, cwd, cwd, shell)
             .into_iter()
             .map(|s| {
                 let space = if s.append_whitespace { " " } else { "" };
@@ -483,6 +524,43 @@ mod tests {
         assert_eq!(shell("cat no"), ["cat notes.txt "]);
         assert_eq!(shell("!too"), ["!tool "]);
         assert!(shell("?to").is_empty());
+    }
+
+    #[test]
+    fn at_in_text_for_the_agent_completes_paths_from_its_directory() {
+        let dir = fixture();
+        let agent_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(agent_dir.path().join("src")).unwrap();
+        std::fs::write(agent_dir.path().join("src/app.rs"), "").unwrap();
+        std::fs::write(agent_dir.path().join("My Notes.md"), "").unwrap();
+        let complete = |mode, line: &str| -> Vec<String> {
+            completions(
+                line,
+                line.len(),
+                mode,
+                dir.path(),
+                agent_dir.path(),
+                Vec::new,
+            )
+            .into_iter()
+            .map(|s| {
+                let space = if s.append_whitespace { " " } else { "" };
+                format!("{}{}{space}", &line[..s.span.start], s.value)
+            })
+            .collect()
+        };
+
+        assert_eq!(complete(Mode::Agent, "hi @s"), ["hi @src/"]);
+        assert_eq!(complete(Mode::Agent, "hi @src/a"), ["hi @src/app.rs "]);
+        assert_eq!(complete(Mode::Agent, "read @My"), ["read @My\\ Notes.md "]);
+        assert_eq!(
+            complete(Mode::Shell, "?look at @src/"),
+            ["?look at @src/app.rs "]
+        );
+        // Words without `@`, and `@` on shell lines, are not mentions.
+        assert!(complete(Mode::Agent, "hi s").is_empty());
+        assert!(complete(Mode::Agent, "!cat @s").is_empty());
+        assert!(complete(Mode::Shell, "cat @s").is_empty());
     }
 
     #[test]

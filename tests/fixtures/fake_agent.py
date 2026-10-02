@@ -12,7 +12,8 @@ Prompts:
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
   md     replies markdown, with the markers cut across chunks
-  blocks replies the text of the blocks sent before it, as JSON
+  blocks replies the blocks sent before it, as JSON: their text, or a
+         resource link's "<name> <uri>". Words after "blocks" are ignored.
 
 The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
@@ -152,8 +153,10 @@ def prompt(request):
     elif text == "opts":
         say(session_id, json.dumps(
             {**session["options"], "mode": session["mode"]}, sort_keys=True))
-    elif text == "blocks":
-        say(session_id, json.dumps([block.get("text") for block in params["prompt"][:-1]]))
+    elif text == "blocks" or text.startswith("blocks "):
+        say(session_id, json.dumps([
+            block["text"] if block["type"] == "text" else f"{block['name']} {block['uri']}"
+            for block in params["prompt"][:-1]]))
     elif text == "md":
         for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
             say(session_id, chunk)

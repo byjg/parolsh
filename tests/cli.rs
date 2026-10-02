@@ -672,3 +672,21 @@ fn background_tasks_show_in_the_title_and_the_prompt() {
     let restored = output.rfind("\x1b[23;0t").expect("title not restored");
     assert!(restored > output.rfind("\x1b]2;").unwrap());
 }
+
+/// `@path` words that name a file go with the message as resource links
+/// (absolute `file://` URIs), before the text; other `@words` stay text.
+#[test]
+fn mentioned_files_go_with_the_message_as_links() {
+    let screen = with_fake_agent("", &["blocks @Cargo.toml and @nothing", "#audit"]);
+    let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+
+    assert!(
+        screen.contains(&format!(r#"["Cargo.toml file://{manifest}"]"#)),
+        "{screen}"
+    );
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    assert!(
+        audit.contains("→ fake: blocks @Cargo.toml and @nothing · 1 file linked"),
+        "{audit}"
+    );
+}
