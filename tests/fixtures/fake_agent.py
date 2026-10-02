@@ -12,7 +12,8 @@ Prompts:
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
   md     replies markdown, with the markers cut across chunks
-  blocks replies the text of the blocks sent before it, as JSON
+  blocks replies the blocks sent before it, as JSON: their text, or a
+         resource link's "<name> <uri>". Words after "blocks" are ignored.
 
 The prompt is the text of the last block; earlier blocks are context.
   slow   replies "working" and waits for session/cancel
@@ -25,6 +26,15 @@ The prompt is the text of the last block; earlier blocks are context.
   warn   prints "fake warning" on stderr and replies "warned"
   tools  starts two tool calls, renames the first, completes it, fails the
          second, sends a plan and a usage update, then replies "done"
+  later  replies "started", ends the turn and, half a second later, like
+         a background task waking the agent up: starts a tool call and
+         writes "background done" and an unfinished line "all good"
+  later perm  the same, but asks for permission to edit a file then, and
+         writes "chose:<option id>"
+  bg     like Claude: titles the session "Fake background work", starts a
+         background task (only for clients that ask for them, with JetBrains'
+         AIR extension), replies "started" and ends the turn. The task ends
+         3 seconds later.
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
 With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
@@ -37,12 +47,14 @@ import json
 import os
 import select
 import sys
+import time
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
 kilo = "--kilo" in sys.argv
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
 client_capabilities = {}
 next_request_id = 1000
+later = []  # (when, action): what the agent does after its turn ended
 
 
 def send(message):
@@ -141,8 +153,10 @@ def prompt(request):
     elif text == "opts":
         say(session_id, json.dumps(
             {**session["options"], "mode": session["mode"]}, sort_keys=True))
-    elif text == "blocks":
-        say(session_id, json.dumps([block.get("text") for block in params["prompt"][:-1]]))
+    elif text == "blocks" or text.startswith("blocks "):
+        say(session_id, json.dumps([
+            block["text"] if block["type"] == "text" else f"{block['name']} {block['uri']}"
+            for block in params["prompt"][:-1]]))
     elif text == "md":
         for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
             say(session_id, chunk)
@@ -187,6 +201,33 @@ def prompt(request):
     elif text == "warn":
         print("fake warning", file=sys.stderr, flush=True)
         say(session_id, "warned")
+    elif text in ("later", "later perm"):
+        say(session_id, "started")
+
+        def wake_up():
+            send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "b1", "title": "Read log"}}})
+            if text == "later perm":
+                tool_call = {"toolCallId": "b2", "title": "Writing to notes.txt",
+                             "kind": "edit", "content": []}
+                say(session_id, "chose:" + ask_permission(session_id, tool_call) + "\n")
+            else:
+                say(session_id, "background ")
+                say(session_id, "done\nall good")
+        later.append((time.time() + 0.5, wake_up))
+    elif text == "bg":
+        def update(fields):
+            send({"method": "session/update", "params": {"sessionId": session_id,
+                                                          "update": fields}})
+        update({"sessionUpdate": "session_info_update", "title": "Fake background work"})
+        air = client_capabilities.get("_meta", {}).get("jetbrains", {}).get("air", {})
+        if "asyncTasks" in air.get("capabilities", []):
+            update({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b9",
+                    "name": "sleep 3", "taskType": "local_bash", "canStop": True})
+            later.append((time.time() + 3, lambda: update({
+                "sessionUpdate": "async_task_state_update", "asyncTaskId": "b9",
+                "state": "completed"})))
+        say(session_id, "started")
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "stuck":
@@ -221,6 +262,13 @@ def prompt(request):
 
 def main():
     while True:
+        if later:
+            when, action = later[0]
+            ready, _, _ = select.select([sys.stdin], [], [], max(0, when - time.time()))
+            if not ready:
+                later.pop(0)
+                action()
+                continue
         message = receive()
         method = message.get("method")
         if method == "initialize":

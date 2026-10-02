@@ -1,27 +1,28 @@
 //! ACP client. The agent process and the protocol run on a background thread;
 //! the input loop talks to it through two channels: commands in, events out.
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationMode, InitializeRequest, NewSessionRequest,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
     ToolCallStatus,
 };
+use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest,
-    LineDirection, UntypedMessage, is_incoming_transport_closed,
+    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcNotification,
+    JsonRpcRequest, LineDirection, UntypedMessage, is_incoming_transport_closed,
 };
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::config::{self, OptionValue};
@@ -140,9 +141,56 @@ impl AgentOption {
 struct SessionState {
     modes: Option<SessionModes>,
     options: Vec<AgentOption>,
+    /// The conversation's title, once the agent gave one.
+    title: Option<String>,
+    /// The agent's background tasks still running, by id, with when Parolsh
+    /// heard of each. Only Claude reports them.
+    tasks: BTreeMap<String, Instant>,
+    /// A prompt is in flight.
+    prompting: bool,
 }
 
 type Shared = Arc<Mutex<SessionState>>;
+
+/// What the agent is doing, for the terminal's title and the prompt.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Activity {
+    /// A prompt is in flight.
+    pub busy: bool,
+    /// Background tasks running.
+    pub tasks: usize,
+    /// When the oldest running background task started.
+    pub oldest: Option<Instant>,
+    /// The conversation's title, once the agent gave one.
+    pub title: Option<String>,
+}
+
+/// Reads what an agent is doing, from any thread, for as long as it runs.
+#[derive(Debug, Clone)]
+pub struct ActivityWatch(Shared);
+
+/// The same agent's.
+impl PartialEq for ActivityWatch {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ActivityWatch {}
+
+impl ActivityWatch {
+    pub fn get(&self) -> Activity {
+        let Ok(state) = self.0.lock() else {
+            return Activity::default();
+        };
+        Activity {
+            busy: state.prompting,
+            tasks: state.tasks.len(),
+            oldest: state.tasks.values().min().copied(),
+            title: state.title.clone(),
+        }
+    }
+}
 
 /// The mode and options to set on every new conversation. `#options`
 /// changes them for the rest of the run.
@@ -228,28 +276,147 @@ impl JsonRpcRequest for PermissionRequest {
     type Response = serde_json::Value;
 }
 
+/// `session/update`. Claude's background tasks come as updates of their own
+/// (`async_task_*`), which `SessionUpdate` does not know: they are read here
+/// before the typed parsing, which would fail on them.
+#[derive(Debug, Clone)]
+enum Update {
+    Session(Box<SessionNotification>),
+    Task(TaskUpdate),
+}
+
+/// A background task of the agent started or ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskUpdate {
+    Running(String),
+    Ended(String),
+}
+
+impl TaskUpdate {
+    /// The task update in a `session/update`'s `update`, if it is one.
+    fn from_update(update: &serde_json::Value) -> Option<Self> {
+        let id = update.get("asyncTaskId")?.as_str()?.to_string();
+        match update.get("sessionUpdate")?.as_str()? {
+            "async_task_spawned" => Some(Self::Running(id)),
+            "async_task_state_update" => match update.get("state")?.as_str()? {
+                "running" | "paused" => Some(Self::Running(id)),
+                _ => Some(Self::Ended(id)),
+            },
+            _ => None,
+        }
+    }
+}
+
+impl JsonRpcMessage for Update {
+    fn matches_method(method: &str) -> bool {
+        SessionNotification::matches_method(method)
+    }
+
+    fn method(&self) -> &str {
+        "session/update"
+    }
+
+    fn to_untyped_message(&self) -> Result<UntypedMessage, agent_client_protocol::Error> {
+        match self {
+            Self::Session(notification) => notification.to_untyped_message(),
+            Self::Task(_) => Err(agent_client_protocol::Error::internal_error()),
+        }
+    }
+
+    fn parse_message(
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        let task = serde_json::to_value(params)
+            .ok()
+            .and_then(|params| TaskUpdate::from_update(params.get("update")?));
+        match task {
+            Some(task) => Ok(Self::Task(task)),
+            None => SessionNotification::parse_message(method, params)
+                .map(|notification| Self::Session(Box::new(notification))),
+        }
+    }
+}
+
+impl JsonRpcNotification for Update {}
+
+/// The client capability of JetBrains' AIR extension that makes Claude report
+/// its background tasks.
+fn air_async_tasks() -> serde_json::Map<String, serde_json::Value> {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "jetbrains".to_string(),
+        serde_json::json!({"air": {"version": 1, "capabilities": ["asyncTasks"]}}),
+    );
+    meta
+}
+
+fn track_task(shared: &Shared, task: TaskUpdate) {
+    if let Ok(mut state) = shared.lock() {
+        match task {
+            TaskUpdate::Running(id) => {
+                state.tasks.entry(id).or_insert_with(Instant::now);
+            }
+            TaskUpdate::Ended(id) => {
+                state.tasks.remove(&id);
+            }
+        }
+    }
+}
+
+fn set_prompting(shared: &Shared, prompting: bool) {
+    if let Ok(mut state) = shared.lock() {
+        state.prompting = prompting;
+    }
+}
+
 /// Numbers the prompts, so the end of a turn Parolsh stopped waiting for is
 /// told apart from the end of the next one.
 pub type TurnId = u64;
 
+/// A part of a message to the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    Text(String),
+    /// A file or directory the message mentions (`@path`), sent as a link
+    /// the agent reads itself.
+    File(PathBuf),
+}
+
+impl Block {
+    fn to_acp(&self) -> ContentBlock {
+        match self {
+            Self::Text(text) => ContentBlock::Text(TextContent::new(text.clone())),
+            Self::File(path) => {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                ContentBlock::ResourceLink(ResourceLink::new(name, crate::mention::uri(path)))
+            }
+        }
+    }
+}
+
 enum Command {
-    /// Text blocks of one message: context first, the user's text last.
-    Prompt(TurnId, Vec<String>),
+    /// The blocks of one message: context first, the user's text last.
+    Prompt(TurnId, Vec<Block>),
     Cancel,
     NewSession(PathBuf),
     SetOption(String, OptionValue),
 }
 
-/// A running agent. Dropping it stops the agent process.
+/// A running agent. Dropping it stops the agent process. It can be shared
+/// with a thread that shows what the agent does between turns.
 pub struct AgentHandle {
     commands: Option<tokio_mpsc::UnboundedSender<Command>>,
-    pub events: mpsc::Receiver<Event>,
+    events: Mutex<mpsc::Receiver<Event>>,
     shared: Shared,
     thread: Option<JoinHandle<()>>,
-    last_turn: Cell<TurnId>,
+    last_turn: AtomicU64,
     /// The last turn Parolsh stopped waiting for, while the agent has not
-    /// ended it yet.
-    abandoned: Cell<Option<TurnId>>,
+    /// ended it yet; 0 for none (turns start at 1).
+    abandoned: AtomicU64,
 }
 
 impl AgentHandle {
@@ -316,11 +483,11 @@ impl AgentHandle {
 
         Self {
             commands: Some(commands_tx),
-            events: events_rx,
+            events: Mutex::new(events_rx),
             shared,
             thread: Some(thread),
-            last_turn: Cell::new(0),
-            abandoned: Cell::new(None),
+            last_turn: AtomicU64::new(0),
+            abandoned: AtomicU64::new(0),
         }
     }
 
@@ -342,6 +509,11 @@ impl AgentHandle {
             .unwrap_or_default()
     }
 
+    /// What the agent is doing, readable from another thread.
+    pub fn activity(&self) -> ActivityWatch {
+        ActivityWatch(self.shared.clone())
+    }
+
     /// Sets a config option now, and on every new conversation of this run.
     pub fn set_option(&self, id: String, value: OptionValue) -> bool {
         self.send(Command::SetOption(id, value))
@@ -350,39 +522,51 @@ impl AgentHandle {
     /// Sends a prompt. `None` when the agent is no longer running.
     #[cfg(test)]
     pub fn prompt(&self, text: String) -> Option<TurnId> {
-        self.prompt_blocks(vec![text])
+        self.prompt_blocks(vec![Block::Text(text)])
     }
 
-    /// Sends one message made of several text blocks. It waits for the
-    /// previous turn, if the agent has not ended it yet.
-    pub fn prompt_blocks(&self, blocks: Vec<String>) -> Option<TurnId> {
-        let turn = self.last_turn.get() + 1;
-        self.last_turn.set(turn);
+    /// Sends one message made of several blocks. It waits for the previous
+    /// turn, if the agent has not ended it yet.
+    pub fn prompt_blocks(&self, blocks: Vec<Block>) -> Option<TurnId> {
+        let turn = self.last_turn.fetch_add(1, Ordering::SeqCst) + 1;
         self.send(Command::Prompt(turn, blocks)).then_some(turn)
     }
 
     /// Stops waiting for `turn`: the agent did not confirm its cancel. Its
     /// events are dropped until it ends.
     pub fn abandon(&self, turn: TurnId) {
-        self.abandoned.set(Some(turn));
+        self.abandoned.store(turn, Ordering::SeqCst);
     }
 
     /// The abandoned turn the agent has not ended yet.
     pub fn abandoned(&self) -> Option<TurnId> {
-        self.abandoned.get()
+        Some(self.abandoned.load(Ordering::SeqCst)).filter(|&turn| turn != 0)
     }
 
     /// Called with each turn end: false when it belongs to an abandoned turn.
     pub fn ended(&self, turn: TurnId) -> bool {
-        match self.abandoned.get() {
+        match self.abandoned() {
             Some(abandoned) if turn <= abandoned => {
                 if turn == abandoned {
-                    self.abandoned.set(None);
+                    self.abandoned.store(0, Ordering::SeqCst);
                 }
                 false
             }
             _ => true,
         }
+    }
+
+    /// The next event, waiting up to `timeout` for it.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, mpsc::RecvTimeoutError> {
+        match self.events.lock() {
+            Ok(events) => events.recv_timeout(timeout),
+            Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+        }
+    }
+
+    /// The next event, if one is waiting.
+    pub fn try_recv(&self) -> Option<Event> {
+        self.events.lock().ok()?.try_recv().ok()
     }
 
     /// Cancels the running prompt, if any.
@@ -500,8 +684,13 @@ async fn serve(
     Client
         .builder()
         .on_receive_notification(
-            async move |notification: SessionNotification, _cx| {
-                forward(&update_events, &updated_state, notification.update);
+            async move |notification: Update, _cx| {
+                match notification {
+                    Update::Session(notification) => {
+                        forward(&update_events, &updated_state, notification.update)
+                    }
+                    Update::Task(task) => track_task(&updated_state, task),
+                }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -538,10 +727,14 @@ async fn serve(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
-            // Forms let agents ask the user questions (elicitation).
-            let capabilities = ClientCapabilities::new().elicitation(
-                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
-            );
+            // Forms let agents ask the user questions (elicitation). Claude
+            // reports its background tasks to clients of JetBrains' AIR
+            // extension that ask for them.
+            let capabilities = ClientCapabilities::new()
+                .elicitation(
+                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                )
+                .meta(air_async_tasks());
             cx.send_request(
                 InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
             )
@@ -561,9 +754,11 @@ async fn serve(
                 };
                 match command {
                     Command::Prompt(turn, blocks) => {
+                        set_prompting(&shared, true);
                         let result =
                             prompt(&cx, &session, blocks, &mut commands, &mut pending, &events)
                                 .await;
+                        set_prompting(&shared, false);
                         let event = match result {
                             Ok(stop_reason) => Event::TurnEnd(turn, stop_reason),
                             // The agent's output closed: it stopped, the
@@ -646,15 +841,12 @@ async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
 async fn prompt(
     cx: &ConnectionTo<Agent>,
     session: &SessionId,
-    blocks: Vec<String>,
+    blocks: Vec<Block>,
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending: &mut VecDeque<Command>,
     events: &mpsc::Sender<Event>,
 ) -> Result<StopReason, agent_client_protocol::Error> {
-    let blocks = blocks
-        .into_iter()
-        .map(|text| ContentBlock::Text(TextContent::new(text)))
-        .collect();
+    let blocks = blocks.iter().map(Block::to_acp).collect();
     let turn = cx
         .send_request(PromptRequest::new(session.clone(), blocks))
         .block_task();
@@ -738,7 +930,11 @@ async fn open_session(
     }
 
     if let Ok(mut state) = shared.lock() {
-        *state = SessionState { modes, options };
+        *state = SessionState {
+            modes,
+            options,
+            ..Default::default()
+        };
     }
 
     if let Some(mode) = &wanted.mode
@@ -824,6 +1020,16 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
             }
             return;
         }
+        SessionUpdate::SessionInfoUpdate(update) => {
+            if let Ok(mut state) = shared.lock() {
+                match update.title {
+                    MaybeUndefined::Value(title) => state.title = Some(title),
+                    MaybeUndefined::Null => state.title = None,
+                    MaybeUndefined::Undefined => {}
+                }
+            }
+            return;
+        }
         SessionUpdate::AgentMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
             ..
@@ -878,7 +1084,6 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     const FAKE_AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_agent.py");
 
@@ -900,7 +1105,6 @@ mod tests {
 
     fn next(agent: &AgentHandle) -> Event {
         agent
-            .events
             .recv_timeout(Duration::from_secs(10))
             .expect("no event from the agent")
     }
@@ -1114,15 +1318,18 @@ mod tests {
         assert!(
             agent
                 .prompt_blocks(vec![
-                    "output one".to_string(),
-                    "output two".to_string(),
-                    "blocks".to_string(),
+                    Block::Text("output one".to_string()),
+                    Block::File(PathBuf::from("/tmp/My notes.md")),
+                    Block::Text("blocks".to_string()),
                 ])
                 .is_some()
         );
 
         match next(&agent) {
-            Event::Text(text) => assert_eq!(text, r#"["output one", "output two"]"#),
+            Event::Text(text) => assert_eq!(
+                text,
+                r#"["output one", "My notes.md file:///tmp/My%20notes.md"]"#
+            ),
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -1268,6 +1475,48 @@ mod tests {
                 r#"Text("done")"#,
             ]
         );
+    }
+
+    #[test]
+    fn claude_background_tasks_are_read_from_their_own_updates() {
+        let update = |json| TaskUpdate::from_update(&serde_json::json!(json));
+
+        assert_eq!(
+            update(serde_json::json!({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b1"})),
+            Some(TaskUpdate::Running("b1".to_string()))
+        );
+        for (state, expected) in [
+            ("running", TaskUpdate::Running("b1".to_string())),
+            ("paused", TaskUpdate::Running("b1".to_string())),
+            ("completed", TaskUpdate::Ended("b1".to_string())),
+            ("failed", TaskUpdate::Ended("b1".to_string())),
+            ("stopped", TaskUpdate::Ended("b1".to_string())),
+        ] {
+            let json = serde_json::json!({
+                "sessionUpdate": "async_task_state_update", "asyncTaskId": "b1", "state": state});
+            assert_eq!(update(json), Some(expected), "{state}");
+        }
+        let progress =
+            serde_json::json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1"});
+        assert_eq!(update(progress), None);
+        let text = serde_json::json!({"sessionUpdate": "agent_message_chunk"});
+        assert_eq!(update(text), None);
+    }
+
+    #[test]
+    fn running_tasks_are_counted_from_the_oldest() {
+        let shared = Shared::default();
+        let watch = ActivityWatch(shared.clone());
+
+        track_task(&shared, TaskUpdate::Running("a".to_string()));
+        let started = watch.get().oldest;
+        track_task(&shared, TaskUpdate::Running("b".to_string()));
+        track_task(&shared, TaskUpdate::Running("a".to_string()));
+        assert_eq!((watch.get().tasks, watch.get().oldest), (2, started));
+
+        track_task(&shared, TaskUpdate::Ended("a".to_string()));
+        track_task(&shared, TaskUpdate::Ended("b".to_string()));
+        assert_eq!(watch.get(), Activity::default());
     }
 
     #[test]

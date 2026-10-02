@@ -487,6 +487,9 @@ reasons before answering ("thinking"), the line shows the latest bit of its
 reasoning, for example `⠸ Thinking: Let me calculate · 3s`; the reasoning
 itself is not printed.
 
+When the agent runs background tasks, the line counts them: `· 2 bg` (see
+[Between turns](#between-turns)).
+
 After 15 seconds without anything from the agent, the line says for how long
 it has been quiet, and after a minute how to cancel:
 
@@ -560,3 +563,64 @@ it still sends for that turn is dropped. Your next message waits until that
 turn ends (the status line shows `Waiting for the previous turn to stop…`),
 and `Ctrl+C` there drops it. `#new` starts the agent again instead of
 waiting.
+
+## Between turns
+
+An agent can keep working after its turn ended. Claude, for example, runs long
+commands as background tasks, ends the turn ("I'll be notified when it
+finishes") and, when the task ends, wakes up on its own to check the result.
+Parolsh prints what the agent writes then above the prompt, after a header,
+while you type:
+
+```text
+[claude] ~/projects/wallet ✦
+(the agent, between turns)
+• Check batch log
+The batch finished: 34 repositories created, none failed.
+[claude] ~/projects/wallet ✦ █
+```
+
+- Its text is printed line by line; a line it leaves unfinished is printed
+  after it pauses briefly. Tool calls are `• <title>` lines, and go to
+  [`#audit`](input-routing.md#audit) like the ones in a turn. Its reasoning and
+  plan are not shown: the status line only exists during a turn.
+- When it asks for permission or asks you questions, the prompt makes way for
+  the question. What you were typing comes back after you answer.
+- If it stops, Parolsh says so and `#new` starts it again.
+
+Background tasks belong to the agent's process: switching agents (`#agent`)
+and leaving Parolsh stop the agent, and the tasks it started with it.
+
+### Background tasks and the terminal title
+
+Claude tells Parolsh which background tasks it runs. While some run, the
+prompt shows how many on the right, with the time of the oldest, and the
+status line of a turn counts them too:
+
+```text
+[claude] ~/projects/wallet ✦                                ⧗ 1 bg · 0:42
+⠹ Thinking · 4s · 1 bg
+```
+
+On an ANSI terminal, Parolsh also sets the terminal's title, so you can follow
+the agent from another tab or window:
+
+```text
+parolsh · ~/…/projects/wallet              before the agent names the conversation
+parolsh · Fix the batch script             the conversation's title, from the agent
+⠹ parolsh · Fix the batch script           a turn is running
+⠹ 2 bg · parolsh · Fix the batch script    background tasks are running
+```
+
+- The conversation's title is the agent's own (Claude and Codex send one;
+  Claude after its first answer), cut to 40 characters. Until then, and after `#new`, the
+  title shows the agent's directory.
+- The title is left alone while a `!command` runs, since programs such as
+  `vim` or `ssh` set their own.
+- Parolsh saves the title it found on start and puts it back on exit, on
+  terminals with a title stack (xterm, GNOME Terminal and other VTE terminals,
+  kitty, WezTerm, tmux). Elsewhere the last title stays after Parolsh ends.
+
+Only Claude reports background tasks, through the ACP extension of JetBrains'
+AIR (`asyncTasks`), which Parolsh asks for. Other agents show no count; their
+turns still spin in the title.

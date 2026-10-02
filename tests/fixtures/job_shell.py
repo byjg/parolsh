@@ -18,6 +18,8 @@ only if the program turned bracketed paste on. No Enter is added.
 
 A LINE starting with "key:" sends its bytes as typed, with "\\xNN" escapes
 (key:\\x03 is Ctrl+C), without an Enter. "wait:SECONDS" only waits.
+
+With JOB_SHELL_RAW=1 in the environment, the escape sequences are kept.
 """
 import os
 import pty
@@ -81,4 +83,7 @@ for line in args:
 os.kill(pid, 9)
 
 text = output.decode(errors="replace").replace("\r", "")
+if os.environ.get("JOB_SHELL_RAW"):
+    print(text)
+    sys.exit(0)
 print(re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[=>78]", "", text))

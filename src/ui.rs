@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::acp::Detail;
+use crate::acp::{Activity, ActivityWatch, Detail};
 use crate::input::Mode;
 
 const LOGO: [&str; 3] = [
@@ -46,6 +46,9 @@ pub struct Prompt {
     left: String,
     right: String,
     indicator: String,
+    /// The agent whose running background tasks are shown on the right, and
+    /// whether to dim them.
+    background: Option<(ActivityWatch, bool)>,
 }
 
 /// What a prompt program may show: the last command's result and the agent.
@@ -87,6 +90,7 @@ impl Prompt {
             left,
             right: String::new(),
             indicator: format!(" {}", indicator(context, ansi)),
+            background: None,
         }
     }
 
@@ -96,6 +100,7 @@ impl Prompt {
             left: String::new(),
             right: String::new(),
             indicator: indicator(context, ansi),
+            background: None,
         }
     }
 
@@ -148,7 +153,17 @@ impl Prompt {
             left: run(false)?,
             right: run(true)?.trim_end().to_string(),
             indicator: String::new(),
+            background: None,
         })
+    }
+}
+
+impl Prompt {
+    /// Shows `agent`'s running background tasks on the right, before what
+    /// is there: `⧗ 2 bg · 0:42`, with the time of the oldest.
+    pub fn with_background(mut self, agent: ActivityWatch, ansi: bool) -> Self {
+        self.background = Some((agent, ansi));
+        self
     }
 }
 
@@ -157,8 +172,24 @@ impl reedline::Prompt for Prompt {
         Cow::Borrowed(&self.left)
     }
 
+    /// Read on each repaint: the background tasks' time keeps running.
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.right)
+        let Some((agent, ansi)) = &self.background else {
+            return Cow::Borrowed(&self.right);
+        };
+        let Some(tasks) = background(&agent.get()) else {
+            return Cow::Borrowed(&self.right);
+        };
+        let tasks = if *ansi {
+            format!("{DIM}{tasks}{RESET}")
+        } else {
+            tasks
+        };
+        if self.right.is_empty() {
+            Cow::Owned(tasks)
+        } else {
+            Cow::Owned(format!("{tasks} {}", self.right))
+        }
     }
 
     fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> Cow<'_, str> {
@@ -175,6 +206,35 @@ impl reedline::Prompt for Prompt {
     ) -> Cow<'_, str> {
         Cow::Owned(format!(" (search: {}) ❯ ", search.term))
     }
+}
+
+/// The running background tasks and how long the oldest has run, as in
+/// `⧗ 2 bg · 0:42`; `None` without any.
+pub fn background(activity: &Activity) -> Option<String> {
+    if activity.tasks == 0 {
+        return None;
+    }
+    let mut text = format!("⧗ {} bg", activity.tasks);
+    if let Some(oldest) = activity.oldest {
+        text.push_str(&format!(" · {}", clock(oldest.elapsed())));
+    }
+    Some(text)
+}
+
+/// `0:42`, `12:03`, `1:02:03`.
+fn clock(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// The spinner's character at `frame`.
+pub fn spinner(frame: usize) -> char {
+    SPINNER[frame % SPINNER.len()]
 }
 
 /// The agent shown in the banner: its name and configured mode.
@@ -228,11 +288,15 @@ pub fn status(
     frame: usize,
     activity: &str,
     elapsed: Duration,
+    background: usize,
     quiet: Duration,
     width: usize,
 ) -> String {
-    let spinner = SPINNER[frame % SPINNER.len()];
+    let spinner = spinner(frame);
     let mut parts = vec![format!(" · {}s", elapsed.as_secs())];
+    if background > 0 {
+        parts.push(format!(" · {background} bg"));
+    }
     if quiet >= QUIET {
         parts.push(format!(" · quiet {}s", quiet.as_secs()));
     }
@@ -395,7 +459,7 @@ fn indicator(context: &PromptContext, ansi: bool) -> String {
 
 /// `path` with `~` for the home directory, and only its last two
 /// directories: `~/…/byjg/parolsh`.
-fn short_path(path: &Path, home: Option<&Path>) -> String {
+pub fn short_path(path: &Path, home: Option<&Path>) -> String {
     let full = tilde(path, home);
     let (anchor, rest) = match full.strip_prefix("~/") {
         Some(rest) => ("~/", rest),
@@ -482,7 +546,7 @@ mod tests {
 
     #[test]
     fn status_shows_spinner_activity_and_seconds() {
-        let text = status(2, "Running: Terminal", Duration::from_secs(12), ZERO, 80);
+        let text = status(2, "Running: Terminal", Duration::from_secs(12), 0, ZERO, 80);
 
         assert_eq!(plain(&text), "⠹ Running: Terminal · 12s");
     }
@@ -490,9 +554,32 @@ mod tests {
     const ZERO: Duration = Duration::ZERO;
 
     #[test]
+    fn status_counts_the_background_tasks() {
+        let text = status(0, "Thinking", Duration::from_secs(4), 2, ZERO, 80);
+
+        assert_eq!(plain(&text), "⠋ Thinking · 4s · 2 bg");
+    }
+
+    #[test]
+    fn background_tasks_show_with_the_time_of_the_oldest() {
+        let now = std::time::Instant::now();
+        let running = |tasks, secs| Activity {
+            tasks,
+            oldest: now.checked_sub(Duration::from_secs(secs)),
+            ..Default::default()
+        };
+
+        assert_eq!(background(&running(0, 0)), None);
+        let one = background(&running(1, 42)).unwrap();
+        assert!(one.starts_with("⧗ 1 bg · 0:4"), "{one}");
+        assert_eq!(clock(Duration::from_secs(723)), "12:03");
+        assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
+    }
+
+    #[test]
     fn status_says_how_long_the_agent_has_been_quiet() {
         let secs = Duration::from_secs;
-        let line = |quiet| plain(&status(0, "Thinking", secs(376), quiet, 80));
+        let line = |quiet| plain(&status(0, "Thinking", secs(376), 0, quiet, 80));
 
         assert_eq!(line(secs(14)), "⠋ Thinking · 376s");
         assert_eq!(line(secs(15)), "⠋ Thinking · 376s · quiet 15s");
@@ -509,6 +596,7 @@ mod tests {
                 0,
                 "Thinking",
                 Duration::from_secs(376),
+                0,
                 Duration::from_secs(340),
                 width,
             ))
@@ -523,7 +611,7 @@ mod tests {
     fn status_never_wraps_and_keeps_one_line() {
         let long = "Terminal: find / -name '*.rs'\nsecond line";
 
-        let text = plain(&status(0, long, Duration::from_secs(3), ZERO, 24));
+        let text = plain(&status(0, long, Duration::from_secs(3), 0, ZERO, 24));
 
         assert_eq!(text, "⠋ Terminal: find … · 3s");
         assert!(text.chars().count() < 24);

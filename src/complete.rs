@@ -2,7 +2,9 @@
 //! lines: command names from `PATH`
 //! and from bash (aliases, functions, builtins); then each command's own
 //! arguments (git branches, ssh hosts) from bash-completion, or file names.
-//! Text for the agent has nothing to complete.
+//! `#` lines complete the command's name, and `#cd` a directory. In text
+//! for the agent, `@` completes a file or directory from the agent's
+//! directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -10,7 +12,7 @@ use std::time::Duration;
 
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
-use crate::input::{Mode, SharedMode};
+use crate::input::{Input, Mode, SharedMode, route};
 use crate::shellenv::{self, is_executable};
 
 /// Asks bash-completion for the arguments of a command line, see the script.
@@ -26,9 +28,16 @@ const SEPARATORS: &str = "|;&()<>";
 /// Characters a file name needs escaped to stay one word for the shell.
 const SPECIAL: &str = " '\"\\()&;|<>$`!*?[]{}#";
 
+/// The `#` commands, as `#help` lists them.
+pub const CONTROL_COMMANDS: [&str; 10] = [
+    "help", "new", "cd", "agent", "config", "options", "project", "prompt", "audit", "exit",
+];
+
 pub struct ShellCompleter {
-    /// Parolsh's current directory, which `#cd` changes.
+    /// Where shell commands run.
     pub cwd: Arc<Mutex<PathBuf>>,
+    /// The agent's directory, for `@path` in text for the agent.
+    pub agent_cwd: Arc<Mutex<PathBuf>>,
     /// Bash's aliases, functions and builtins, read in the background when
     /// Parolsh starts; not set until then.
     pub names: Arc<OnceLock<Vec<String>>>,
@@ -40,22 +49,47 @@ pub struct ShellCompleter {
 impl Completer for ShellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let cwd = self.cwd.lock().expect("cwd lock").clone();
+        let agent_cwd = self.agent_cwd.lock().expect("cwd lock").clone();
         let names = self.names.get().map(Vec::as_slice).unwrap_or_default();
         let search_path = std::env::var("PATH").ok();
-        let found = suggestions(
-            line,
-            pos,
-            self.mode.get(),
-            &cwd,
-            search_path.as_deref(),
-            names,
-            self.bash.as_deref(),
-        );
+        let mode = self.mode.get();
+        let found = completions(line, pos, mode, &cwd, &agent_cwd, || {
+            suggestions(
+                line,
+                pos,
+                mode,
+                &cwd,
+                search_path.as_deref(),
+                names,
+                self.bash.as_deref(),
+            )
+        });
         CompletionResult::fresh(found)
     }
 }
 
-/// The completions of the word before `pos`, replacing that word.
+/// What Tab completes at `pos`: a `#` line's command name or `#cd`
+/// directory, an `@path` in text for the agent, or else the word of a shell
+/// line (`shell`).
+fn completions(
+    line: &str,
+    pos: usize,
+    mode: Mode,
+    cwd: &Path,
+    agent_cwd: &Path,
+    shell: impl FnOnce() -> Vec<Suggestion>,
+) -> Vec<Suggestion> {
+    if let Some(found) = control(line, pos, cwd) {
+        return found;
+    }
+    if let Input::Agent(_) = route(line, mode) {
+        return mention(line, pos, agent_cwd);
+    }
+    shell()
+}
+
+/// The completions of the word of a shell line before `pos`, replacing that
+/// word.
 fn suggestions(
     line: &str,
     pos: usize,
@@ -87,6 +121,49 @@ fn suggestions(
     };
     for suggestion in &mut found {
         suggestion.span = Span::new(word_start, pos);
+    }
+    found
+}
+
+/// The completions of a `#` line: the command's name, then `#cd`'s
+/// directory. `None` for other lines.
+fn control(line: &str, pos: usize, cwd: &Path) -> Option<Vec<Suggestion>> {
+    let start = line.len() - line.trim_start().len();
+    let typed = line.get(start..pos)?.strip_prefix('#')?;
+    let found = match typed.split_once(char::is_whitespace) {
+        None => CONTROL_COMMANDS
+            .iter()
+            .filter(|name| name.starts_with(typed))
+            .map(|name| Suggestion {
+                span: Span::new(start, pos),
+                ..suggestion(format!("#{name}"), true)
+            })
+            .collect(),
+        // `#cd` takes the rest of the line as the path, unescaped.
+        Some(("cd", path)) => {
+            let path = path.trim_start();
+            let mut found = directories(path, cwd);
+            for suggestion in &mut found {
+                suggestion.span = Span::new(pos - path.len(), pos);
+            }
+            found
+        }
+        Some(_) => Vec::new(),
+    };
+    Some(found)
+}
+
+/// The files and directories an `@path` word at `pos` may name, from the
+/// agent's directory. Other words of the agent's text complete nothing.
+fn mention(line: &str, pos: usize, agent_cwd: &Path) -> Vec<Suggestion> {
+    let start = word_start(&line[..pos]);
+    let Some(path) = line[start..pos].strip_prefix('@') else {
+        return Vec::new();
+    };
+    let mut found = files(&unescape(path), agent_cwd, false);
+    for suggestion in &mut found {
+        suggestion.value.insert(0, '@');
+        suggestion.span = Span::new(start, pos);
     }
     found
 }
@@ -212,35 +289,54 @@ fn commands(word: &str, search_path: Option<&str>, names: &[String]) -> Vec<Sugg
 /// when the name being typed starts with `.`. In command position, only
 /// directories and programs.
 fn files(word: &str, cwd: &Path, programs_only: bool) -> Vec<Suggestion> {
+    let (dir, entries) = entries(word, cwd);
+    entries
+        .into_iter()
+        .filter(|(_, path)| !programs_only || path.is_dir() || is_executable(path))
+        .map(|(name, path)| {
+            let value = format!("{}{}", escape(dir), escape(&name));
+            if path.is_dir() {
+                suggestion(value + "/", false)
+            } else {
+                suggestion(value, true)
+            }
+        })
+        .collect()
+}
+
+/// The directories a typed path may go on to, unescaped (`#cd` reads the
+/// path as typed).
+fn directories(path: &str, cwd: &Path) -> Vec<Suggestion> {
+    let (dir, entries) = entries(path, cwd);
+    entries
+        .into_iter()
+        .filter(|(_, path)| path.is_dir())
+        .map(|(name, _)| suggestion(format!("{dir}{name}/"), false))
+        .collect()
+}
+
+/// The entries, sorted by name, of the directory a typed path names whose
+/// names start like its last part, with that directory part as typed:
+/// `src/m` gives `src/` and `main.rs`. Hidden entries only when the part
+/// starts with a dot.
+fn entries<'a>(word: &'a str, cwd: &Path) -> (&'a str, Vec<(String, PathBuf)>) {
     let (dir, prefix) = match word.rfind('/') {
         Some(slash) => word.split_at(slash + 1),
         None => ("", word),
     };
     let Ok(entries) = std::fs::read_dir(directory(dir, cwd)) else {
-        return Vec::new();
+        return (dir, Vec::new());
     };
-    let mut found: Vec<Suggestion> = entries
+    let mut found: Vec<(String, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
-                return None;
-            }
-            let path = entry.path();
-            let is_dir = path.is_dir();
-            if programs_only && !is_dir && !is_executable(&path) {
-                return None;
-            }
-            let value = format!("{}{}", escape(dir), escape(&name));
-            Some(if is_dir {
-                suggestion(value + "/", false)
-            } else {
-                suggestion(value, true)
-            })
+            let hidden = name.starts_with('.') && !prefix.starts_with('.');
+            (name.starts_with(prefix) && !hidden).then(|| (name, entry.path()))
         })
         .collect();
-    found.sort_by(|a, b| a.value.cmp(&b.value));
-    found
+    found.sort();
+    (dir, found)
 }
 
 /// The directory a typed `dir` part names: `~/` is the home directory,
@@ -273,7 +369,7 @@ fn escape(name: &str) -> String {
     escaped
 }
 
-fn unescape(word: &str) -> String {
+pub fn unescape(word: &str) -> String {
     let mut plain = String::with_capacity(word.len());
     let mut chars = word.chars();
     while let Some(c) = chars.next() {
@@ -317,7 +413,8 @@ mod tests {
         names: &[&str],
     ) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-        suggestions(line, line.len(), mode, cwd, search_path, &names, None)
+        let shell = || suggestions(line, line.len(), mode, cwd, search_path, &names, None);
+        completions(line, line.len(), mode, cwd, cwd, shell)
             .into_iter()
             .map(|s| {
                 let space = if s.append_whitespace { " " } else { "" };
@@ -409,7 +506,7 @@ mod tests {
         let dir = fixture();
         let path = dir.path().to_str();
 
-        for line in ["to", "#to", "/to", "why is ! here to"] {
+        for line in ["to", "/to", "why is ! here to"] {
             assert!(
                 complete(line, dir.path(), path, &["tool"]).is_empty(),
                 "{line}"
@@ -426,8 +523,85 @@ mod tests {
         assert_eq!(shell("too"), ["tool "]);
         assert_eq!(shell("cat no"), ["cat notes.txt "]);
         assert_eq!(shell("!too"), ["!tool "]);
-        assert!(shell("#to").is_empty());
         assert!(shell("?to").is_empty());
+    }
+
+    #[test]
+    fn at_in_text_for_the_agent_completes_paths_from_its_directory() {
+        let dir = fixture();
+        let agent_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(agent_dir.path().join("src")).unwrap();
+        std::fs::write(agent_dir.path().join("src/app.rs"), "").unwrap();
+        std::fs::write(agent_dir.path().join("My Notes.md"), "").unwrap();
+        let complete = |mode, line: &str| -> Vec<String> {
+            completions(
+                line,
+                line.len(),
+                mode,
+                dir.path(),
+                agent_dir.path(),
+                Vec::new,
+            )
+            .into_iter()
+            .map(|s| {
+                let space = if s.append_whitespace { " " } else { "" };
+                format!("{}{}{space}", &line[..s.span.start], s.value)
+            })
+            .collect()
+        };
+
+        assert_eq!(complete(Mode::Agent, "hi @s"), ["hi @src/"]);
+        assert_eq!(complete(Mode::Agent, "hi @src/a"), ["hi @src/app.rs "]);
+        assert_eq!(complete(Mode::Agent, "read @My"), ["read @My\\ Notes.md "]);
+        assert_eq!(
+            complete(Mode::Shell, "?look at @src/"),
+            ["?look at @src/app.rs "]
+        );
+        // Words without `@`, and `@` on shell lines, are not mentions.
+        assert!(complete(Mode::Agent, "hi s").is_empty());
+        assert!(complete(Mode::Agent, "!cat @s").is_empty());
+        assert!(complete(Mode::Shell, "cat @s").is_empty());
+    }
+
+    #[test]
+    fn hash_lines_complete_the_command_name() {
+        let dir = fixture();
+        let path = dir.path().to_str();
+
+        assert_eq!(
+            complete("#a", dir.path(), path, &[]),
+            ["#agent ", "#audit "]
+        );
+        assert_eq!(complete("  #cd", dir.path(), path, &[]), ["  #cd "]);
+        assert_eq!(complete("#", dir.path(), path, &[]).len(), 10);
+        assert!(complete("#to", dir.path(), path, &["tool"]).is_empty());
+        // Only `#cd` has arguments to complete.
+        assert!(complete("#agent t", dir.path(), path, &["tool"]).is_empty());
+        let shell = complete_in(Mode::Shell, "#pr", dir.path(), path, &[]);
+        assert_eq!(shell, ["#project ", "#prompt "]);
+    }
+
+    #[test]
+    fn hash_cd_completes_directories_as_typed() {
+        let dir = fixture();
+        std::fs::create_dir(dir.path().join("My Projects")).unwrap();
+        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+        std::fs::create_dir(dir.path().join("src/app")).unwrap();
+
+        assert_eq!(
+            complete("#cd ", dir.path(), None, &[]),
+            ["#cd My Projects/", "#cd src/"]
+        );
+        assert_eq!(
+            complete("#cd  My", dir.path(), None, &[]),
+            ["#cd  My Projects/"]
+        );
+        assert_eq!(
+            complete("#cd src/", dir.path(), None, &[]),
+            ["#cd src/app/"]
+        );
+        assert_eq!(complete("#cd .h", dir.path(), None, &[]), ["#cd .hidden/"]);
+        assert!(complete("#cd notes", dir.path(), None, &[]).is_empty());
     }
 
     #[test]
