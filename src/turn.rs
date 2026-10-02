@@ -151,7 +151,7 @@ pub fn run(
                 out.tool_update(&id, title, finished);
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
-            Event::Activity => {}
+            Event::Activity | Event::Resumed(_) => {}
             request @ (Event::Permission { .. } | Event::Form { .. }) => {
                 said.flush(audit);
                 out.hide();
@@ -317,6 +317,36 @@ impl Said {
     }
 }
 
+/// How a resume (`AgentHandle::resume`) ended.
+pub enum Resumed {
+    Yes,
+    /// The conversation stays the one it was: why.
+    No(String),
+    AgentStopped(String),
+}
+
+/// Waits for a resume to end, printing the agent's notices meanwhile.
+pub fn wait_resumed(agent: &AgentHandle) -> Resumed {
+    loop {
+        match agent.recv_timeout(Duration::from_secs(120)) {
+            Ok(Event::Resumed(Ok(()))) => return Resumed::Yes,
+            Ok(Event::Resumed(Err(why))) => return Resumed::No(why),
+            Ok(Event::Notice(message)) => eprintln!("parolsh: {message}"),
+            Ok(Event::Error(message)) => return Resumed::AgentStopped(message),
+            Ok(Event::TurnEnd(id, _) | Event::TurnFailed(id, _)) => {
+                agent.ended(id);
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                return Resumed::No("the agent did not answer in 2 minutes".to_string());
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Resumed::AgentStopped("the agent stopped".to_string());
+            }
+        }
+    }
+}
+
 /// Prints notices and errors that arrived while no turn was running, such as
 /// an agent that failed to start. False when the agent stopped.
 pub fn drain(agent: &AgentHandle) -> bool {
@@ -455,7 +485,7 @@ pub fn watch(
             }
             // The status line is the prompt's now: reasoning and plans are
             // not shown between turns.
-            Event::Thought(_) | Event::Plan { .. } | Event::Activity => {}
+            Event::Thought(_) | Event::Plan { .. } | Event::Activity | Event::Resumed(_) => {}
         }
     }
     said.flush(audit);

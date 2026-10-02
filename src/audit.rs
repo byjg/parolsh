@@ -305,7 +305,13 @@ impl Audit {
             self.trim();
             self.dropped + self.entries.len().saturating_sub(1)
         });
-        let saved = record.kind != Kind::Command || self.save_commands;
+        // A `#command` alone does not make a session: it is only kept in
+        // one that has started.
+        let saved = match record.kind {
+            Kind::Command => self.save_commands,
+            Kind::Control => self.history.as_ref().is_some_and(|h| h.current().is_some()),
+            _ => true,
+        };
         let row = if saved {
             self.write(|history| {
                 history.add(
@@ -692,6 +698,21 @@ mod tests {
 
         assert!(audit.lines(80)[0].ends_with("AGENT    read: Read a.rs · completed"));
         assert_eq!(saved(&audit), ["AGENT    read: Read a.rs · completed"]);
+    }
+
+    #[test]
+    fn a_hash_command_alone_does_not_make_a_session() {
+        let (_dir, mut audit) = with_history(false);
+        let control = Record::new(Actor::User, Kind::Control, "sessions ");
+        audit.add(control.clone());
+        assert!(audit.history().unwrap().current().is_none());
+
+        audit.add(Record::new(Actor::User, Kind::Message, "hi").meta(json!({"agent": "claude"})));
+        audit.add(control);
+        assert_eq!(
+            saved(&audit),
+            ["USER     → claude: hi", "USER     #sessions"]
+        );
     }
 
     #[test]

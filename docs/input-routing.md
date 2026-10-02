@@ -249,6 +249,7 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#audit <n>` | What happened in session `n` of this project, from the [history](#the-history-of-sessions) |
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
+| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works) |
 
 ## `#audit`
@@ -322,3 +323,22 @@ project.
 
 `history_days` and `save_commands` can only be set in the global
 [configuration](configuration.md#keys).
+
+### Resuming a session
+
+`#resume <n>` goes back to session `n`: Parolsh moves to its directory and
+agent if needed, and asks the agent to reopen that conversation (ACP
+`session/resume`, or `session/load` when that is all the agent offers; the
+conversation it replays is not printed again). The agent then remembers
+everything that was said, and the session goes on in the history.
+
+```text
+[claude] ~/projects/wallet ✦ #resume 11
+Resumed session 11: the agent remembers that conversation.
+[claude] ~/projects/wallet ✦ and the timeout, did we change it?
+```
+
+The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
+removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
+saved.
+

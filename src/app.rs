@@ -47,6 +47,7 @@ Control commands:
   #audit [n]      what ran here, what the agent got, and what it did; n: an earlier session
   #sessions       the earlier sessions of this project, from the history
   #forget [n]     remove a session from the history; the current one without n
+  #resume <n>     go back to session n with the agent, when it can (Claude, Codex)
   #exit           leave Parolsh";
 
 pub struct App {
@@ -149,7 +150,7 @@ impl App {
             (Some(_), Some(input)) => input,
             (Some(_), None) => app.config.input,
         });
-        app.start_agent();
+        app.start_agent(false);
         Ok(app)
     }
 
@@ -191,9 +192,15 @@ impl App {
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
             }
             if let (Some(agent), Some(history)) = (&self.agent, self.audit.history_mut()) {
+                // Until the agent says, keep what the history has: a resumed
+                // session keeps its title.
                 let activity = agent.activity().get();
-                history.set_title(activity.title);
-                history.set_agent_session_id(activity.session_id);
+                if activity.title.is_some() {
+                    history.set_title(activity.title);
+                }
+                if activity.session_id.is_some() {
+                    history.set_agent_session_id(activity.session_id);
+                }
             }
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
@@ -478,6 +485,47 @@ impl App {
         Ok(())
     }
 
+    /// `#resume <n>`: goes back to session `n` of this project with its
+    /// agent, in its directory, and goes on saving to it.
+    fn resume_command(&mut self, args: &str) -> Result<()> {
+        let id = session_number(args)?;
+        let session = self
+            .history()?
+            .resumable(&self.project_key(), id)?
+            .with_context(|| format!("no session {id} in this project, see #sessions"))?;
+        let agent_name = session
+            .agent
+            .with_context(|| format!("session {id} had no agent"))?;
+        let agent_session = session.agent_session_id.with_context(|| {
+            format!("session {id} cannot be resumed: the agent gave no id for it")
+        })?;
+        if Path::new(&session.cwd) != self.cwd {
+            self.change_dir(&session.cwd)?;
+        }
+        if self.active.as_deref() != Some(agent_name.as_str()) || self.agent.is_none() {
+            self.switch_agent(&agent_name)?;
+        }
+        let agent = self.agent.as_ref().with_context(no_agent)?;
+        anyhow::ensure!(
+            agent.resume(agent_session, self.cwd.clone()),
+            "the agent stopped"
+        );
+        match turn::wait_resumed(agent) {
+            turn::Resumed::Yes => {}
+            turn::Resumed::No(why) => anyhow::bail!("cannot resume session {id}: {why}"),
+            turn::Resumed::AgentStopped(why) => {
+                self.agent = None;
+                anyhow::bail!("{why}. Run #new to start it again.");
+            }
+        }
+        let project = self.project_key();
+        if let Some(history) = self.audit.history_mut() {
+            history.resume(&project, id)?;
+        }
+        println!("Resumed session {id}: the agent remembers that conversation.");
+        Ok(())
+    }
+
     /// `#new [private]`.
     fn new_command(&mut self, args: &str) -> Result<()> {
         let private = match args {
@@ -568,8 +616,9 @@ impl App {
             }
             "exit" => return None,
             "new" => self.new_command(args),
-            "sessions" => self.sessions_command(),
+
             "forget" => self.forget_command(args),
+            "resume" => self.resume_command(args),
             "cd" => self.change_dir(args),
             "agent" => self.agent(args),
             "project" => self.project(args),
@@ -577,8 +626,13 @@ impl App {
             "config" => self.config_command(args),
             "options" => self.options_command(args),
             // Not recorded: looking changes nothing.
-            "audit" => {
-                return Some(match self.audit_command(args) {
+            "audit" | "sessions" => {
+                let result = if name == "audit" {
+                    self.audit_command(args)
+                } else {
+                    self.sessions_command()
+                };
+                return Some(match result {
                     Ok(()) => 0,
                     Err(e) => {
                         eprintln!("parolsh: {e:#}");
@@ -686,7 +740,7 @@ impl App {
             {
                 self.begin_session(false)
             }
-            _ => self.start_agent(),
+            _ => self.start_agent(false),
         }
         Ok(())
     }
@@ -788,9 +842,11 @@ impl App {
             None => true,
         };
         if restarted {
-            self.start_agent();
+            // `start_agent` begins the session.
+            self.start_agent(private);
+        } else {
+            self.begin_session(private);
         }
-        self.begin_session(private);
         match (&self.agent, private) {
             (None, _) => eprintln!("parolsh: {}", no_agent()),
             (Some(_), false) => println!("Started a new conversation."),
@@ -802,13 +858,13 @@ impl App {
 
     /// Stops the running agent, if any, and starts the active one with a new
     /// conversation in the current directory.
-    fn start_agent(&mut self) {
+    fn start_agent(&mut self, private: bool) {
         self.agent = None;
         let agent = self
             .active_agent()
             .map(|agent| AgentHandle::start(agent, self.cwd.clone()));
         self.agent = agent;
-        self.begin_session(false);
+        self.begin_session(private);
     }
 
     fn active_agent(&self) -> Option<&Agent> {
@@ -846,7 +902,7 @@ impl App {
             return Ok(());
         }
         self.active = Some(name.to_string());
-        self.start_agent();
+        self.start_agent(false);
         println!("Agent changed to {name}. Started a new conversation.");
         Ok(())
     }

@@ -808,3 +808,75 @@ fn a_private_conversation_is_not_saved() {
     assert!(sessions.contains("public plan"), "{sessions}");
     assert!(!sessions.contains("secret"), "{sessions}");
 }
+
+/// A home whose fake agent gets `args` after the script.
+fn fake_agent_home_with(args: &[&str]) -> tempfile::TempDir {
+    let args: Vec<String> = std::iter::once(FAKE_AGENT)
+        .chain(args.iter().copied())
+        .map(|arg| format!("\"{arg}\""))
+        .collect();
+    config_home(&format!(
+        "default_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [{}]\n",
+        args.join(", ")
+    ))
+}
+
+/// Rewrites the agent's arguments in `home`, keeping the history.
+fn set_agent_args(home: &std::path::Path, args: &[&str]) {
+    let fresh = fake_agent_home_with(args);
+    std::fs::copy(
+        fresh.path().join("parolsh/config.toml"),
+        home.join("parolsh/config.toml"),
+    )
+    .unwrap();
+}
+
+/// `#resume <n>` goes back to the agent's conversation of session `n` (the
+/// fake agent answers with its session id), and what follows is saved in
+/// that session.
+#[test]
+fn resume_goes_back_to_the_agents_conversation() {
+    let home = fake_agent_home_with(&[]);
+    let first = run_in(home.path(), "", &["hello"], "dumb", false);
+    assert!(first.contains("[s1|default|"), "{first}");
+
+    // The next run's own conversation is s10: only a resume brings s1 back.
+    set_agent_args(home.path(), &["--sessions-from", "10"]);
+    let screen = run_in(home.path(), "", &["#resume 1", "who"], "dumb", false);
+    assert!(
+        screen.contains("Resumed session 1: the agent remembers that conversation."),
+        "{screen}"
+    );
+    assert!(screen.contains("[s1|default|"), "{screen}");
+    assert!(!screen.contains("[s10|"), "{screen}");
+
+    let screen = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    let audit = audit_of(&screen);
+    for line in ["USER     → fake: hello", "USER     → fake: who"] {
+        assert!(
+            audit.iter().any(|saved| saved == line),
+            "missing {line}: {audit:#?}"
+        );
+    }
+}
+
+/// An agent that only loads a conversation replays it: the replay is not
+/// shown again. One that cannot resume says so.
+#[test]
+fn a_loaded_conversation_is_not_replayed_and_some_agents_cannot_resume() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+
+    set_agent_args(home.path(), &["--load-only", "--sessions-from", "10"]);
+    let screen = run_in(home.path(), "", &["#resume 1", "who"], "dumb", false);
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+    assert!(screen.contains("[s1|default|"), "{screen}");
+    assert!(!screen.contains("replayed old answer"), "{screen}");
+
+    set_agent_args(home.path(), &["--no-resume"]);
+    let screen = run_in(home.path(), "", &["#resume 1"], "dumb", false);
+    assert!(
+        screen.contains("cannot resume session 1: this agent cannot resume a conversation"),
+        "{screen}"
+    );
+}

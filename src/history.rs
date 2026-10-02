@@ -73,6 +73,15 @@ pub struct Session {
     pub entries: usize,
 }
 
+/// What `#resume` needs of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resumable {
+    pub agent: Option<String>,
+    /// The agent's id for the conversation.
+    pub agent_session_id: Option<String>,
+    pub cwd: String,
+}
+
 /// An entry read back: milliseconds since its session started, and the
 /// fields `Audit` wrote.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +129,46 @@ impl History {
         };
         history.purge(days)?;
         Ok(history)
+    }
+
+    /// Goes on writing to session `id` of `project`: `#resume`. False when
+    /// there is none.
+    pub fn resume(&mut self, project: &str, id: i64) -> rusqlite::Result<bool> {
+        let title: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT s.title FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.id = ?1 AND p.root = ?2",
+                params![id, project],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(title) = title else {
+            return Ok(false);
+        };
+        self.current = Some(id);
+        self.next = None;
+        self.title = title;
+        Ok(true)
+    }
+
+    /// What `#resume` needs of session `id` of `project`.
+    pub fn resumable(&self, project: &str, id: i64) -> rusqlite::Result<Option<Resumable>> {
+        self.conn
+            .query_row(
+                "SELECT s.agent, s.agent_session_id, s.cwd
+                 FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.id = ?1 AND p.root = ?2",
+                params![id, project],
+                |row| {
+                    Ok(Resumable {
+                        agent: row.get(0)?,
+                        agent_session_id: row.get(1)?,
+                        cwd: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
     }
 
     /// Starts a new session; it is written with its first entry.
@@ -531,6 +580,33 @@ mod tests {
         let history = open(dir.path());
         assert!(history.sessions("/p").unwrap().is_empty());
         assert_eq!(search(&history, "old"), 0);
+    }
+
+    #[test]
+    fn a_resumed_session_gets_the_new_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        history.begin(start("/p"));
+        history.set_agent_session_id(Some("abc".to_string()));
+        history.add("user", "message", "first", &json!({})).unwrap();
+        let first = history.current().unwrap();
+        history.begin(start("/p"));
+
+        assert_eq!(
+            history.resumable("/p", first).unwrap(),
+            Some(Resumable {
+                agent: Some("claude".to_string()),
+                agent_session_id: Some("abc".to_string()),
+                cwd: "/p".to_string(),
+            })
+        );
+        assert!(history.resume("/p", first).unwrap());
+        history
+            .add("user", "message", "second", &json!({}))
+            .unwrap();
+        assert_eq!(history.current(), Some(first));
+        assert_eq!(history.sessions("/p").unwrap().len(), 1);
+        assert!(!history.resume("/other", first).unwrap());
     }
 
     #[test]
