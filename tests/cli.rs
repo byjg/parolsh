@@ -307,7 +307,13 @@ fn raw_output(lines: &[&str]) -> String {
 }
 
 fn terminal_output(config: &str, flags: &str, lines: &[&str], term: &str, raw: bool) -> String {
-    let config = config_home(config);
+    let home = config_home(config);
+    run_in(home.path(), flags, lines, term, raw)
+}
+
+/// Runs Parolsh with the configuration and state in `home`, which stays:
+/// a second run sees what the first saved.
+fn run_in(home: &std::path::Path, flags: &str, lines: &[&str], term: &str, raw: bool) -> String {
     let mut command = Command::new("python3");
     command
         .arg(JOB_SHELL)
@@ -315,8 +321,8 @@ fn terminal_output(config: &str, flags: &str, lines: &[&str], term: &str, raw: b
         .args(lines)
         .arg("#exit")
         .env("TERM", term)
-        .env("XDG_CONFIG_HOME", config.path())
-        .env("XDG_STATE_HOME", config.path());
+        .env("XDG_CONFIG_HOME", home)
+        .env("XDG_STATE_HOME", home);
     if raw {
         command.env("JOB_SHELL_RAW", "1");
     }
@@ -689,4 +695,116 @@ fn mentioned_files_go_with_the_message_as_links() {
         audit.contains("→ fake: blocks @Cargo.toml and @nothing · 1 file linked"),
         "{audit}"
     );
+}
+
+fn fake_agent_home(extra: &str) -> tempfile::TempDir {
+    config_home(&format!(
+        "{extra}\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
+    ))
+}
+
+/// The lines `#audit 1` printed, without the times.
+fn audit_of(screen: &str) -> Vec<String> {
+    let from = screen.rfind("#audit 1").expect("no #audit 1");
+    screen[from..]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.len() > 9 && line.as_bytes()[7] == b' ')
+        .map(|line| line[9..].to_string())
+        .collect()
+}
+
+/// What a run did is still there in the next one: `#sessions` lists it and
+/// `#audit 1` shows it, with the agent's answers. `!command` lines are not
+/// saved by default; `#forget` removes the session.
+#[test]
+fn the_history_keeps_sessions_across_runs() {
+    let home = fake_agent_home("");
+    run_in(
+        home.path(),
+        "",
+        &["!echo local", "!+echo shared", "perm", "1", "tools"],
+        "dumb",
+        false,
+    );
+
+    let screen = run_in(home.path(), "", &["#sessions", "#audit 1"], "dumb", false);
+    let sessions = &screen[screen.find("#sessions").unwrap()..];
+    // Number, date, agent, entries, and the first message as its title.
+    assert!(
+        sessions
+            .lines()
+            .any(|line| line.trim_start().starts_with("1  ")
+                && line.contains(" fake ")
+                && line.ends_with("  perm")),
+        "{sessions}"
+    );
+    let audit = audit_of(&screen);
+    let expected = [
+        "USER     !+echo shared · exit 0 · 7 B kept",
+        "SHARED   1 output(s), 7 B → fake",
+        "USER     → fake: perm",
+        "AGENT    asks: Writing to notes.txt",
+        "USER     → Allow once",
+        "AGENT    answer: chose:allow-once",
+        "USER     → fake: tools",
+        "AGENT    read: Read a.rs [/tmp/a] · completed",
+        "AGENT    Read b · failed",
+        "AGENT    answer: done",
+    ];
+    for line in expected {
+        assert!(
+            audit.iter().any(|saved| saved == line),
+            "missing {line}: {audit:#?}"
+        );
+    }
+    assert!(
+        !audit.iter().any(|line| line.contains("echo local")),
+        "{audit:#?}"
+    );
+
+    let screen = run_in(home.path(), "", &["#forget 1", "#audit 1"], "dumb", false);
+    assert!(
+        screen.contains("Session 1 removed from the history."),
+        "{screen}"
+    );
+    assert!(screen.contains("no session 1 in this project"), "{screen}");
+}
+
+/// With `save_commands = true`, `!command` lines are saved too, and the
+/// banner says so.
+#[test]
+fn save_commands_saves_them_and_says_so() {
+    let home = fake_agent_home("save_commands = true");
+    let first = run_in(home.path(), "", &["!echo local"], "dumb", false);
+    assert!(
+        first.contains("!commands are saved to the history · save_commands = false to stop"),
+        "{first}"
+    );
+
+    let screen = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    assert_eq!(audit_of(&screen), ["USER     !echo local · exit 0"]);
+}
+
+/// `#new private` saves nothing of that conversation; the next `#new` saves
+/// again.
+#[test]
+fn a_private_conversation_is_not_saved() {
+    let home = fake_agent_home("");
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#new private", "secret plan", "#new", "public plan"],
+        "dumb",
+        false,
+    );
+    assert!(
+        screen.contains("Started a private conversation: it is not saved in the history."),
+        "{screen}"
+    );
+
+    let screen = run_in(home.path(), "", &["#sessions"], "dumb", false);
+    let sessions = &screen[screen.rfind("#sessions").unwrap()..];
+    assert!(sessions.contains("public plan"), "{sessions}");
+    assert!(!sessions.contains("secret"), "{sessions}");
 }

@@ -148,6 +148,8 @@ struct SessionState {
     tasks: BTreeMap<String, Instant>,
     /// A prompt is in flight.
     prompting: bool,
+    /// The agent's id for the conversation.
+    session_id: Option<String>,
 }
 
 type Shared = Arc<Mutex<SessionState>>;
@@ -163,6 +165,8 @@ pub struct Activity {
     pub oldest: Option<Instant>,
     /// The conversation's title, once the agent gave one.
     pub title: Option<String>,
+    /// The agent's id for the conversation, once it opened.
+    pub session_id: Option<String>,
 }
 
 /// Reads what an agent is doing, from any thread, for as long as it runs.
@@ -188,6 +192,7 @@ impl ActivityWatch {
             tasks: state.tasks.len(),
             oldest: state.tasks.values().min().copied(),
             title: state.title.clone(),
+            session_id: state.session_id.clone(),
         }
     }
 }
@@ -933,6 +938,7 @@ async fn open_session(
         *state = SessionState {
             modes,
             options,
+            session_id: Some(session.to_string()),
             ..Default::default()
         };
     }

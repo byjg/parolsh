@@ -74,6 +74,15 @@
 # oldest dropped first. Each is at most 200 characters. 0 keeps none.
 # audit_entries = 1000
 
+# Days an idle session stays in the history (~/.local/state/parolsh/history.db:
+# your messages, shared outputs, the agent's answers and tool calls; #sessions,
+# #audit <n>). 0 saves nothing. Global only.
+# history_days = 90
+
+# Also save !command and !bash lines in the history. They never reach the
+# agent and may hold passwords or tokens. Global only.
+# save_commands = false
+
 
 # --- Agent started with Parolsh ---------------------------------------------
 

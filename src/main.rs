@@ -5,6 +5,7 @@ mod complete;
 mod config;
 mod form;
 mod hints;
+mod history;
 mod input;
 mod markdown;
 mod mention;

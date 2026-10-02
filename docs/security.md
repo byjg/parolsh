@@ -75,6 +75,17 @@ configured, but not what is executed: `shell` and the agents' `command`,
 agent reported doing, for the current run (see
 [`#audit`](input-routing.md#audit)).
 
+The [history of sessions](input-routing.md#the-history-of-sessions) keeps more,
+on disk: your messages, the outputs you shared, the agent's answers, reasoning
+and tool calls, and your answers to its questions, for 90 days by default. It
+is `~/.local/state/parolsh/history.db`, readable only by you.
+
+- `!command` lines are not in it unless you set `save_commands = true`, which
+  the banner then says.
+- `#forget` removes a session, `#new private` keeps a conversation out of it,
+  and `history_days = 0` saves nothing.
+- A project file cannot change these settings.
+
 ## The ACP log
 
 `PAROLSH_ACP_LOG` writes the whole conversation to a file, including what you

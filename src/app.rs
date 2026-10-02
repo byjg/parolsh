@@ -5,15 +5,17 @@ use reedline::{
     ColumnarMenu, Emacs, ExternalPrinter, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder,
     Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Block};
-use crate::audit::{self, Actor, Audit};
+use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
+use crate::history::{History, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
 use crate::{config, hints, mention, project, setup, shell, shellenv, turn, ui};
@@ -33,6 +35,7 @@ Input:
 Control commands:
   #help           show this help
   #new            start a new conversation
+  #new private    start one that is not saved in the history
   #cd <path>      switch to another directory or project
   #agent [list]   show the active agent, or list the configured ones
   #agent <name>   switch to another agent (new conversation)
@@ -41,7 +44,9 @@ Control commands:
   #options <id> <value>  set one until you leave Parolsh
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
-  #audit          what ran here, what the agent got, and what it did
+  #audit [n]      what ran here, what the agent got, and what it did; n: an earlier session
+  #sessions       the earlier sessions of this project, from the history
+  #forget [n]     remove a session from the history; the current one without n
   #exit           leave Parolsh";
 
 pub struct App {
@@ -98,7 +103,26 @@ impl App {
         );
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
-        let audit = Audit::new(config.audit_entries);
+        let mut audit = Audit::new(config.audit_entries);
+        if config.history_days > 0
+            && let Some(path) = state_dir().map(|dir| dir.join("history.db"))
+        {
+            match History::open(&path, config.history_days) {
+                Ok(history) => {
+                    audit = audit.with_history(history, config.save_commands);
+                    if config.save_commands {
+                        notices.push(
+                            "!commands are saved to the history · save_commands = false to stop"
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(e) => notices.push(format!(
+                    "parolsh: cannot open the history {}: {e}; this run is not saved",
+                    path.display()
+                )),
+            }
+        }
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             agent_cwd: Arc::new(Mutex::new(cwd.clone())),
@@ -166,6 +190,11 @@ impl App {
                 title.set_place(self.place());
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
             }
+            if let (Some(agent), Some(history)) = (&self.agent, self.audit.history_mut()) {
+                let activity = agent.activity().get();
+                history.set_title(activity.title);
+                history.set_agent_session_id(activity.session_id);
+            }
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
                 Signal::Success(line) => {
@@ -222,7 +251,11 @@ impl App {
             turn::answer(request, &mut self.audit);
         }
         if watched.stopped {
-            self.audit.add(Actor::Parolsh, "the agent stopped");
+            self.audit.add(Record::new(
+                Actor::Parolsh,
+                Kind::Event,
+                "the agent stopped",
+            ));
             eprintln!("parolsh: the agent stopped. Run #new to start it again.");
             self.agent = None;
         }
@@ -259,15 +292,15 @@ impl App {
                         code
                     },
                 ));
-                self.audit.add(
-                    Actor::User,
-                    format!("!{} · exit {code}", audit::excerpt(&line, 120)),
-                );
+                self.audit
+                    .add(Record::new(Actor::User, Kind::Command, line).meta(json!({"exit": code})));
                 code
             }
             Input::Bash => {
                 let code = report(shell::run_foreground(shell::bash(&self.shell_cwd)));
-                self.audit.add(Actor::User, format!("!bash · exit {code}"));
+                self.audit.add(
+                    Record::new(Actor::User, Kind::Command, "bash").meta(json!({"exit": code})),
+                );
                 code
             }
             Input::Share(line) => self.share(line),
@@ -368,13 +401,119 @@ impl App {
     }
 
     /// `#audit`: the entries of this run, oldest first.
-    fn audit_command(&self) {
-        let lines = self.audit.lines(ui::width());
-        if lines.is_empty() {
-            println!("Nothing yet: commands, messages and what the agent does show up here.");
-        }
+    /// `#audit`: this run, from memory; `#audit <n>`: session `n` of this
+    /// project, from the history.
+    fn audit_command(&self, args: &str) -> Result<()> {
+        let lines = if args.is_empty() {
+            let lines = self.audit.lines(ui::width());
+            if lines.is_empty() {
+                println!("Nothing yet: commands, messages and what the agent does show up here.");
+            }
+            lines
+        } else {
+            let id = session_number(args)?;
+            let entries = self
+                .history()?
+                .entries(&self.project_key(), id)?
+                .with_context(|| format!("no session {id} in this project, see #sessions"))?;
+            audit::stored_lines(&entries, ui::width())
+        };
         for line in lines {
             println!("{line}");
+        }
+        Ok(())
+    }
+
+    /// `#sessions`: the sessions of this project in the history, newest
+    /// first; `*` marks the current one.
+    fn sessions_command(&self) -> Result<()> {
+        let history = self.history()?;
+        let sessions = history.sessions(&self.project_key())?;
+        if sessions.is_empty() {
+            println!("No sessions saved in this project yet.");
+        }
+        let current = history.current();
+        for session in sessions {
+            let title = session
+                .title
+                .as_deref()
+                .map(|title| audit::excerpt(title, 60));
+            let line = format!(
+                "{} {:>4}  {}  {:<8} {:>4} entries  {}",
+                if current == Some(session.id) {
+                    "*"
+                } else {
+                    " "
+                },
+                session.id,
+                session.started,
+                session.agent.as_deref().unwrap_or("-"),
+                session.entries,
+                title.unwrap_or_default(),
+            );
+            println!("{}", audit::excerpt(&line, ui::width()));
+        }
+        Ok(())
+    }
+
+    /// `#forget [n]`: removes session `n`, or the current one, from the
+    /// history.
+    fn forget_command(&mut self, args: &str) -> Result<()> {
+        let project = self.project_key();
+        let history = self
+            .audit
+            .history_mut()
+            .context("the history is off (history_days = 0)")?;
+        let id = match args {
+            "" => history
+                .current()
+                .context("nothing of this conversation is saved yet")?,
+            n => session_number(n)?,
+        };
+        anyhow::ensure!(
+            history.forget(&project, id)?,
+            "no session {id} in this project, see #sessions"
+        );
+        println!("Session {id} removed from the history.");
+        Ok(())
+    }
+
+    /// `#new [private]`.
+    fn new_command(&mut self, args: &str) -> Result<()> {
+        let private = match args {
+            "" => false,
+            "private" => true,
+            other => anyhow::bail!("`#new {other}`: only `#new` or `#new private`"),
+        };
+        self.new_conversation(private);
+        Ok(())
+    }
+
+    fn history(&self) -> Result<&History> {
+        self.audit
+            .history()
+            .context("the history is off (history_days = 0)")
+    }
+
+    /// The project sessions belong to: its root, or the agent's directory
+    /// without one.
+    fn project_key(&self) -> String {
+        self.project_root
+            .as_deref()
+            .unwrap_or(&self.cwd)
+            .display()
+            .to_string()
+    }
+
+    /// A new conversation: a new session in the history, unless private.
+    fn begin_session(&mut self, private: bool) {
+        self.audit.begin(SessionStart {
+            project: self.project_key(),
+            agent: self.agent.as_ref().and(self.active.clone()),
+            cwd: self.cwd.display().to_string(),
+        });
+        if private {
+            self.audit.pause();
         }
     }
 
@@ -428,27 +567,32 @@ impl App {
                 Ok(())
             }
             "exit" => return None,
-            "new" => {
-                self.new_conversation();
-                Ok(())
-            }
+            "new" => self.new_command(args),
+            "sessions" => self.sessions_command(),
+            "forget" => self.forget_command(args),
             "cd" => self.change_dir(args),
             "agent" => self.agent(args),
             "project" => self.project(args),
             "prompt" => self.prompt_command(args),
             "config" => self.config_command(args),
             "options" => self.options_command(args),
+            // Not recorded: looking changes nothing.
             "audit" => {
-                self.audit_command();
-                return Some(0);
+                return Some(match self.audit_command(args) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("parolsh: {e:#}");
+                        1
+                    }
+                });
             }
             _ => Err(anyhow::anyhow!("unknown command `#{name}`, see #help")),
         };
         if name != "help" {
-            let failed = if result.is_err() { " · failed" } else { "" };
-            let line = format!("#{name} {args}");
-            self.audit
-                .add(Actor::User, format!("{}{failed}", line.trim_end()));
+            self.audit.add(
+                Record::new(Actor::User, Kind::Control, format!("{name} {args}"))
+                    .meta(json!({"failed": result.is_err()})),
+            );
         }
         match result {
             Ok(()) => Some(0),
@@ -538,7 +682,10 @@ impl App {
         match &self.agent {
             Some(agent)
                 if previous.as_ref() == self.active_agent()
-                    && agent.new_session(self.cwd.clone()) => {}
+                    && agent.new_session(self.cwd.clone()) =>
+            {
+                self.begin_session(false)
+            }
             _ => self.start_agent(),
         }
         Ok(())
@@ -567,14 +714,12 @@ impl App {
                     eprintln!("exit {code}");
                 }
                 println!("(output of `{line}` goes with your next message)");
-                let kept = audit::size(captured.text.len());
-                let last = if captured.truncated { " (its end)" } else { "" };
                 self.audit.add(
-                    Actor::User,
-                    format!(
-                        "!+{} · exit {code} · {kept} kept{last}",
-                        audit::excerpt(&line, 120)
-                    ),
+                    Record::new(Actor::User, Kind::Capture, line.clone()).meta(json!({
+                        "exit": code,
+                        "kept": captured.text.len(),
+                        "truncated": captured.truncated,
+                    })),
                 );
                 self.shared.push(Shared {
                     command: line,
@@ -599,32 +744,23 @@ impl App {
             return 1;
         };
         let name = self.active.as_deref().unwrap_or("the agent");
-        if !self.shared.is_empty() {
-            let bytes = self.shared.iter().map(|s| s.captured.text.len()).sum();
+        let kept: usize = self.shared.iter().map(|s| s.captured.text.len()).sum();
+        let shared: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
+        if !shared.is_empty() {
             self.audit.add(
-                Actor::Shared,
-                format!(
-                    "{} output(s), {} → {name}",
-                    self.shared.len(),
-                    audit::size(bytes)
-                ),
+                Record::new(Actor::Shared, Kind::Share, shared.join("\n\n")).meta(json!({
+                    "outputs": shared.len(),
+                    "bytes": kept,
+                    "agent": name,
+                })),
             );
         }
         let files = mention::mentioned(&text, &self.cwd, home().as_deref());
-        let linked = match files.len() {
-            0 => String::new(),
-            1 => " · 1 file linked".to_string(),
-            n => format!(" · {n} files linked"),
-        };
         self.audit.add(
-            Actor::User,
-            format!("→ {name}: {}{linked}", audit::excerpt(&text, 80)),
+            Record::new(Actor::User, Kind::Message, text.clone())
+                .meta(json!({"agent": name, "files": files.len()})),
         );
-        let mut blocks: Vec<Block> = self
-            .shared
-            .drain(..)
-            .map(|s| Block::Text(s.block()))
-            .collect();
+        let mut blocks: Vec<Block> = shared.into_iter().map(Block::Text).collect();
         blocks.extend(files.into_iter().map(Block::File));
         blocks.push(Block::Text(text));
         match turn::run(agent, blocks, self.display(), &mut self.audit) {
@@ -632,7 +768,11 @@ impl App {
             turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
-                self.audit.add(Actor::Parolsh, "the agent stopped");
+                self.audit.add(Record::new(
+                    Actor::Parolsh,
+                    Kind::Event,
+                    "the agent stopped",
+                ));
                 eprintln!("parolsh: the agent stopped. Run #new to start it again.");
                 self.agent = None;
                 1
@@ -640,7 +780,7 @@ impl App {
         }
     }
 
-    fn new_conversation(&mut self) {
+    fn new_conversation(&mut self, private: bool) {
         // An agent that never ended a cancelled turn would only start the new
         // conversation after it: start the agent again instead.
         let restarted = match &self.agent {
@@ -650,10 +790,13 @@ impl App {
         if restarted {
             self.start_agent();
         }
-        if self.agent.is_some() {
-            println!("Started a new conversation.");
-        } else {
-            eprintln!("parolsh: {}", no_agent());
+        self.begin_session(private);
+        match (&self.agent, private) {
+            (None, _) => eprintln!("parolsh: {}", no_agent()),
+            (Some(_), false) => println!("Started a new conversation."),
+            (Some(_), true) => {
+                println!("Started a private conversation: it is not saved in the history.")
+            }
         }
     }
 
@@ -665,6 +808,7 @@ impl App {
             .active_agent()
             .map(|agent| AgentHandle::start(agent, self.cwd.clone()));
         self.agent = agent;
+        self.begin_session(false);
     }
 
     fn active_agent(&self) -> Option<&Agent> {
@@ -846,14 +990,28 @@ fn resolve_dir(cwd: &Path, args: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The input history: the lines you typed.
 fn history_path() -> Option<PathBuf> {
+    state_dir().map(|dir| dir.join("history"))
+}
+
+/// `$XDG_STATE_HOME/parolsh`, or `~/.local/state/parolsh`.
+fn state_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(base.join("parolsh").join("history"))
+    Some(base.join("parolsh"))
+}
+
+/// A session number, as `#sessions` lists them.
+fn session_number(text: &str) -> Result<i64> {
+    text.parse()
+        .ok()
+        .filter(|&id: &i64| id > 0)
+        .with_context(|| format!("`{text}` is not a session number, see #sessions"))
 }
 
 #[cfg(test)]
