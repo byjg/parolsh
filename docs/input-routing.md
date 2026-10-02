@@ -104,7 +104,12 @@ have in common, and the next `Tab` shows them in a menu (`Tab` and
   files show up when the name starts with `.`, and special characters are
   escaped (`My\ Files`).
 
-Text for the agent, `?text`, `/command` and `#command` have no completion.
+On `#` lines, `Tab` completes the command's name (`#a` gives `#agent` and
+`#audit`), and after `#cd` a directory, from the directory your commands run
+in. `#cd` takes the path as typed, so names with spaces are not escaped there
+(`#cd My Projects/`). Other `#` commands have no arguments to complete.
+
+Text for the agent, `?text` and `/command` have no completion.
 
 ## `!command`
 

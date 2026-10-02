@@ -839,3 +839,23 @@ fn history_path() -> Option<PathBuf> {
         })?;
     Some(base.join("parolsh").join("history"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tab completes the `#` commands `#help` lists, no more, no fewer.
+    #[test]
+    fn completion_knows_the_commands_help_lists() {
+        // A command with several forms is listed once per form.
+        let listed: std::collections::BTreeSet<&str> = HELP
+            .lines()
+            .skip_while(|line| !line.starts_with("Control commands:"))
+            .filter_map(|line| line.trim_start().strip_prefix('#'))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        let completed = crate::complete::CONTROL_COMMANDS.into_iter().collect();
+
+        assert_eq!(listed, completed);
+    }
+}
