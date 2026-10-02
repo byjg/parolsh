@@ -4,7 +4,7 @@
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
-    ElicitationFormCapabilities, ElicitationMode, InitializeRequest, LoadSessionRequest,
+    ElicitationFormCapabilities, ElicitationMode, InitializeRequest, LoadSessionRequest, McpServer,
     NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus,
     PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
@@ -418,11 +418,13 @@ enum Command {
     /// The blocks of one message: context first, the user's text last.
     Prompt(TurnId, Vec<Block>),
     Cancel,
-    NewSession(PathBuf),
+    /// A new conversation in a directory, with the MCP servers it gets.
+    NewSession(PathBuf, Vec<McpServer>),
     /// Goes back to the agent's conversation `id`.
     Resume {
         id: String,
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
     },
     SetOption(String, OptionValue),
 }
@@ -443,15 +445,21 @@ pub struct AgentHandle {
 impl AgentHandle {
     /// Starts the agent and opens a session in `cwd`, in the background:
     /// this returns immediately, and prompts sent meanwhile wait for it.
-    pub fn start(agent: &config::Agent, cwd: PathBuf) -> Self {
+    /// `mcp`: the MCP servers the agent gets in that conversation.
+    pub fn start(agent: &config::Agent, cwd: PathBuf, mcp: Vec<McpServer>) -> Self {
         let log = std::env::var_os(LOG_VAR)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
-        Self::spawn(agent, cwd, log)
+        Self::spawn(agent, cwd, mcp, log)
     }
 
     /// `start`, logging the agent's stdio to `log`.
-    fn spawn(agent: &config::Agent, cwd: PathBuf, log: Option<PathBuf>) -> Self {
+    fn spawn(
+        agent: &config::Agent,
+        cwd: PathBuf,
+        mcp: Vec<McpServer>,
+        log: Option<PathBuf>,
+    ) -> Self {
         let missing = missing_command(&agent.command);
         let config = AcpAgentConfig::new(&agent.command)
             .args(agent.args.clone())
@@ -491,6 +499,7 @@ impl AgentHandle {
                             acp_agent,
                             wanted,
                             cwd,
+                            mcp,
                             commands_rx,
                             events_tx.clone(),
                             session_state,
@@ -596,15 +605,15 @@ impl AgentHandle {
     }
 
     /// Replaces the conversation with a new one rooted in `cwd`.
-    pub fn new_session(&self, cwd: PathBuf) -> bool {
-        self.send(Command::NewSession(cwd))
+    pub fn new_session(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> bool {
+        self.send(Command::NewSession(cwd, mcp))
     }
 
     /// Goes back to the agent's conversation `id`, in `cwd`. The answer
     /// comes as `Event::Resumed`; until then, and if it fails, the current
     /// conversation stays.
-    pub fn resume(&self, id: String, cwd: PathBuf) -> bool {
-        self.send(Command::Resume { id, cwd })
+    pub fn resume(&self, id: String, cwd: PathBuf, mcp: Vec<McpServer>) -> bool {
+        self.send(Command::Resume { id, cwd, mcp })
     }
 
     fn send(&self, command: Command) -> bool {
@@ -700,6 +709,7 @@ async fn serve(
     agent: AcpAgent,
     mut wanted: Wanted,
     cwd: PathBuf,
+    mcp: Vec<McpServer>,
     mut commands: tokio_mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
     shared: Shared,
@@ -774,7 +784,7 @@ async fn serve(
             let can_resume = agent_capabilities.session_capabilities.resume.is_some();
             let can_load = agent_capabilities.load_session;
             let mut session =
-                open_session(&cx, Opening::New, &cwd, &wanted, &events, &shared).await?;
+                open_session(&cx, Opening::New, &cwd, mcp, &wanted, &events, &shared).await?;
             // Commands that arrived during a turn, run after it.
             let mut pending = VecDeque::new();
 
@@ -802,11 +812,12 @@ async fn serve(
                         };
                         let _ = events.send(event);
                     }
-                    Command::NewSession(dir) => {
-                        session = open_session(&cx, Opening::New, &dir, &wanted, &events, &shared)
-                            .await?;
+                    Command::NewSession(dir, mcp) => {
+                        session =
+                            open_session(&cx, Opening::New, &dir, mcp, &wanted, &events, &shared)
+                                .await?;
                     }
-                    Command::Resume { id, cwd } => {
+                    Command::Resume { id, cwd, mcp } => {
                         let opening = match (can_resume, can_load) {
                             (true, _) => Opening::Resume(id),
                             (false, true) => Opening::Load(id),
@@ -818,7 +829,7 @@ async fn serve(
                             }
                         };
                         let result =
-                            open_session(&cx, opening, &cwd, &wanted, &events, &shared).await;
+                            open_session(&cx, opening, &cwd, mcp, &wanted, &events, &shared).await;
                         let event = match result {
                             Ok(resumed) => {
                                 session = resumed;
@@ -944,13 +955,14 @@ enum Opening {
     Load(String),
 }
 
-/// Opens a conversation in `cwd`, then sets the wanted
+/// Opens a conversation in `cwd`, giving the agent `mcp`, then sets the wanted
 /// mode and options. A failed resume or load leaves the session state as it
 /// was.
 async fn open_session(
     cx: &ConnectionTo<Agent>,
     opening: Opening,
     cwd: &Path,
+    mcp: Vec<McpServer>,
     wanted: &Wanted,
     events: &mpsc::Sender<Event>,
     shared: &Shared,
@@ -958,14 +970,14 @@ async fn open_session(
     let (session, response_modes, config_options) = match opening {
         Opening::New => {
             let response = cx
-                .send_request(NewSessionRequest::new(cwd))
+                .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp))
                 .block_task()
                 .await?;
             (response.session_id, response.modes, response.config_options)
         }
         Opening::Resume(id) => {
             let response = cx
-                .send_request(ResumeSessionRequest::new(id.clone(), cwd))
+                .send_request(ResumeSessionRequest::new(id.clone(), cwd).mcp_servers(mcp))
                 .block_task()
                 .await?;
             (SessionId::new(id), response.modes, response.config_options)
@@ -973,7 +985,7 @@ async fn open_session(
         Opening::Load(id) => {
             set_loading(shared, true);
             let response = cx
-                .send_request(LoadSessionRequest::new(id.clone(), cwd))
+                .send_request(LoadSessionRequest::new(id.clone(), cwd).mcp_servers(mcp))
                 .block_task()
                 .await;
             set_loading(shared, false);
@@ -1187,7 +1199,7 @@ mod tests {
     fn start(mode: Option<&str>, extra: &[&str], cwd: &Path) -> AgentHandle {
         let mut args = vec![FAKE_AGENT.to_string()];
         args.extend(extra.iter().map(|arg| arg.to_string()));
-        AgentHandle::start(&fake_agent(mode, args), cwd.to_path_buf())
+        AgentHandle::start(&fake_agent(mode, args), cwd.to_path_buf(), Vec::new())
     }
 
     fn fake_agent(mode: Option<&str>, args: Vec<String>) -> config::Agent {
@@ -1526,6 +1538,7 @@ mod tests {
         let agent = AgentHandle::spawn(
             &fake_agent(None, vec![FAKE_AGENT.to_string()]),
             dir.path().to_path_buf(),
+            Vec::new(),
             Some(log.clone()),
         );
         let (text, _) = turn(&agent, "warn");
@@ -1671,7 +1684,7 @@ mod tests {
         let agent = start(None, &[], first.path());
         turn(&agent, "one");
 
-        assert!(agent.new_session(second.path().to_path_buf()));
+        assert!(agent.new_session(second.path().to_path_buf(), Vec::new()));
         let (text, _) = turn(&agent, "two");
 
         let expected = format!("[s2|default|{}] two", second.path().display());
@@ -1685,7 +1698,7 @@ mod tests {
         agent
             .env
             .insert("PAROLSH_TEST_MODEL".to_string(), "gpt-test".to_string());
-        let agent = AgentHandle::start(&agent, dir.path().to_path_buf());
+        let agent = AgentHandle::start(&agent, dir.path().to_path_buf(), Vec::new());
 
         let (text, _) = turn(&agent, "env PAROLSH_TEST_MODEL");
 
@@ -1722,7 +1735,7 @@ mod tests {
             .iter()
             .map(|(id, value)| (id.to_string(), value.clone()))
             .collect();
-        AgentHandle::start(&agent, cwd.to_path_buf())
+        AgentHandle::start(&agent, cwd.to_path_buf(), Vec::new())
     }
 
     fn text(value: &str) -> OptionValue {
@@ -1794,7 +1807,7 @@ mod tests {
         let (reply, _) = turn(&agent, "opts");
         assert!(reply.contains(r#""model": "two""#), "{reply}");
 
-        assert!(agent.new_session(dir.path().to_path_buf()));
+        assert!(agent.new_session(dir.path().to_path_buf(), Vec::new()));
         let (reply, _) = turn(&agent, "opts");
         assert!(reply.contains(r#""model": "two""#), "{reply}");
     }
@@ -1834,6 +1847,7 @@ mod tests {
                 ..fake_agent(None, vec![])
             },
             dir.path().to_path_buf(),
+            Vec::new(),
         );
 
         match next(&agent) {

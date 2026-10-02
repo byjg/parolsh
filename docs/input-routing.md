@@ -342,3 +342,25 @@ The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
 removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
 saved.
 
+### The agent can search the history
+
+In every conversation that is saved, the agent gets the history of this
+project as an MCP server, `parolsh-history`, so it can look up earlier work
+itself when you refer to it, without loading whole sessions:
+
+```text
+[claude] ~/projects/wallet ✦ how did we fix the retries last week?
+• mcp__parolsh-history__search_history
+Last Tuesday we added exponential backoff in src/client.rs …
+```
+
+| Tool | What it returns |
+|---|---|
+| `search_history` | The best matches for some words (SQLite FTS5: `retry OR backoff`, `"a phrase"`, `prefix*`), with the session and entry |
+| `list_sessions` | The sessions: number, date, agent, title |
+| `get_session` | The entries of one session, a page at a time, with their full text |
+| `commands` | The saved shell commands and their exit codes |
+
+The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
+the history without changing it, and only this project's sessions: its tools
+cannot ask for another. A `#new private` conversation does not get it.

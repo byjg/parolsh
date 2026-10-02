@@ -86,6 +86,15 @@ is `~/.local/state/parolsh/history.db`, readable only by you.
   and `history_days = 0` saves nothing.
 - A project file cannot change these settings.
 
+The agent gets this history as an MCP server (see
+[The agent can search the history](input-routing.md#the-agent-can-search-the-history)),
+so **what was saved can reach the agent again**: any agent you use in this
+project, of any provider, can read what its searches return from earlier
+sessions, including what was first sent to another agent, and the `!command`
+lines when `save_commands` is on. It cannot see other projects' sessions. A
+`#new private` conversation does not get the server; `history_days = 0` turns
+both the history and the server off.
+
 ## The ACP log
 
 `PAROLSH_ACP_LOG` writes the whole conversation to a file, including what you

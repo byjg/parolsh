@@ -880,3 +880,65 @@ fn a_loaded_conversation_is_not_replayed_and_some_agents_cannot_resume() {
         "{screen}"
     );
 }
+
+/// The agent gets the history as an MCP server, `parolsh mcp` for this
+/// project, except in a private conversation.
+#[test]
+fn the_agent_gets_the_history_as_an_mcp_server() {
+    let home = fake_agent_home_with(&[]);
+    let screen = run_in(
+        home.path(),
+        "",
+        &["mcp", "#new private", "mcp"],
+        "dumb",
+        false,
+    );
+    let db = home.path().join("parolsh/history.db");
+    let expected = format!(
+        r#"[{{"name": "parolsh-history", "args": ["mcp", "--db", "{}", "--project", "{}"]}}]"#,
+        db.display(),
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    assert!(screen.contains(&expected), "{screen}");
+    let private = &screen[screen.find("Started a private conversation").unwrap()..];
+    assert!(private.contains("\n[]\n"), "{private}");
+}
+
+/// `parolsh mcp` answers MCP over stdio: the tools, and a search in the
+/// project's sessions.
+#[test]
+fn parolsh_mcp_serves_the_history() {
+    use std::io::Write;
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["why does it retry"], "dumb", false);
+
+    let mut server = parolsh()
+        .args(["mcp", "--db"])
+        .arg(home.path().join("parolsh/history.db"))
+        .args(["--project", env!("CARGO_MANIFEST_DIR")])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_history","arguments":{"query":"retry"}}}"#,
+    ];
+    writeln!(server.stdin.take().unwrap(), "{}", requests.join("\n")).unwrap();
+    let output = server.wait_with_output().unwrap();
+    let replies: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(
+        replies[0]["result"]["serverInfo"]["name"],
+        "parolsh-history"
+    );
+    let found = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(found.contains("why does it [retry]"), "{found}");
+}

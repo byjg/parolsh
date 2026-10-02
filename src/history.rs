@@ -3,7 +3,7 @@
 //! One database for every project; each session belongs to one project.
 //! `#audit`, `#sessions` and `#forget` read it.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,6 +73,33 @@ pub struct Session {
     pub entries: usize,
 }
 
+/// An entry found by `search`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub session: i64,
+    /// Its position in the session, from 0, for `entries`.
+    pub position: usize,
+    /// Local time, `YYYY-MM-DD HH:MM`.
+    pub at: String,
+    pub actor: String,
+    pub kind: String,
+    /// The matching part, terms between `[` and `]`.
+    pub snippet: String,
+}
+
+/// A saved `!command`, `!bash` or `!+command` line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedCommand {
+    pub session: i64,
+    /// Local time, `YYYY-MM-DD HH:MM`.
+    pub at: String,
+    /// `command` or `capture` (`!+`).
+    pub kind: String,
+    pub text: String,
+    /// `exit`, and for `!+` what was kept.
+    pub meta: serde_json::Value,
+}
+
 /// What `#resume` needs of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resumable {
@@ -129,6 +156,101 @@ impl History {
         };
         history.purge(days)?;
         Ok(history)
+    }
+
+    /// Opens an existing database without writing to it: `parolsh mcp`.
+    pub fn open_read_only(path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self {
+            conn,
+            current: None,
+            next: None,
+            title: None,
+            agent_session_id: None,
+        })
+    }
+
+    /// Entries of `project` matching `query` (FTS5: words, `OR`, `"a
+    /// phrase"`, `prefix*`), best first. A query FTS5 cannot read is
+    /// searched as plain words, any of them.
+    pub fn search(&self, project: &str, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+        match self.search_fts(project, query, limit) {
+            Err(rusqlite::Error::SqliteFailure(..)) => {
+                let words: Vec<String> = query
+                    .split_whitespace()
+                    .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+                    .collect();
+                if words.is_empty() {
+                    return Ok(Vec::new());
+                }
+                self.search_fts(project, &words.join(" OR "), limit)
+            }
+            found => found,
+        }
+    }
+
+    fn search_fts(&self, project: &str, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+        let mut statement = self.conn.prepare(
+            "SELECT e.session_id,
+                    (SELECT count(*) FROM entries b WHERE b.session_id = e.session_id AND b.id < e.id),
+                    strftime('%Y-%m-%d %H:%M', e.at / 1000, 'unixepoch', 'localtime'),
+                    e.actor, e.kind,
+                    snippet(entries_fts, 0, '[', ']', '…', 16)
+             FROM entries_fts
+             JOIN entries e ON e.id = entries_fts.rowid
+             JOIN sessions s ON s.id = e.session_id
+             JOIN projects p ON p.id = s.project_id
+             WHERE entries_fts MATCH ?1 AND p.root = ?2
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![query, project, limit as i64], |row| {
+            Ok(Hit {
+                session: row.get(0)?,
+                position: row.get::<_, i64>(1)? as usize,
+                at: row.get(2)?,
+                actor: row.get(3)?,
+                kind: row.get(4)?,
+                snippet: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The saved command lines of `project` containing `filter`, newest
+    /// first.
+    pub fn commands(
+        &self,
+        project: &str,
+        filter: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<SavedCommand>> {
+        let mut statement = self.conn.prepare(
+            "SELECT e.session_id,
+                    strftime('%Y-%m-%d %H:%M', e.at / 1000, 'unixepoch', 'localtime'),
+                    e.kind, e.text, e.meta
+             FROM entries e
+             JOIN sessions s ON s.id = e.session_id
+             JOIN projects p ON p.id = s.project_id
+             WHERE p.root = ?1 AND e.kind IN ('command', 'capture') AND instr(e.text, ?2) > 0
+             ORDER BY e.id DESC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![project, filter, limit as i64], |row| {
+            let meta: String = row.get(4)?;
+            Ok(SavedCommand {
+                session: row.get(0)?,
+                at: row.get(1)?,
+                kind: row.get(2)?,
+                text: row.get(3)?,
+                meta: serde_json::from_str(&meta).unwrap_or_default(),
+            })
+        })?;
+        rows.collect()
     }
 
     /// Goes on writing to session `id` of `project`: `#resume`. False when
@@ -580,6 +702,65 @@ mod tests {
         let history = open(dir.path());
         assert!(history.sessions("/p").unwrap().is_empty());
         assert_eq!(search(&history, "old"), 0);
+    }
+
+    #[test]
+    fn search_finds_words_in_this_project_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        history.begin(start("/p"));
+        history
+            .add(
+                "user",
+                "message",
+                "why does the client retry twice?",
+                &json!({}),
+            )
+            .unwrap();
+        history
+            .add("agent", "answer", "It retries with no backoff.", &json!({}))
+            .unwrap();
+        let session = history.current().unwrap();
+        history.begin(start("/other"));
+        history
+            .add("user", "message", "retry elsewhere", &json!({}))
+            .unwrap();
+
+        let hits = history.search("/p", "backoff", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].session, hits[0].position), (session, 1));
+        assert_eq!(hits[0].snippet, "It retries with no [backoff].");
+        assert_eq!(
+            history.search("/p", "retry OR retries", 10).unwrap().len(),
+            2
+        );
+        // Not FTS5 syntax: searched as plain words.
+        assert_eq!(
+            history.search("/p", "client.rs (retry", 10).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn commands_are_listed_newest_first_with_their_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        history.begin(start("/p"));
+        history
+            .add("user", "command", "make test", &json!({"exit": 2}))
+            .unwrap();
+        history
+            .add("user", "capture", "git diff", &json!({"exit": 0}))
+            .unwrap();
+        history
+            .add("user", "message", "make it pass", &json!({}))
+            .unwrap();
+
+        let commands = history.commands("/p", "", 10).unwrap();
+        let texts: Vec<&str> = commands.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["git diff", "make test"]);
+        assert_eq!(commands[1].meta, json!({"exit": 2}));
+        assert_eq!(history.commands("/p", "make", 10).unwrap().len(), 1);
     }
 
     #[test]

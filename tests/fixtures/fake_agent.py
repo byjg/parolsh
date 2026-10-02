@@ -45,6 +45,7 @@ session takes that id. With --load-only, only `session/load` is offered, and
 it replays "replayed old answer" before answering. With --no-resume, neither.
 With --sessions-from N, new sessions are numbered from N (s<N>, ...).
 
+  mcp    replies the MCP servers the session got, as JSON: name and args
 
 Sessions offer config options `effort` (low/high), `fast` (boolean) and
 `model` (one/two).
@@ -238,6 +239,9 @@ def prompt(request):
                 "sessionUpdate": "async_task_state_update", "asyncTaskId": "b9",
                 "state": "completed"})))
         say(session_id, "started")
+    elif text == "mcp":
+        say(session_id, json.dumps([{"name": server.get("name"), "args": server.get("args")}
+                                    for server in session.get("mcp", [])]))
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "stuck":
@@ -298,7 +302,8 @@ def main():
             session_id = params.get("sessionId") or f"s{len(sessions) + first_session}"
             session = sessions[session_id] = {
                 "cwd": params["cwd"], "mode": "code" if kilo else "default",
-                "options": {"effort": "high", "model": "one", "fast": False}}
+                "options": {"effort": "high", "model": "one", "fast": False},
+                "mcp": params.get("mcpServers", [])}
             if method == "session/load":
                 say(session_id, "replayed old answer")
             result = {"configOptions": config_options(session)}

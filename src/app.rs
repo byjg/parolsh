@@ -18,7 +18,8 @@ use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::history::{History, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
-use crate::{config, hints, mention, project, setup, shell, shellenv, turn, ui};
+use crate::{config, hints, mcp, mention, project, setup, shell, shellenv, turn, ui};
+use agent_client_protocol::schema::v1::McpServer;
 
 const HELP: &str = "\
 Input:
@@ -85,6 +86,9 @@ pub struct App {
     interrupt: Arc<AtomicBool>,
     /// The terminal's title, while `run` runs on an ANSI terminal.
     title: Option<Title>,
+    /// The history database, when there is one: the agent gets it as an MCP
+    /// server.
+    history_db: Option<PathBuf>,
 }
 
 enum Flow {
@@ -105,12 +109,14 @@ impl App {
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
         let mut audit = Audit::new(config.audit_entries);
+        let mut history_db = None;
         if config.history_days > 0
             && let Some(path) = state_dir().map(|dir| dir.join("history.db"))
         {
             match History::open(&path, config.history_days) {
                 Ok(history) => {
                     audit = audit.with_history(history, config.save_commands);
+                    history_db = Some(path);
                     if config.save_commands {
                         notices.push(
                             "!commands are saved to the history · save_commands = false to stop"
@@ -143,6 +149,7 @@ impl App {
             printer: ExternalPrinter::new(PRINTER_LINES),
             interrupt: Arc::new(AtomicBool::new(false)),
             title: None,
+            history_db,
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -505,9 +512,10 @@ impl App {
         if self.active.as_deref() != Some(agent_name.as_str()) || self.agent.is_none() {
             self.switch_agent(&agent_name)?;
         }
+        let mcp = self.mcp_servers(false);
         let agent = self.agent.as_ref().with_context(no_agent)?;
         anyhow::ensure!(
-            agent.resume(agent_session, self.cwd.clone()),
+            agent.resume(agent_session, self.cwd.clone(), mcp),
             "the agent stopped"
         );
         match turn::wait_resumed(agent) {
@@ -736,7 +744,7 @@ impl App {
         match &self.agent {
             Some(agent)
                 if previous.as_ref() == self.active_agent()
-                    && agent.new_session(self.cwd.clone()) =>
+                    && agent.new_session(self.cwd.clone(), self.mcp_servers(false)) =>
             {
                 self.begin_session(false)
             }
@@ -838,7 +846,10 @@ impl App {
         // An agent that never ended a cancelled turn would only start the new
         // conversation after it: start the agent again instead.
         let restarted = match &self.agent {
-            Some(agent) => agent.abandoned().is_some() || !agent.new_session(self.cwd.clone()),
+            Some(agent) => {
+                agent.abandoned().is_some()
+                    || !agent.new_session(self.cwd.clone(), self.mcp_servers(private))
+            }
             None => true,
         };
         if restarted {
@@ -860,11 +871,21 @@ impl App {
     /// conversation in the current directory.
     fn start_agent(&mut self, private: bool) {
         self.agent = None;
+        let mcp = self.mcp_servers(private);
         let agent = self
             .active_agent()
-            .map(|agent| AgentHandle::start(agent, self.cwd.clone()));
+            .map(|agent| AgentHandle::start(agent, self.cwd.clone(), mcp));
         self.agent = agent;
         self.begin_session(private);
+    }
+
+    /// The MCP servers the agent gets in a conversation: the history of this
+    /// project, unless the conversation is private or there is no history.
+    fn mcp_servers(&self, private: bool) -> Vec<McpServer> {
+        match &self.history_db {
+            Some(db) if !private => mcp::server(db, &self.project_key()).into_iter().collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn active_agent(&self) -> Option<&Agent> {

@@ -8,6 +8,7 @@ mod hints;
 mod history;
 mod input;
 mod markdown;
+mod mcp;
 mod mention;
 mod project;
 mod setup;
@@ -40,10 +41,38 @@ struct Cli {
         allow_hyphen_values = true
     )]
     args: Vec<String>,
+
+    #[command(subcommand)]
+    tool: Option<Tool>,
+}
+
+#[derive(clap::Subcommand)]
+enum Tool {
+    /// The history of sessions as an MCP server on stdio, read-only, for the
+    /// agent: Parolsh gives it to the agent itself
+    #[command(hide = true)]
+    Mcp {
+        /// The history database
+        #[arg(long)]
+        db: std::path::PathBuf,
+        /// Only the sessions of this project
+        #[arg(long)]
+        project: String,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Some(Tool::Mcp { db, project }) = cli.tool {
+        return match mcp::serve(&db, &project) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("parolsh mcp: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if let Some(line) = cli.command {
         return match shell::passthrough(&line, &cli.args).status() {
