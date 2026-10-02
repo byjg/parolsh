@@ -2,10 +2,11 @@
 
 use anyhow::{Context, Result};
 use reedline::{
-    ColumnarMenu, Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    ColumnarMenu, Emacs, ExternalPrinter, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder,
+    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use crate::audit::{self, Actor, Audit};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::input::{Input, Mode, SharedMode, route};
+use crate::title::Title;
 use crate::{config, hints, project, setup, shell, shellenv, turn, ui};
 
 const HELP: &str = "\
@@ -69,6 +71,12 @@ pub struct App {
     last_duration: Duration,
     /// What happened in this run, for `#audit`.
     audit: Audit,
+    /// Prints what the agent does between turns above the prompt.
+    printer: ExternalPrinter<String>,
+    /// Makes the prompt return, for the agent's questions between turns.
+    interrupt: Arc<AtomicBool>,
+    /// The terminal's title, while `run` runs on an ANSI terminal.
+    title: Option<Title>,
 }
 
 enum Flow {
@@ -104,6 +112,9 @@ impl App {
             last_status: 0,
             last_duration: Duration::ZERO,
             audit,
+            printer: ExternalPrinter::new(PRINTER_LINES),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            title: None,
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -118,7 +129,10 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         // Bracketed paste: a pasted text with line breaks is one input, not
         // one Enter per line.
-        let mut editor = Reedline::create().use_bracketed_paste(true);
+        let mut editor = Reedline::create()
+            .use_bracketed_paste(true)
+            .with_external_printer(self.printer.clone())
+            .with_break_signal(self.interrupt.clone());
         if ui::is_ansi() {
             // Tips while typing: the color and a hint of where the line goes.
             editor = editor
@@ -142,11 +156,15 @@ impl App {
         for notice in self.notices.drain(..) {
             println!("{notice}");
         }
+        self.title = Title::start(self.place());
 
         loop {
-            self.report_agent_errors();
+            if let Some(title) = &self.title {
+                title.set_place(self.place());
+                title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
+            }
             let prompt = self.prompt();
-            match editor.read_line(&prompt)? {
+            match self.read_line(&mut editor, &prompt)? {
                 Signal::Success(line) => {
                     if let Flow::Exit = self.handle(route(&line, self.mode.get())) {
                         return Ok(());
@@ -159,8 +177,75 @@ impl App {
         }
     }
 
+    /// Reads a line, showing meanwhile what the agent does between turns.
+    /// The agent's questions are answered after the prompt returns.
+    fn read_line(&mut self, editor: &mut Reedline, prompt: &ui::Prompt) -> Result<Signal> {
+        let Some(agent) = &self.agent else {
+            return Ok(editor.read_line(prompt)?);
+        };
+        let display = self.display();
+        let stop = AtomicBool::new(false);
+        let repaint_signal = editor.repaint_signal();
+        let repaint = move || repaint_signal.request_repaint();
+        let (signal, watched) = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| {
+                turn::watch(
+                    agent,
+                    display,
+                    &self.printer,
+                    &repaint,
+                    &stop,
+                    &self.interrupt,
+                    &mut self.audit,
+                )
+            });
+            let signal = editor.read_line(prompt);
+            stop.store(true, Ordering::SeqCst);
+            (signal, watcher.join().unwrap_or_default())
+        });
+        // A question that came with the Enter key would break the next prompt.
+        self.interrupt.store(false, Ordering::SeqCst);
+
+        let late = std::iter::from_fn(|| self.printer.get_line());
+        let lines: Vec<String> = late.chain(watched.lines).collect();
+        if !lines.is_empty() || watched.request.is_some() || watched.stopped {
+            // Below the line the prompt was on.
+            println!();
+        }
+        for line in lines {
+            println!("{line}");
+        }
+        if let Some(request) = watched.request {
+            turn::answer(request, &mut self.audit);
+        }
+        if watched.stopped {
+            self.audit.add(Actor::Parolsh, "the agent stopped");
+            eprintln!("parolsh: the agent stopped. Run #new to start it again.");
+            self.agent = None;
+        }
+        Ok(signal?)
+    }
+
+    fn display(&self) -> turn::Display {
+        turn::Display {
+            thinking: self.config.thinking,
+            markdown: self.config.markdown,
+            links: self.config.links,
+        }
+    }
+
+    /// The agent's directory, for the title until the agent gives one.
+    fn place(&self) -> String {
+        ui::short_path(&self.cwd, home().as_deref())
+    }
+
     fn handle(&mut self, input: Input) -> Flow {
         let started = Instant::now();
+        // Commands may set their own title.
+        let _held = match &input {
+            Input::Shell(_) | Input::Bash | Input::Share(_) => self.title.as_ref().map(Title::hold),
+            _ => None,
+        };
         let status = match input {
             Input::Empty => return Flow::Continue,
             Input::Agent(text) => self.ask(text),
@@ -228,7 +313,10 @@ impl App {
         if fell_back {
             self.prompt_override = Some(PromptStyle::Parolsh);
         }
-        prompt
+        match &self.agent {
+            Some(agent) => prompt.with_background(agent.activity(), ansi),
+            None => prompt,
+        }
     }
 
     fn options_command(&self, args: &str) -> Result<()> {
@@ -523,12 +611,7 @@ impl App {
         );
         let mut blocks: Vec<String> = self.shared.drain(..).map(|s| s.block()).collect();
         blocks.push(text);
-        let display = turn::Display {
-            thinking: self.config.thinking,
-            markdown: self.config.markdown,
-            links: self.config.links,
-        };
-        match turn::run(agent, blocks, display, &mut self.audit) {
+        match turn::run(agent, blocks, self.display(), &mut self.audit) {
             turn::Outcome::Finished => 0,
             turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
@@ -555,15 +638,6 @@ impl App {
             println!("Started a new conversation.");
         } else {
             eprintln!("parolsh: {}", no_agent());
-        }
-    }
-
-    fn report_agent_errors(&mut self) {
-        if let Some(agent) = &self.agent
-            && !turn::drain(agent)
-        {
-            eprintln!("parolsh: the agent stopped. Run #new to start it again.");
-            self.agent = None;
         }
     }
 
@@ -710,6 +784,9 @@ impl Shared {
 }
 
 /// Where to go when no agent is configured.
+/// Lines the prompt holds for printing; the agent's lines beyond wait.
+const PRINTER_LINES: usize = 64;
+
 fn no_agent() -> String {
     match config::global_path() {
         Some(path) => format!(

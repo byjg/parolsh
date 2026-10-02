@@ -1,7 +1,8 @@
 //! Showing one agent turn: streamed text, tool calls and permission prompts.
 
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind, StopReason};
-use std::collections::HashMap;
+use reedline::ExternalPrinter;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,8 +63,7 @@ pub fn run(
         return Outcome::AgentStopped;
     };
     let started = Instant::now();
-    // The audit entry of each tool call, updated when it finishes.
-    let mut tools: HashMap<String, (usize, ToolEntry)> = HashMap::new();
+    let mut tools = ToolAudit::default();
     INTERRUPTED.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
@@ -73,6 +73,7 @@ pub fn run(
     }
     out.show();
     let mut cancelled: Option<Instant> = None;
+    let activity = agent.activity();
 
     loop {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
@@ -87,7 +88,8 @@ pub fn run(
             return give_up(agent, turn, &mut out, audit);
         }
 
-        let event = match agent.events.recv_timeout(Duration::from_millis(100)) {
+        out.background(activity.get().tasks);
+        let event = match agent.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => {
                 out.tick();
@@ -125,14 +127,7 @@ pub fn run(
                 kind,
                 files,
             } => {
-                let entry = ToolEntry {
-                    kind,
-                    title: title.clone(),
-                    files,
-                    finished: None,
-                };
-                let index = audit.add(Actor::Agent, entry.to_string());
-                tools.insert(id.clone(), (index, entry));
+                tools.start(audit, id.clone(), title.clone(), kind, files);
                 out.tool(id, title);
             }
             Event::ToolUpdate {
@@ -140,56 +135,15 @@ pub fn run(
                 title,
                 finished,
             } => {
-                if let Some((index, entry)) = tools.get_mut(&id) {
-                    if let Some(title) = &title {
-                        entry.title = title.clone();
-                    }
-                    entry.finished = finished.or(entry.finished);
-                    audit.replace(*index, entry.to_string());
-                }
+                tools.update(audit, &id, title.as_deref(), finished);
                 out.tool_update(&id, title, finished);
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
             Event::Activity => {}
-            Event::Permission {
-                title,
-                details,
-                options,
-                reply,
-            } => {
+            request @ (Event::Permission { .. } | Event::Form { .. }) => {
                 out.hide();
                 out.end_line();
-                audit.add(
-                    Actor::Agent,
-                    format!("asks: {}", audit::excerpt(&title, 120)),
-                );
-                let choice = ask_permission(&title, &details, &options);
-                let answer = choice
-                    .as_ref()
-                    .and_then(|id| options.iter().find(|option| &option.option_id == id))
-                    .map_or("no choice".to_string(), |option| option.name.clone());
-                audit.add(Actor::User, format!("→ {answer}"));
-                let _ = reply.send(choice);
-                out.show();
-            }
-            Event::Form { form, reply } => {
-                out.hide();
-                out.end_line();
-                let questions = form.fields.len();
-                audit.add(
-                    Actor::Agent,
-                    format!("asks {questions} question(s): {}", form.message),
-                );
-                let answers = ask_form(&form);
-                audit.add(
-                    Actor::User,
-                    match &answers {
-                        None => "→ cancelled",
-                        Some(answers) if answers.is_empty() => "→ declined",
-                        Some(_) => "→ answered",
-                    },
-                );
-                let _ = reply.send(answers);
+                answer(request, audit);
                 out.show();
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
@@ -236,6 +190,83 @@ fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audi
     Outcome::Finished
 }
 
+/// Asks the user the agent's permission request or form, and sends the
+/// answer back. Other events are ignored.
+pub fn answer(request: Event, audit: &mut Audit) {
+    match request {
+        Event::Permission {
+            title,
+            details,
+            options,
+            reply,
+        } => {
+            audit.add(
+                Actor::Agent,
+                format!("asks: {}", audit::excerpt(&title, 120)),
+            );
+            let choice = ask_permission(&title, &details, &options);
+            let answer = choice
+                .as_ref()
+                .and_then(|id| options.iter().find(|option| &option.option_id == id))
+                .map_or("no choice".to_string(), |option| option.name.clone());
+            audit.add(Actor::User, format!("→ {answer}"));
+            let _ = reply.send(choice);
+        }
+        Event::Form { form, reply } => {
+            let questions = form.fields.len();
+            audit.add(
+                Actor::Agent,
+                format!("asks {questions} question(s): {}", form.message),
+            );
+            let answers = ask_form(&form);
+            audit.add(
+                Actor::User,
+                match &answers {
+                    None => "→ cancelled",
+                    Some(answers) if answers.is_empty() => "→ declined",
+                    Some(_) => "→ answered",
+                },
+            );
+            let _ = reply.send(answers);
+        }
+        _ => {}
+    }
+}
+
+/// The audit entry of each tool call, updated when it finishes.
+#[derive(Default)]
+struct ToolAudit(HashMap<String, (usize, ToolEntry)>);
+
+impl ToolAudit {
+    fn start(
+        &mut self,
+        audit: &mut Audit,
+        id: String,
+        title: String,
+        kind: String,
+        files: Vec<PathBuf>,
+    ) {
+        let entry = ToolEntry {
+            kind,
+            title,
+            files,
+            finished: None,
+        };
+        let index = audit.add(Actor::Agent, entry.to_string());
+        self.0.insert(id, (index, entry));
+    }
+
+    fn update(&mut self, audit: &mut Audit, id: &str, title: Option<&str>, finished: Option<bool>) {
+        if let Some((index, entry)) = self.0.get_mut(id) {
+            if let Some(title) = title {
+                entry.title = title.to_string();
+            }
+            entry.finished = finished.or(entry.finished);
+            audit.replace(*index, entry.to_string());
+        }
+    }
+}
+
 /// A tool call as `#audit` shows it: `edit: Write notes.txt [notes.txt] ·
 /// completed`.
 struct ToolEntry {
@@ -272,7 +303,7 @@ impl std::fmt::Display for ToolEntry {
 /// Prints notices and errors that arrived while no turn was running, such as
 /// an agent that failed to start. False when the agent stopped.
 pub fn drain(agent: &AgentHandle) -> bool {
-    while let Ok(event) = agent.events.try_recv() {
+    while let Some(event) = agent.try_recv() {
         match event {
             Event::Notice(message) => eprintln!("parolsh: {message}"),
             Event::Error(message) => {
@@ -286,6 +317,198 @@ pub fn drain(agent: &AgentHandle) -> bool {
         }
     }
     true
+}
+
+/// How long the agent stays quiet before the line it is writing between turns
+/// is shown unfinished.
+const QUIET: Duration = Duration::from_millis(300);
+
+/// What `watch` leaves to the input loop, once the prompt is gone.
+#[derive(Default)]
+pub struct Watched {
+    /// Lines the prompt was gone before printing, in order.
+    pub lines: Vec<String>,
+    /// A permission request or form to answer: `answer` it.
+    pub request: Option<Event>,
+    /// The agent stopped.
+    pub stopped: bool,
+}
+
+/// Shows what the agent does between turns, while the prompt waits for input:
+/// a background task the agent started may end and wake it up. Its text and
+/// tool calls are printed above the prompt through `printer`, until `stop` is
+/// set. A permission request, a form or the agent stopping need the prompt
+/// gone: `watch` sets `interrupt` (the prompt's break signal) and returns.
+/// While background tasks run, `repaint` redraws the prompt every second, for
+/// their time on the right.
+pub fn watch(
+    agent: &AgentHandle,
+    display: Display,
+    printer: &ExternalPrinter<String>,
+    repaint: &(dyn Fn() + Sync),
+    stop: &AtomicBool,
+    interrupt: &AtomicBool,
+    audit: &mut Audit,
+) -> Watched {
+    let ansi = ui::is_ansi();
+    let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
+    let mut lines = Lines::new(ansi, markdown);
+    let mut tools = ToolAudit::default();
+    let mut watched = Watched::default();
+    let mut heard = Instant::now();
+    let sender = printer.sender();
+    let activity = agent.activity();
+    let mut tasks = 0;
+    let mut painted = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        let running = activity.get().tasks;
+        if running != tasks || (running > 0 && painted.elapsed() >= Duration::from_secs(1)) {
+            tasks = running;
+            painted = Instant::now();
+            repaint();
+        }
+        // The printer holds a few lines: the rest wait for the prompt to
+        // print those.
+        while let Some(line) = lines.ready.pop_front() {
+            if let Err(full) = sender.try_send(line) {
+                lines.ready.push_front(full.into_inner());
+                break;
+            }
+        }
+        let event = match agent.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => {
+                if heard.elapsed() >= QUIET {
+                    lines.flush();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                watched.stopped = true;
+                interrupt.store(true, Ordering::SeqCst);
+                break;
+            }
+        };
+        heard = Instant::now();
+        // Until an abandoned turn ends, what arrives is still its own.
+        let stale = agent.abandoned().is_some();
+        match event {
+            Event::TurnEnd(id, _) | Event::TurnFailed(id, _) => {
+                agent.ended(id);
+            }
+            // Dropping the reply cancels the request.
+            Event::Text(_)
+            | Event::Tool { .. }
+            | Event::ToolUpdate { .. }
+            | Event::Permission { .. }
+            | Event::Form { .. }
+                if stale => {}
+            Event::Text(text) => lines.text(&text),
+            Event::Tool {
+                id,
+                title,
+                kind,
+                files,
+            } => {
+                tools.start(audit, id, title.clone(), kind, files);
+                lines.line(format!("• {title}"));
+            }
+            Event::ToolUpdate {
+                id,
+                title,
+                finished,
+            } => tools.update(audit, &id, title.as_deref(), finished),
+            Event::Notice(message) => lines.line(format!("parolsh: {message}")),
+            Event::Error(message) => {
+                lines.line(format!("parolsh: {message}"));
+                watched.stopped = true;
+                interrupt.store(true, Ordering::SeqCst);
+                break;
+            }
+            request @ (Event::Permission { .. } | Event::Form { .. }) => {
+                watched.request = Some(request);
+                interrupt.store(true, Ordering::SeqCst);
+                break;
+            }
+            // The status line is the prompt's now: reasoning and plans are
+            // not shown between turns.
+            Event::Thought(_) | Event::Plan { .. } | Event::Activity => {}
+        }
+    }
+    lines.flush();
+    watched.lines = lines.ready.into();
+    watched
+}
+
+/// The agent's text between turns, cut into the lines printed above the
+/// prompt. The first line comes after a header saying where it comes from.
+struct Lines {
+    ansi: bool,
+    markdown: Option<Markdown>,
+    /// The start of the line being written.
+    partial: String,
+    /// Complete lines, to print.
+    ready: VecDeque<String>,
+    headed: bool,
+}
+
+impl Lines {
+    fn new(ansi: bool, markdown: Option<Markdown>) -> Self {
+        Self {
+            ansi,
+            markdown,
+            partial: String::new(),
+            ready: VecDeque::new(),
+            headed: false,
+        }
+    }
+
+    fn text(&mut self, text: &str) {
+        let text = match &mut self.markdown {
+            Some(markdown) => markdown.push(text),
+            None => text.to_string(),
+        };
+        self.partial.push_str(&text);
+        while let Some(end) = self.partial.find('\n') {
+            let line = self.partial[..end].to_string();
+            self.partial.drain(..=end);
+            self.push(line);
+        }
+    }
+
+    /// A line of its own, after the text written so far.
+    fn line(&mut self, line: String) {
+        self.flush();
+        self.push(line);
+    }
+
+    /// Makes the line being written ready, unfinished.
+    fn flush(&mut self) {
+        let held_back = self.markdown.as_ref().is_some_and(Markdown::has_pending);
+        if self.partial.is_empty() && !held_back {
+            return;
+        }
+        if let Some(markdown) = &mut self.markdown {
+            let rest = markdown.finish();
+            self.partial.push_str(&rest);
+        }
+        let line = std::mem::take(&mut self.partial);
+        self.push(line);
+    }
+
+    fn push(&mut self, line: String) {
+        if !self.headed {
+            self.headed = true;
+            let header = "(the agent, between turns)";
+            self.ready.push_back(if self.ansi {
+                ui::dim(header)
+            } else {
+                header.to_string()
+            });
+        }
+        self.ready.push_back(line);
+    }
 }
 
 fn describe(reason: StopReason) -> Option<&'static str> {
@@ -429,6 +652,8 @@ struct Status {
     /// The activity is Parolsh's own ("Cancelling…"): the agent's events do
     /// not replace it.
     pinned: bool,
+    /// The agent's background tasks running.
+    background: usize,
 }
 
 struct Tool {
@@ -457,6 +682,7 @@ impl Status {
             tools: 0,
             shown: false,
             pinned: false,
+            background: 0,
         }
     }
 
@@ -630,6 +856,13 @@ impl Output {
         self.show();
     }
 
+    /// How many background tasks the agent runs, shown from the next redraw.
+    fn background(&mut self, tasks: usize) {
+        if let Some(status) = &mut self.status {
+            status.background = tasks;
+        }
+    }
+
     /// The agent sent something: it is not quiet.
     fn heard(&mut self) {
         if let Some(status) = &mut self.status {
@@ -696,6 +929,7 @@ impl Output {
                 status.frame,
                 &status.activity(),
                 status.started.elapsed(),
+                status.background,
                 status.heard.elapsed(),
                 ui::width(),
             );
@@ -822,6 +1056,56 @@ mod tests {
         entry.files.clear();
         entry.finished = Some(false);
         assert_eq!(entry.to_string(), "Write notes · failed");
+    }
+
+    fn ready(lines: &Lines) -> Vec<&str> {
+        lines.ready.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn text_between_turns_is_printed_by_whole_lines_after_a_header() {
+        let mut lines = Lines::new(false, None);
+        lines.text("background ");
+        assert!(lines.ready.is_empty());
+
+        lines.text("done\nall ");
+        lines.text("good");
+        assert_eq!(
+            ready(&lines),
+            ["(the agent, between turns)", "background done"]
+        );
+
+        lines.flush();
+        assert_eq!(ready(&lines)[2..], ["all good"]);
+        lines.flush();
+        assert_eq!(lines.ready.len(), 3);
+    }
+
+    #[test]
+    fn a_tool_call_between_turns_ends_the_line_being_written() {
+        let mut lines = Lines::new(false, None);
+        lines.text("Checking");
+        lines.line("• Read log".to_string());
+
+        assert_eq!(
+            ready(&lines),
+            ["(the agent, between turns)", "Checking", "• Read log"]
+        );
+    }
+
+    #[test]
+    fn markdown_held_back_between_turns_is_printed_when_the_agent_pauses() {
+        let mut lines = Lines::new(false, Some(Markdown::default()));
+        lines.text("[docs](https://exa");
+        assert!(lines.ready.is_empty());
+
+        lines.flush();
+        assert_eq!(lines.ready.len(), 2, "{:?}", lines.ready);
+        assert!(
+            lines.ready[1].contains("[docs](https://exa"),
+            "{:?}",
+            lines.ready
+        );
     }
 
     #[test]

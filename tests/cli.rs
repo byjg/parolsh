@@ -295,18 +295,32 @@ fn with_fake_agent_flags(extra: &str, flags: &str, lines: &[&str], term: &str) -
 /// Runs Parolsh with `config` and `flags`, and returns the screen after
 /// typing `lines`.
 fn screen(config: &str, flags: &str, lines: &[&str], term: &str) -> String {
+    terminal_output(config, flags, lines, term, false)
+}
+
+/// What Parolsh wrote to the terminal, escape sequences included.
+fn raw_output(lines: &[&str]) -> String {
+    let config = format!(
+        "default_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
+    );
+    terminal_output(&config, "", lines, "xterm-256color", true)
+}
+
+fn terminal_output(config: &str, flags: &str, lines: &[&str], term: &str, raw: bool) -> String {
     let config = config_home(config);
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(JOB_SHELL)
         .arg(format!("{} {flags}", env!("CARGO_BIN_EXE_parolsh")))
         .args(lines)
         .arg("#exit")
         .env("TERM", term)
         .env("XDG_CONFIG_HOME", config.path())
-        .env("XDG_STATE_HOME", config.path())
-        .output()
-        .unwrap();
-    String::from_utf8(output.stdout).unwrap()
+        .env("XDG_STATE_HOME", config.path());
+    if raw {
+        command.env("JOB_SHELL_RAW", "1");
+    }
+    String::from_utf8(command.output().unwrap().stdout).unwrap()
 }
 
 /// `#options` lists the agent's options with the current value marked, and
@@ -592,4 +606,69 @@ fn audit_shows_what_happened_in_this_run() {
             .unwrap_or_else(|| panic!("missing or out of order: {line}\n{audit}"));
         rest = &rest[at + line.len()..];
     }
+}
+
+/// What the agent does after its turn ended (a background task woke it up)
+/// is printed above the prompt, and its tool calls are in `#audit`.
+#[test]
+fn the_agent_is_heard_between_turns() {
+    let screen = with_fake_agent("", &["later", "wait:2", "#audit"]);
+
+    let between = &screen[screen.find("(the agent, between turns)").expect(&screen)..];
+    for line in ["• Read log", "background done", "all good"] {
+        assert!(between.contains(line), "missing {line}\n{screen}");
+    }
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    assert!(audit.contains("AGENT    Read log"), "{audit}");
+}
+
+/// A permission request between turns takes the prompt, is answered, and
+/// the prompt comes back.
+#[test]
+fn the_agent_can_ask_between_turns() {
+    let screen = with_fake_agent("", &["later perm", "wait:1", "1", "wait:1", "#audit"]);
+
+    assert!(
+        screen.contains("Permission requested: Writing to notes.txt"),
+        "{screen}"
+    );
+    assert!(screen.contains("chose:allow-once"), "{screen}");
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    assert!(audit.contains("USER     → Allow once"), "{audit}");
+}
+
+/// The terminal's title names the conversation (the directory before the
+/// agent titles it) and, while background tasks run, spins and counts them.
+/// The prompt shows them on the right with their time. The previous title is
+/// put back on exit.
+#[test]
+fn background_tasks_show_in_the_title_and_the_prompt() {
+    let output = raw_output(&["bg", "wait:4"]);
+    let titles: Vec<&str> = output
+        .split("\x1b]2;")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('\x07').map(|(title, _)| title))
+        .collect();
+
+    let saved = output.find("\x1b[22;0t").expect("title not saved");
+    assert!(saved < output.find("\x1b]2;").unwrap(), "{output:?}");
+    // The directory comes first; the end of a path is the same everywhere.
+    assert!(
+        titles[0].starts_with("parolsh · ") && titles[0].contains('/'),
+        "{titles:?}"
+    );
+    let running = titles
+        .iter()
+        .position(|title| title.ends_with(" 1 bg · parolsh · Fake background work"))
+        .expect("no title with the running task");
+    // Then the task ends: no spinner, no count.
+    assert_eq!(
+        titles.last(),
+        Some(&"parolsh · Fake background work"),
+        "{titles:?}"
+    );
+    assert!(running < titles.len() - 1);
+    assert!(output.contains("⧗ 1 bg · 0:0"), "{output:?}");
+    let restored = output.rfind("\x1b[23;0t").expect("title not restored");
+    assert!(restored > output.rfind("\x1b]2;").unwrap());
 }

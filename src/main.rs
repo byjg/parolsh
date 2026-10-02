@@ -11,6 +11,7 @@ mod project;
 mod setup;
 mod shell;
 mod shellenv;
+mod title;
 mod turn;
 mod ui;
 
