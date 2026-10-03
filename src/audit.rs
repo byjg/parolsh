@@ -391,19 +391,24 @@ pub fn stored_lines(entries: &[Stored], width: usize) -> Vec<String> {
     entries
         .iter()
         .filter_map(|entry| {
-            let actor = Actor::from_name(&entry.actor)?;
-            let kind = Kind::from_name(&entry.kind)?;
-            (kind != Kind::Thought).then(|| {
-                let record = Record {
-                    actor,
-                    kind,
-                    text: entry.text.clone(),
-                    meta: entry.meta.clone(),
-                };
-                cut(&line(entry.at, actor, &clean(&record.line())), width)
-            })
+            let record = stored_record(entry).filter(|record| record.kind != Kind::Thought)?;
+            Some(cut(
+                &line(entry.at, record.actor, &clean(&record.line())),
+                width,
+            ))
         })
         .collect()
+}
+
+/// An entry of the history as the record it was written from; `None` for a
+/// kind or an actor this version does not know.
+pub fn stored_record(entry: &Stored) -> Option<Record> {
+    Some(Record {
+        actor: Actor::from_name(&entry.actor)?,
+        kind: Kind::from_name(&entry.kind)?,
+        text: entry.text.clone(),
+        meta: entry.meta.clone(),
+    })
 }
 
 fn line(at: Duration, actor: Actor, text: &str) -> String {

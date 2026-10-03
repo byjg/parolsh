@@ -132,6 +132,8 @@ pub struct Config {
     pub agents: BTreeMap<String, Agent>,
     /// How many entries `#audit` keeps; 0 keeps none.
     pub audit_entries: usize,
+    /// How many exchanges `#redraw` shows again.
+    pub redraw_exchanges: usize,
     /// Days an idle session stays in the history; 0 keeps no history.
     pub history_days: u32,
     /// Also save `!command` lines in the history.
@@ -154,6 +156,7 @@ struct ConfigFile {
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
     audit_entries: Option<usize>,
+    redraw_exchanges: Option<usize>,
     history_days: Option<u32>,
     save_commands: Option<bool>,
 }
@@ -216,6 +219,7 @@ impl ConfigFile {
         self.shell_env = over.shell_env.or(self.shell_env);
         self.default_agent = over.default_agent.or(self.default_agent);
         self.audit_entries = over.audit_entries.or(self.audit_entries);
+        self.redraw_exchanges = over.redraw_exchanges.or(self.redraw_exchanges);
         for (name, agent) in over.agents {
             let base = self.agents.entry(name).or_default();
             base.mode = agent.mode.or(base.mode.take());
@@ -295,6 +299,7 @@ impl Config {
             default_agent: file.default_agent,
             agents,
             audit_entries: file.audit_entries.unwrap_or(1000),
+            redraw_exchanges: file.redraw_exchanges.unwrap_or(5),
             history_days: file.history_days.unwrap_or(90),
             save_commands: file.save_commands.unwrap_or(false),
         })
@@ -342,6 +347,7 @@ mod tests {
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
         assert_eq!(config.audit_entries, 1000);
+        assert_eq!(config.redraw_exchanges, 5);
         assert_eq!(config.history_days, 90);
         assert!(!config.save_commands);
     }

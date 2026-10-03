@@ -477,7 +477,9 @@ reading, apart from the output of your commands:
   marked again.
 - Lines break between words at the width of your terminal, never in the
   middle of a word. The width is read as the text arrives, so after you resize
-  the window the next lines follow it; what is already printed stays as it is.
+  the window the next lines follow it; what is already printed stays as it is
+  (`Ctrl+L` shows the conversation again at the new width, see
+  [Showing the conversation again](input-routing.md#showing-the-conversation-again)).
 - Code blocks and table rows are not broken, and a list item wraps under its
   own text.
 - Only the word being received is held back, until its end arrives.

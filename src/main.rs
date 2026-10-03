@@ -11,6 +11,7 @@ mod markdown;
 mod mcp;
 mod mention;
 mod project;
+mod replay;
 mod setup;
 mod shell;
 mod shellenv;

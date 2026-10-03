@@ -595,14 +595,14 @@ impl Lines {
 
 /// The columns the agent's text may take: the terminal's, less one. A line
 /// that fills the terminal makes some of them add a blank line.
-fn text_width() -> usize {
+pub fn text_width() -> usize {
     ui::width().saturating_sub(1)
 }
 
 /// A chunk of the agent's text, rendered and laid out. It goes line by line:
 /// the markdown says after each whether it is in a code block, which is not
 /// wrapped.
-fn laid_out(wrap: &mut Wrap, markdown: &mut Option<Markdown>, text: &str) -> String {
+pub fn laid_out(wrap: &mut Wrap, markdown: &mut Option<Markdown>, text: &str) -> String {
     let mut out = String::new();
     for piece in text.split_inclusive('\n') {
         match markdown {

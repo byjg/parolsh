@@ -250,6 +250,7 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
+| `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works) |
 
 ## `#audit`
@@ -339,7 +340,38 @@ Resumed session 11: the agent remembers that conversation.
 ```
 
 From the command line, `parolsh --resume 11` starts in that session, and
-`parolsh --continue` in the last one of the project.
+`parolsh --continue` in the last one of the project. Either way, Parolsh first
+shows the session's last exchanges, so you see where it was.
+
+### Showing the conversation again
+
+`#redraw`, or `Ctrl+L`, clears the terminal and prints the last exchanges of
+the conversation again from the history, laid out for the terminal's width as
+it is now:
+
+```text
+[claude] ~/projects/wallet ✦ why is the api container restarting?
+• read: Read docker-compose.yml [docker-compose.yml] · completed
+✦ The container exits because DATABASE_URL is not set: the entrypoint reads
+  it before the compose file's env_file is loaded.
+
+turn ended · 18s
+[claude] ~/projects/wallet ✦
+```
+
+- Use it after resizing the window: what was already printed is not laid out
+  again by itself (see [During a turn](agents.md#during-a-turn)).
+- An exchange is your message and what followed it. `#redraw` shows the last
+  5, `#redraw 2` the last 2, and `redraw_exchanges` in the
+  [configuration](configuration.md#keys) changes the 5.
+- It shows your messages, the answers, and one line for each tool call,
+  question, answer of yours and `!+` output (its size, not its text).
+- **The whole terminal is cleared, its scrollback too.** The output of your
+  earlier `!commands` goes with it: Parolsh does not keep it and cannot print
+  it again.
+- `Ctrl+L` keeps the line you are typing.
+- In a conversation that is not saved (`#new private`, or `history_days = 0`)
+  there is nothing to show again: it only clears.
 
 The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
 removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh

@@ -1011,3 +1011,87 @@ fn the_answer_is_marked_wrapped_and_set_apart() {
     }
     assert!(lines[end - 1].ends_with("last week"), "{answer}");
 }
+
+const WIPE: &str = "\x1b[H\x1b[2J\x1b[3J";
+
+/// What the terminal shows after the last wipe, without escape sequences.
+fn after_wipe(output: &str) -> String {
+    let after = &output[output.rfind(WIPE).expect("not wiped") + WIPE.len()..];
+    let mut plain = String::new();
+    let mut chars = after.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+}
+
+/// `#redraw` wipes the terminal and shows the last exchanges again, from the
+/// history; `#redraw 1` only the last. `Ctrl+L` does the same and keeps the
+/// line being typed.
+#[test]
+fn redraw_wipes_and_shows_the_last_exchanges_again() {
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "perm", "1", "#redraw"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+
+    let expected = [
+        "✦ first question\n",
+        "• Read README.md\n",
+        "] first question\n",
+        "✦ perm\n",
+        "asks: Writing to notes.txt\n",
+        "→ Allow once\n",
+        "✦ chose:allow-once\n",
+    ];
+    let mut rest = shown.as_str();
+    for line in expected {
+        let at = rest
+            .find(line)
+            .unwrap_or_else(|| panic!("missing or out of order: {line:?}\n{shown}"));
+        rest = &rest[at + line.len()..];
+    }
+
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "second question", "#redraw 1"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+    assert!(shown.contains("✦ second question\n"), "{shown}");
+    assert!(!shown.contains("first question"), "{shown}");
+
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "key:half typed", "key:\\x0c", "key:\\r"];
+    let output = run_in(home.path(), "", &lines, "xterm-256color", true);
+    assert_eq!(output.matches(WIPE).count(), 1, "{output:?}");
+    let shown = after_wipe(&output);
+    assert!(shown.contains("✦ first question\n"), "{shown}");
+    // The line typed before Ctrl+L is still there, and Enter sends it.
+    assert!(shown.contains("] half typed\n"), "{shown}");
+}
+
+/// A conversation that is not saved has nothing to show again: `#redraw`
+/// only wipes.
+#[test]
+fn redraw_of_a_private_conversation_only_wipes() {
+    let home = fake_agent_home_with(&[]);
+    let lines = ["#new private", "secret plan", "#redraw"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+
+    assert!(!shown.contains("secret"), "{shown}");
+}
+
+/// Going back to a session shows where it was: its last exchanges, before
+/// the prompt.
+#[test]
+fn a_resumed_session_shows_its_last_exchanges() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["what is the plan"], "dumb", false);
+
+    let screen = run_in(home.path(), "--continue", &[], "dumb", false);
+    let at = screen.find("Resumed session 1").expect(&screen);
+    let before = &screen[..at];
+    assert!(before.contains("✦ what is the plan\n"), "{screen}");
+    assert!(before.contains("] what is the plan\n"), "{screen}");
+}

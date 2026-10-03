@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use reedline::{
     ColumnarMenu, Emacs, ExternalPrinter, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder,
-    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    Prompt as _, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,9 @@ use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::history::{History, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
-use crate::{config, hints, mcp, mention, project, setup, shell, shellenv, turn, ui, version};
+use crate::{
+    config, hints, mcp, mention, project, replay, setup, shell, shellenv, turn, ui, version,
+};
 use agent_client_protocol::schema::v1::McpServer;
 
 const HELP: &str = "\
@@ -49,6 +52,7 @@ Control commands:
   #sessions       the earlier sessions of this project, from the history
   #forget [n]     remove a session from the history; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex)
+  #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #exit           leave Parolsh";
 
 pub struct App {
@@ -233,7 +237,8 @@ impl App {
             }
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
-                Signal::Success(line) => {
+                // A key bound to a command (Ctrl+L) is a line like any other.
+                Signal::Success(line) | Signal::HostCommand(line) => {
                     if let Flow::Exit = self.handle(route(&line, self.mode.get())) {
                         return Ok(());
                     }
@@ -572,7 +577,58 @@ impl App {
         if let Some(history) = self.audit.history_mut() {
             history.resume(&project, id)?;
         }
+        // Where the conversation was, before going on.
+        self.show_exchanges(self.config.redraw_exchanges)?;
         println!("Resumed session {id}: the agent remembers that conversation.");
+        Ok(())
+    }
+
+    /// `#redraw [n]`: clears the terminal, scrollback included, and shows the
+    /// last `n` exchanges of the conversation again, laid out at the
+    /// terminal's width. Only clears when the conversation is not saved.
+    fn redraw_command(&mut self, args: &str) -> Result<()> {
+        let count = match args {
+            "" => self.config.redraw_exchanges,
+            number => number
+                .parse()
+                .ok()
+                .filter(|&count: &usize| count > 0)
+                .with_context(|| format!("`{number}` is not a number of exchanges"))?,
+        };
+        if ui::is_ansi() {
+            print!("{}", replay::WIPE);
+        }
+        self.show_exchanges(count)
+    }
+
+    /// Prints the last `count` exchanges of the current session from the
+    /// history; nothing when it is not saved.
+    fn show_exchanges(&mut self, count: usize) -> Result<()> {
+        let project = self.project_key();
+        let entries = match self.audit.history() {
+            Some(history) => match history.current() {
+                Some(id) => history.entries(&project, id)?.unwrap_or_default(),
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let prompt = self.prompt();
+        let prompt = format!(
+            "{}{}",
+            prompt.render_prompt_left(),
+            prompt.render_prompt_indicator(PromptEditMode::Default)
+        );
+        print!(
+            "{}",
+            replay::render(
+                replay::last_exchanges(&entries, count),
+                &prompt,
+                self.display(),
+                ui::is_ansi(),
+                turn::text_width(),
+            )
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         Ok(())
     }
 
@@ -676,11 +732,11 @@ impl App {
             "config" => self.config_command(args),
             "options" => self.options_command(args),
             // Not recorded: looking changes nothing.
-            "audit" | "sessions" => {
-                let result = if name == "audit" {
-                    self.audit_command(args)
-                } else {
-                    self.sessions_command()
+            "audit" | "sessions" | "redraw" => {
+                let result = match name {
+                    "audit" => self.audit_command(args),
+                    "sessions" => self.sessions_command(),
+                    _ => self.redraw_command(args),
                 };
                 return Some(match result {
                     Ok(()) => 0,
@@ -746,6 +802,13 @@ impl App {
             KeyModifiers::SHIFT,
             KeyCode::BackTab,
             ReedlineEvent::MenuPrevious,
+        );
+        // Instead of only clearing the screen: the conversation again, at
+        // the terminal's width.
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('l'),
+            ReedlineEvent::ExecuteHostCommand("#redraw".to_string()),
         );
         let menu = ColumnarMenu::default().with_name("completion_menu");
         editor
