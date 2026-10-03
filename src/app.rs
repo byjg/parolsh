@@ -18,7 +18,7 @@ use crate::config::{Agent, Config, OptionValue, PromptStyle};
 use crate::history::{History, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
-use crate::{config, hints, mcp, mention, project, setup, shell, shellenv, turn, ui};
+use crate::{config, hints, mcp, mention, project, setup, shell, shellenv, turn, ui, version};
 use agent_client_protocol::schema::v1::McpServer;
 
 const HELP: &str = "\
@@ -986,7 +986,7 @@ impl App {
         let home = home();
         print!(
             "{}",
-            ui::banner(env!("CARGO_PKG_VERSION"), agent, &self.cwd, home.as_deref())
+            ui::banner(&version::short(), agent, &self.cwd, home.as_deref())
         );
     }
 }

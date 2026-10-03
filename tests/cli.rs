@@ -56,9 +56,19 @@ fn dash_c_does_not_load_bashrc() {
 fn version_matches_the_crate() {
     let output = parolsh().arg("--version").output().unwrap();
 
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        format!("parolsh {}\n", env!("CARGO_PKG_VERSION"))
+    let version = String::from_utf8(output.stdout).unwrap();
+    let rest = version
+        .strip_prefix(&format!("parolsh {}", env!("CARGO_PKG_VERSION")))
+        .unwrap_or_else(|| panic!("{version}"));
+
+    // The release's tag, or work in progress: `-dev (<commit>[, dirty])`.
+    let dev = rest
+        .strip_prefix("-dev (")
+        .and_then(|rest| rest.strip_suffix(")\n"))
+        .map(|inside| inside.strip_suffix(", dirty").unwrap_or(inside));
+    assert!(
+        rest == "\n" || dev.is_some_and(|commit| commit.chars().all(|c| c.is_ascii_hexdigit())),
+        "{version}"
     );
 }
 

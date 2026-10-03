@@ -17,13 +17,14 @@ mod shellenv;
 mod title;
 mod turn;
 mod ui;
+mod version;
 
 use clap::Parser;
 use std::process::ExitCode;
 
 /// Parolsh: a natural-language-first shell for ACP agents.
 #[derive(Parser)]
-#[command(version)]
+#[command(version = version::long())]
 struct Cli {
     /// Run COMMAND with a plain `bash -c` and exit, without the agent
     #[arg(short = 'c', value_name = "COMMAND")]
