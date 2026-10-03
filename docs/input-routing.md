@@ -232,6 +232,7 @@ and forwards the line as typed, so the agent's own slash commands work.
 |---|---|
 | `#help` | Show the input rules and commands |
 | `#new` | Start a new conversation with the agent, in the agent's directory |
+| `#new private` | Start a new conversation that is not saved in the [history](#the-history-of-sessions), until the next `#new`, `#cd` or `#agent` |
 | `#cd <path>` | Change Parolsh's directory, for the agent and your commands, and start a new conversation there. `~` and relative paths work, from the directory of your commands, so `#cd .` brings the agent where a `cd` took them; no path means your home directory. Reloads the configuration of the project found there. An agent chosen with `#agent` stays when that project configures it; otherwise the project's `default_agent` is used, and the agent restarts if it changed. |
 | `#agent` | Show the agent in use |
 | `#agent list` | List configured agents; `*` marks the one in use |
@@ -245,6 +246,10 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#project` | Show the project root |
 | `#project init` | Create `.parolsh/` in the current directory |
 | `#audit` | What happened since Parolsh started, see [`#audit`](#audit) |
+| `#audit <n>` | What happened in session `n` of this project, from the [history](#the-history-of-sessions) |
+| `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
+| `#forget [n]` | Remove session `n` from the history; the current one without `n` |
+| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works) |
 
 ## `#audit`
@@ -282,3 +287,80 @@ It keeps the last 1000 entries and says how many older ones were dropped;
 and `0` turns it off.
 What the agent does without telling (a tool it does not report) is not
 there: see [Security model](security.md).
+
+## The history of sessions
+
+Parolsh also saves each conversation in a history, so you can look back at
+it after you leave: `history.db` (SQLite) in `$XDG_STATE_HOME/parolsh/`
+(`~/.local/state/parolsh/`), readable only by you, one file for every
+project.
+
+```text
+[claude] ~/projects/wallet ✦ #sessions
+*   14  2026-10-02 15:27  claude     23 entries  Fix the crashing api
+    11  2026-09-30 10:02  claude     41 entries  Add retries to the client
+[claude] ~/projects/wallet ✦ #audit 11
+   0:00  USER     → claude: the client gives up too early
+   0:09  AGENT    read: Read src/client.rs [src/client.rs] · completed
+   0:15  AGENT    answer: It retries once, with no backoff. …
+   ...
+```
+
+- A session is one conversation: it starts with Parolsh, `#new`, `#cd` or
+  `#agent`, and is saved from its first entry. `#sessions` names it with the
+  agent's title (Claude and Codex give one), or your first message.
+- It keeps what `#audit` shows, with the full text instead of a short line,
+  and also the agent's answers and reasoning, and the outputs shared with
+  `!+`. `#audit <n>` shows answers as one line each; reasoning is not shown.
+- **`!command` lines are not saved** unless you set `save_commands = true`:
+  they never reach the agent, and may hold passwords or tokens. When it is on,
+  the banner says so.
+- Sessions belong to the project (its root, or the agent's directory without
+  one): `#sessions`, `#audit <n>` and `#forget` only see this project's.
+- A session idle for more than 90 days is removed when Parolsh starts;
+  `history_days` changes that, and `0` saves nothing. `#forget` removes one
+  now, and `#new private` starts a conversation that is not saved.
+
+`history_days` and `save_commands` can only be set in the global
+[configuration](configuration.md#keys).
+
+### Resuming a session
+
+`#resume <n>` goes back to session `n`: Parolsh moves to its directory and
+agent if needed, and asks the agent to reopen that conversation (ACP
+`session/resume`, or `session/load` when that is all the agent offers; the
+conversation it replays is not printed again). The agent then remembers
+everything that was said, and the session goes on in the history.
+
+```text
+[claude] ~/projects/wallet ✦ #resume 11
+Resumed session 11: the agent remembers that conversation.
+[claude] ~/projects/wallet ✦ and the timeout, did we change it?
+```
+
+The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
+removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
+saved.
+
+### The agent can search the history
+
+In every conversation that is saved, the agent gets the history of this
+project as an MCP server, `parolsh-history`, so it can look up earlier work
+itself when you refer to it, without loading whole sessions:
+
+```text
+[claude] ~/projects/wallet ✦ how did we fix the retries last week?
+• mcp__parolsh-history__search_history
+Last Tuesday we added exponential backoff in src/client.rs …
+```
+
+| Tool | What it returns |
+|---|---|
+| `search_history` | The best matches for some words (SQLite FTS5: `retry OR backoff`, `"a phrase"`, `prefix*`), with the session and entry |
+| `list_sessions` | The sessions: number, date, agent, title |
+| `get_session` | The entries of one session, a page at a time, with their full text |
+| `commands` | The saved shell commands and their exit codes |
+
+The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
+the history without changing it, and only this project's sessions: its tools
+cannot ask for another. A `#new private` conversation does not get it.

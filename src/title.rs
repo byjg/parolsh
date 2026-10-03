@@ -180,6 +180,7 @@ mod tests {
             tasks,
             oldest: None,
             title: title.map(str::to_string),
+            ..Default::default()
         }
     }
 

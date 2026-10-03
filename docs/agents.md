@@ -442,7 +442,11 @@ environment for that case; `shell_env = "always"` forces it.
 - **Start:** Parolsh starts the default agent when it starts, and opens a
   conversation in the current directory. This runs in the background, so the
   prompt is ready at once.
-- **New conversation:** `#new`, or `#cd` to another directory.
+- **New conversation:** `#new`, or `#cd` to another directory. `#new private`
+  starts one that is not saved in the
+  [history](input-routing.md#the-history-of-sessions).
+- **Back to an earlier one:** `#resume <n>`, with agents that can (Claude,
+  Codex), see [Resuming a session](input-routing.md#resuming-a-session).
 - **Switch:** `#agent <name>`, see [Switching agents](#switching-agents).
 - **Restart:** `#cd` to a project configured with another agent restarts it.
   If the agent stops (it crashed, or its command does not exist), Parolsh

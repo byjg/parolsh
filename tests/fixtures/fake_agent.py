@@ -40,6 +40,13 @@ The prompt is the text of the last block; earlier blocks are context.
 With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
 Kilo Code: no session modes, and the mode is a `mode` config option.
 
+Sessions can be resumed (`session/resume`, like Claude) with any id: the
+session takes that id. With --load-only, only `session/load` is offered, and
+it replays "replayed old answer" before answering. With --no-resume, neither.
+With --sessions-from N, new sessions are numbered from N (s<N>, ...).
+
+  mcp    replies the MCP servers the session got, as JSON: name and args
+
 Sessions offer config options `effort` (low/high), `fast` (boolean) and
 `model` (one/two).
 """
@@ -51,6 +58,10 @@ import time
 
 modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", "auto"]
 kilo = "--kilo" in sys.argv
+load_only = "--load-only" in sys.argv
+no_resume = "--no-resume" in sys.argv
+first_session = (int(sys.argv[sys.argv.index("--sessions-from") + 1])
+                 if "--sessions-from" in sys.argv else 1)
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
 client_capabilities = {}
 next_request_id = 1000
@@ -228,6 +239,9 @@ def prompt(request):
                 "sessionUpdate": "async_task_state_update", "asyncTaskId": "b9",
                 "state": "completed"})))
         say(session_id, "started")
+    elif text == "mcp":
+        say(session_id, json.dumps([{"name": server.get("name"), "args": server.get("args")}
+                                    for server in session.get("mcp", [])]))
     elif text.startswith("env "):
         say(session_id, os.environ.get(text[4:], "<unset>"))
     elif text == "stuck":
@@ -260,6 +274,14 @@ def prompt(request):
     send({"id": request["id"], "result": {"stopReason": stop_reason}})
 
 
+def capabilities():
+    if no_resume:
+        return {}
+    if load_only:
+        return {"loadSession": True}
+    return {"sessionCapabilities": {"resume": {}}}
+
+
 def main():
     while True:
         if later:
@@ -274,13 +296,19 @@ def main():
         if method == "initialize":
             client_capabilities.update(message["params"].get("clientCapabilities", {}))
             send({"id": message["id"], "result": {
-                "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
-        elif method == "session/new":
-            session_id = f"s{len(sessions) + 1}"
+                "protocolVersion": 1, "agentCapabilities": capabilities(), "authMethods": []}})
+        elif method in ("session/new", "session/resume", "session/load"):
+            params = message["params"]
+            session_id = params.get("sessionId") or f"s{len(sessions) + first_session}"
             session = sessions[session_id] = {
-                "cwd": message["params"]["cwd"], "mode": "code" if kilo else "default",
-                "options": {"effort": "high", "model": "one", "fast": False}}
-            result = {"sessionId": session_id, "configOptions": config_options(session)}
+                "cwd": params["cwd"], "mode": "code" if kilo else "default",
+                "options": {"effort": "high", "model": "one", "fast": False},
+                "mcp": params.get("mcpServers", [])}
+            if method == "session/load":
+                say(session_id, "replayed old answer")
+            result = {"configOptions": config_options(session)}
+            if method == "session/new":
+                result["sessionId"] = session_id
             if not kilo:
                 result["modes"] = {"currentModeId": "default",
                                    "availableModes": [{"id": m, "name": m} for m in modes]}

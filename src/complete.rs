@@ -29,8 +29,9 @@ const SEPARATORS: &str = "|;&()<>";
 const SPECIAL: &str = " '\"\\()&;|<>$`!*?[]{}#";
 
 /// The `#` commands, as `#help` lists them.
-pub const CONTROL_COMMANDS: [&str; 10] = [
-    "help", "new", "cd", "agent", "config", "options", "project", "prompt", "audit", "exit",
+pub const CONTROL_COMMANDS: [&str; 13] = [
+    "help", "new", "cd", "agent", "config", "options", "project", "prompt", "audit", "sessions",
+    "forget", "resume", "exit",
 ];
 
 pub struct ShellCompleter {
@@ -573,7 +574,10 @@ mod tests {
             ["#agent ", "#audit "]
         );
         assert_eq!(complete("  #cd", dir.path(), path, &[]), ["  #cd "]);
-        assert_eq!(complete("#", dir.path(), path, &[]).len(), 10);
+        assert_eq!(
+            complete("#", dir.path(), path, &[]).len(),
+            CONTROL_COMMANDS.len()
+        );
         assert!(complete("#to", dir.path(), path, &["tool"]).is_empty());
         // Only `#cd` has arguments to complete.
         assert!(complete("#agent t", dir.path(), path, &["tool"]).is_empty());

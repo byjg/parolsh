@@ -23,6 +23,8 @@ never what is executed. These keys are **global only**:
 
 - `shell`
 - `agents.<name>.command`, `agents.<name>.args` and `agents.<name>.env`
+- `history_days` and `save_commands`: what is kept about your sessions is
+  yours to choose, not a repository's
 
 A project can only refer to agents defined in the global file: it cannot add
 one. A project file that sets a global-only key is reported as an error and
@@ -111,6 +113,8 @@ launched as `claude-agent-acp`.
 | `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
 | `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
 | `audit_entries` | `1000` | How many entries [`#audit`](input-routing.md#audit) keeps, the oldest dropped first. `0` keeps none. |
+| `history_days` | `90` | Days an idle session stays in the [history of sessions](input-routing.md#the-history-of-sessions). `0` saves nothing. Global only. |
+| `save_commands` | `false` | Also save `!command` and `!bash` lines in the history. Global only. |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a

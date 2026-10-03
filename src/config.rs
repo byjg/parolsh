@@ -132,6 +132,10 @@ pub struct Config {
     pub agents: BTreeMap<String, Agent>,
     /// How many entries `#audit` keeps; 0 keeps none.
     pub audit_entries: usize,
+    /// Days an idle session stays in the history; 0 keeps no history.
+    pub history_days: u32,
+    /// Also save `!command` lines in the history.
+    pub save_commands: bool,
 }
 
 /// One config file as written on disk: every field is optional so a project
@@ -150,6 +154,8 @@ struct ConfigFile {
     #[serde(default)]
     agents: BTreeMap<String, AgentFile>,
     audit_entries: Option<usize>,
+    history_days: Option<u32>,
+    save_commands: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -179,8 +185,16 @@ impl ConfigFile {
     /// repository: it may change how Parolsh looks and which configured agent
     /// it uses, never what is executed.
     fn check_project(&self) -> Result<()> {
-        if self.shell.is_some() {
-            bail!("`shell` can only be set in the global configuration");
+        // What is kept about your sessions is yours to choose, not a
+        // repository's: it could turn on saving your commands.
+        for (key, set) in [
+            ("shell", self.shell.is_some()),
+            ("history_days", self.history_days.is_some()),
+            ("save_commands", self.save_commands.is_some()),
+        ] {
+            if set {
+                bail!("`{key}` can only be set in the global configuration");
+            }
         }
         for (name, agent) in &self.agents {
             if agent.command.is_some() || agent.args.is_some() || !agent.env.is_empty() {
@@ -281,6 +295,8 @@ impl Config {
             default_agent: file.default_agent,
             agents,
             audit_entries: file.audit_entries.unwrap_or(1000),
+            history_days: file.history_days.unwrap_or(90),
+            save_commands: file.save_commands.unwrap_or(false),
         })
     }
 }
@@ -326,6 +342,8 @@ mod tests {
         assert_eq!(config.default_agent, None);
         assert!(config.agents.is_empty());
         assert_eq!(config.audit_entries, 1000);
+        assert_eq!(config.history_days, 90);
+        assert!(!config.save_commands);
     }
 
     #[test]
@@ -408,6 +426,9 @@ mod tests {
                 "agent `evil` has no `command`",
             ),
             ("default_agent = \"evil\"\n", "`default_agent` is `evil`"),
+            // Nor what is kept about your sessions.
+            ("save_commands = true\n", "`save_commands`"),
+            ("history_days = 3650\n", "`history_days`"),
         ];
 
         for (i, (text, message)) in cases.iter().enumerate() {

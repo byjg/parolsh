@@ -307,7 +307,13 @@ fn raw_output(lines: &[&str]) -> String {
 }
 
 fn terminal_output(config: &str, flags: &str, lines: &[&str], term: &str, raw: bool) -> String {
-    let config = config_home(config);
+    let home = config_home(config);
+    run_in(home.path(), flags, lines, term, raw)
+}
+
+/// Runs Parolsh with the configuration and state in `home`, which stays:
+/// a second run sees what the first saved.
+fn run_in(home: &std::path::Path, flags: &str, lines: &[&str], term: &str, raw: bool) -> String {
     let mut command = Command::new("python3");
     command
         .arg(JOB_SHELL)
@@ -315,8 +321,8 @@ fn terminal_output(config: &str, flags: &str, lines: &[&str], term: &str, raw: b
         .args(lines)
         .arg("#exit")
         .env("TERM", term)
-        .env("XDG_CONFIG_HOME", config.path())
-        .env("XDG_STATE_HOME", config.path());
+        .env("XDG_CONFIG_HOME", home)
+        .env("XDG_STATE_HOME", home);
     if raw {
         command.env("JOB_SHELL_RAW", "1");
     }
@@ -689,4 +695,250 @@ fn mentioned_files_go_with_the_message_as_links() {
         audit.contains("→ fake: blocks @Cargo.toml and @nothing · 1 file linked"),
         "{audit}"
     );
+}
+
+fn fake_agent_home(extra: &str) -> tempfile::TempDir {
+    config_home(&format!(
+        "{extra}\ndefault_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n"
+    ))
+}
+
+/// The lines `#audit 1` printed, without the times.
+fn audit_of(screen: &str) -> Vec<String> {
+    let from = screen.rfind("#audit 1").expect("no #audit 1");
+    screen[from..]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.len() > 9 && line.as_bytes()[7] == b' ')
+        .map(|line| line[9..].to_string())
+        .collect()
+}
+
+/// What a run did is still there in the next one: `#sessions` lists it and
+/// `#audit 1` shows it, with the agent's answers. `!command` lines are not
+/// saved by default; `#forget` removes the session.
+#[test]
+fn the_history_keeps_sessions_across_runs() {
+    let home = fake_agent_home("");
+    run_in(
+        home.path(),
+        "",
+        &["!echo local", "!+echo shared", "perm", "1", "tools"],
+        "dumb",
+        false,
+    );
+
+    let screen = run_in(home.path(), "", &["#sessions", "#audit 1"], "dumb", false);
+    let sessions = &screen[screen.find("#sessions").unwrap()..];
+    // Number, date, agent, entries, and the first message as its title.
+    assert!(
+        sessions
+            .lines()
+            .any(|line| line.trim_start().starts_with("1  ")
+                && line.contains(" fake ")
+                && line.ends_with("  perm")),
+        "{sessions}"
+    );
+    let audit = audit_of(&screen);
+    let expected = [
+        "USER     !+echo shared · exit 0 · 7 B kept",
+        "SHARED   1 output(s), 7 B → fake",
+        "USER     → fake: perm",
+        "AGENT    asks: Writing to notes.txt",
+        "USER     → Allow once",
+        "AGENT    answer: chose:allow-once",
+        "USER     → fake: tools",
+        "AGENT    read: Read a.rs [/tmp/a] · completed",
+        "AGENT    Read b · failed",
+        "AGENT    answer: done",
+    ];
+    for line in expected {
+        assert!(
+            audit.iter().any(|saved| saved == line),
+            "missing {line}: {audit:#?}"
+        );
+    }
+    assert!(
+        !audit.iter().any(|line| line.contains("echo local")),
+        "{audit:#?}"
+    );
+
+    let screen = run_in(home.path(), "", &["#forget 1", "#audit 1"], "dumb", false);
+    assert!(
+        screen.contains("Session 1 removed from the history."),
+        "{screen}"
+    );
+    assert!(screen.contains("no session 1 in this project"), "{screen}");
+}
+
+/// With `save_commands = true`, `!command` lines are saved too, and the
+/// banner says so.
+#[test]
+fn save_commands_saves_them_and_says_so() {
+    let home = fake_agent_home("save_commands = true");
+    let first = run_in(home.path(), "", &["!echo local"], "dumb", false);
+    assert!(
+        first.contains("!commands are saved to the history · save_commands = false to stop"),
+        "{first}"
+    );
+
+    let screen = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    assert_eq!(audit_of(&screen), ["USER     !echo local · exit 0"]);
+}
+
+/// `#new private` saves nothing of that conversation; the next `#new` saves
+/// again.
+#[test]
+fn a_private_conversation_is_not_saved() {
+    let home = fake_agent_home("");
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#new private", "secret plan", "#new", "public plan"],
+        "dumb",
+        false,
+    );
+    assert!(
+        screen.contains("Started a private conversation: it is not saved in the history."),
+        "{screen}"
+    );
+
+    let screen = run_in(home.path(), "", &["#sessions"], "dumb", false);
+    let sessions = &screen[screen.rfind("#sessions").unwrap()..];
+    assert!(sessions.contains("public plan"), "{sessions}");
+    assert!(!sessions.contains("secret"), "{sessions}");
+}
+
+/// A home whose fake agent gets `args` after the script.
+fn fake_agent_home_with(args: &[&str]) -> tempfile::TempDir {
+    let args: Vec<String> = std::iter::once(FAKE_AGENT)
+        .chain(args.iter().copied())
+        .map(|arg| format!("\"{arg}\""))
+        .collect();
+    config_home(&format!(
+        "default_agent = \"fake\"\n[agents.fake]\ncommand = \"python3\"\nargs = [{}]\n",
+        args.join(", ")
+    ))
+}
+
+/// Rewrites the agent's arguments in `home`, keeping the history.
+fn set_agent_args(home: &std::path::Path, args: &[&str]) {
+    let fresh = fake_agent_home_with(args);
+    std::fs::copy(
+        fresh.path().join("parolsh/config.toml"),
+        home.join("parolsh/config.toml"),
+    )
+    .unwrap();
+}
+
+/// `#resume <n>` goes back to the agent's conversation of session `n` (the
+/// fake agent answers with its session id), and what follows is saved in
+/// that session.
+#[test]
+fn resume_goes_back_to_the_agents_conversation() {
+    let home = fake_agent_home_with(&[]);
+    let first = run_in(home.path(), "", &["hello"], "dumb", false);
+    assert!(first.contains("[s1|default|"), "{first}");
+
+    // The next run's own conversation is s10: only a resume brings s1 back.
+    set_agent_args(home.path(), &["--sessions-from", "10"]);
+    let screen = run_in(home.path(), "", &["#resume 1", "who"], "dumb", false);
+    assert!(
+        screen.contains("Resumed session 1: the agent remembers that conversation."),
+        "{screen}"
+    );
+    assert!(screen.contains("[s1|default|"), "{screen}");
+    assert!(!screen.contains("[s10|"), "{screen}");
+
+    let screen = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    let audit = audit_of(&screen);
+    for line in ["USER     → fake: hello", "USER     → fake: who"] {
+        assert!(
+            audit.iter().any(|saved| saved == line),
+            "missing {line}: {audit:#?}"
+        );
+    }
+}
+
+/// An agent that only loads a conversation replays it: the replay is not
+/// shown again. One that cannot resume says so.
+#[test]
+fn a_loaded_conversation_is_not_replayed_and_some_agents_cannot_resume() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+
+    set_agent_args(home.path(), &["--load-only", "--sessions-from", "10"]);
+    let screen = run_in(home.path(), "", &["#resume 1", "who"], "dumb", false);
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+    assert!(screen.contains("[s1|default|"), "{screen}");
+    assert!(!screen.contains("replayed old answer"), "{screen}");
+
+    set_agent_args(home.path(), &["--no-resume"]);
+    let screen = run_in(home.path(), "", &["#resume 1"], "dumb", false);
+    assert!(
+        screen.contains("cannot resume session 1: this agent cannot resume a conversation"),
+        "{screen}"
+    );
+}
+
+/// The agent gets the history as an MCP server, `parolsh mcp` for this
+/// project, except in a private conversation.
+#[test]
+fn the_agent_gets_the_history_as_an_mcp_server() {
+    let home = fake_agent_home_with(&[]);
+    let screen = run_in(
+        home.path(),
+        "",
+        &["mcp", "#new private", "mcp"],
+        "dumb",
+        false,
+    );
+    let db = home.path().join("parolsh/history.db");
+    let expected = format!(
+        r#"[{{"name": "parolsh-history", "args": ["mcp", "--db", "{}", "--project", "{}"]}}]"#,
+        db.display(),
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    assert!(screen.contains(&expected), "{screen}");
+    let private = &screen[screen.find("Started a private conversation").unwrap()..];
+    assert!(private.contains("\n[]\n"), "{private}");
+}
+
+/// `parolsh mcp` answers MCP over stdio: the tools, and a search in the
+/// project's sessions.
+#[test]
+fn parolsh_mcp_serves_the_history() {
+    use std::io::Write;
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["why does it retry"], "dumb", false);
+
+    let mut server = parolsh()
+        .args(["mcp", "--db"])
+        .arg(home.path().join("parolsh/history.db"))
+        .args(["--project", env!("CARGO_MANIFEST_DIR")])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_history","arguments":{"query":"retry"}}}"#,
+    ];
+    writeln!(server.stdin.take().unwrap(), "{}", requests.join("\n")).unwrap();
+    let output = server.wait_with_output().unwrap();
+    let replies: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(
+        replies[0]["result"]["serverInfo"]["name"],
+        "parolsh-history"
+    );
+    let found = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(found.contains("why does it [retry]"), "{found}");
 }
