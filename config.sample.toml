@@ -83,9 +83,14 @@
 # #audit <n>). 0 saves nothing. Global only.
 # history_days = 90
 
-# Also save !command and !bash lines in the history. They never reach the
-# agent and may hold passwords or tokens. Global only.
-# save_commands = false
+# The lines of your !commands (never their output) in the history:
+#   private  saved for you: #redraw, #resume and #audit <n> show them, and the
+#            agent's history tools do not return them (default)
+#   shared   saved, and returned to the agent too; the banner says so
+#   off      not saved: only #audit of the current run has them
+# Global only. (`save_commands = true` or `false`, from before, still means
+# shared or off.)
+# commands = "private"
 
 
 # --- Agent started with Parolsh ---------------------------------------------

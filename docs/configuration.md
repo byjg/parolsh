@@ -23,7 +23,7 @@ never what is executed. These keys are **global only**:
 
 - `shell`
 - `agents.<name>.command`, `agents.<name>.args` and `agents.<name>.env`
-- `history_days` and `save_commands`: what is kept about your sessions is
+- `history_days` and `commands`: what is kept about your sessions is
   yours to choose, not a repository's
 
 A project can only refer to agents defined in the global file: it cannot add
@@ -115,7 +115,7 @@ launched as `claude-agent-acp`.
 | `audit_entries` | `1000` | How many entries [`#audit`](input-routing.md#audit) keeps, the oldest dropped first. `0` keeps none. |
 | `redraw_exchanges` | `5` | How many exchanges [`#redraw`](input-routing.md#showing-the-conversation-again) and `Ctrl+L` show again, and how many are shown when a session is resumed. |
 | `history_days` | `90` | Days an idle session stays in the [history of sessions](input-routing.md#the-history-of-sessions). `0` saves nothing. Global only. |
-| `save_commands` | `false` | Also save `!command` and `!bash` lines in the history. Global only. |
+| `commands` | `"private"` | The lines of your `!commands` (never their output) in the history: `private` (saved for you: `#redraw`, `#resume` and `#audit <n>` show them; the agent's tools do not return them), `shared` (returned to the agent too), `off` (not saved). Global only. `save_commands = true` or `false`, from 0.6.0, still means `shared` or `off`. See [The history of sessions](input-routing.md#the-history-of-sessions). |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a

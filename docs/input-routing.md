@@ -330,16 +330,20 @@ project.
 - It keeps what `#audit` shows, with the full text instead of a short line,
   and also the agent's answers and reasoning, and the outputs shared with
   `!+`. `#audit <n>` shows answers as one line each; reasoning is not shown.
-- **`!command` lines are not saved** unless you set `save_commands = true`:
-  they never reach the agent, and may hold passwords or tokens. When it is on,
-  the banner says so.
+- **Your `!command` lines are saved for you, not for the agent.** The line and
+  its exit code, never its output, typed with `!` or in shell mode: `#redraw`,
+  a resumed session and `#audit <n>` show them (`!cargo test · exit 101`), and
+  the tools the agent searches the history with leave them out.
+  `commands = "shared"` gives them to the agent too (the banner then says
+  so), and `commands = "off"` does not save them. A `!+` command is always
+  saved and returned to the agent: its output was sent to it.
 - Sessions belong to the project (its root, or the agent's directory without
   one): `#sessions`, `#audit <n>` and `#forget` only see this project's.
 - A session idle for more than 90 days is removed when Parolsh starts;
   `history_days` changes that, and `0` saves nothing. `#forget` removes one
   now, and `#new private` starts a conversation that is not saved.
 
-`history_days` and `save_commands` can only be set in the global
+`history_days` and `commands` can only be set in the global
 [configuration](configuration.md#keys).
 
 ### Resuming a session
@@ -392,7 +396,28 @@ turn ended · 18s
 
 The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
 removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
-saved.
+saved:
+
+```text
+parolsh: cannot resume session 11: the agent no longer has that conversation. #audit 11 shows what Parolsh saved of it
+```
+
+A session where you only ran shell commands has no conversation for the agent
+to go back to: an agent keeps one from its first message. `#sessions` names
+it by its first command, and `#resume` shows its commands and goes on with it,
+the agent starting a new conversation:
+
+```text
+[claude] ~/projects/wallet ✦ #sessions
+    7  2026-10-03 15:38  claude      2 entries  (commands only) !source .env
+[claude] ~/projects/wallet ✦ #resume 7
+!source .env · exit 0
+!cd infra/ · exit 0
+Continued session 7: it has only shell commands, so the agent starts a new conversation.
+```
+
+What the commands had set up is not there again: the directory your commands
+were in, and what they exported, are not saved.
 
 ### The agent can search the history
 
@@ -420,7 +445,7 @@ Ask in your own words; the agent picks the tool:
 | `where did we change the retry logic?` | `search_history` |
 | `summarize session #2` | `get_session`, with the number `#sessions` shows |
 | `what did we work on last week?` | `list_sessions`, then `get_session` |
-| `which commands failed today?` | `commands` (plain `!command` lines only with `save_commands`) |
+| `which commands failed today?` | `commands` (`!+` ones; plain `!command` lines only with `commands = "shared"`) |
 
 ```text
 [claude] ~/projects/wallet ✦ summarize session #2

@@ -44,6 +44,8 @@ Sessions can be resumed (`session/resume`, like Claude) with any id: the
 session takes that id. With --load-only, only `session/load` is offered, and
 it replays "replayed old answer" before answering. With --no-resume, neither.
 With --sessions-from N, new sessions are numbered from N (s<N>, ...).
+With --forgets, a conversation to resume or load is not found, as when the
+agent removed it.
 
   mcp    replies the MCP servers the session got, as JSON: name and args
 
@@ -60,6 +62,7 @@ modes = ["default", "plan"] if "--no-auto" in sys.argv else ["default", "plan", 
 kilo = "--kilo" in sys.argv
 load_only = "--load-only" in sys.argv
 no_resume = "--no-resume" in sys.argv
+forgets = "--forgets" in sys.argv
 first_session = (int(sys.argv[sys.argv.index("--sessions-from") + 1])
                  if "--sessions-from" in sys.argv else 1)
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
@@ -299,6 +302,11 @@ def main():
                 "protocolVersion": 1, "agentCapabilities": capabilities(), "authMethods": []}})
         elif method in ("session/new", "session/resume", "session/load"):
             params = message["params"]
+            if forgets and method != "session/new":
+                send({"id": message["id"], "error": {
+                    "code": -32002, "message": "Resource not found",
+                    "data": {"uri": params["sessionId"]}}})
+                continue
             session_id = params.get("sessionId") or f"s{len(sessions) + first_session}"
             session = sessions[session_id] = {
                 "cwd": params["cwd"], "mode": "code" if kilo else "default",

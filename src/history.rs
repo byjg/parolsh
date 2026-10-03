@@ -71,6 +71,12 @@ pub struct Session {
     /// The agent's title, or the first message.
     pub title: Option<String>,
     pub entries: usize,
+    /// How many messages went to the agent: 0 for a session of shell
+    /// commands only.
+    pub messages: usize,
+    /// Its first `!command`, to name a session without a message. Yours:
+    /// not for the agent unless commands are shared.
+    pub first_command: Option<String>,
 }
 
 /// An entry found by `search`.
@@ -107,6 +113,9 @@ pub struct Resumable {
     /// The agent's id for the conversation.
     pub agent_session_id: Option<String>,
     pub cwd: String,
+    /// How many messages went to the agent. With none, the agent has no
+    /// conversation to go back to: it keeps one from its first message.
+    pub messages: usize,
 }
 
 /// An entry read back: milliseconds since its session started, and the
@@ -175,10 +184,17 @@ impl History {
     }
 
     /// Entries of `project` matching `query` (FTS5: words, `OR`, `"a
-    /// phrase"`, `prefix*`), best first. A query FTS5 cannot read is
+    /// phrase"`, `prefix*`), best first; plain `!command` lines only with
+    /// `commands`. A query FTS5 cannot read is
     /// searched as plain words, any of them.
-    pub fn search(&self, project: &str, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
-        match self.search_fts(project, query, limit) {
+    pub fn search(
+        &self,
+        project: &str,
+        query: &str,
+        limit: usize,
+        commands: bool,
+    ) -> rusqlite::Result<Vec<Hit>> {
+        match self.search_fts(project, query, limit, commands) {
             Err(rusqlite::Error::SqliteFailure(..)) => {
                 let words: Vec<String> = query
                     .split_whitespace()
@@ -187,13 +203,19 @@ impl History {
                 if words.is_empty() {
                     return Ok(Vec::new());
                 }
-                self.search_fts(project, &words.join(" OR "), limit)
+                self.search_fts(project, &words.join(" OR "), limit, commands)
             }
             found => found,
         }
     }
 
-    fn search_fts(&self, project: &str, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
+    fn search_fts(
+        &self,
+        project: &str,
+        query: &str,
+        limit: usize,
+        commands: bool,
+    ) -> rusqlite::Result<Vec<Hit>> {
         let mut statement = self.conn.prepare(
             "SELECT e.session_id,
                     (SELECT count(*) FROM entries b WHERE b.session_id = e.session_id AND b.id < e.id),
@@ -204,11 +226,11 @@ impl History {
              JOIN entries e ON e.id = entries_fts.rowid
              JOIN sessions s ON s.id = e.session_id
              JOIN projects p ON p.id = s.project_id
-             WHERE entries_fts MATCH ?1 AND p.root = ?2
+             WHERE entries_fts MATCH ?1 AND p.root = ?2 AND (?4 OR e.kind != 'command')
              ORDER BY rank
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![query, project, limit as i64], |row| {
+        let rows = statement.query_map(params![query, project, limit as i64, commands], |row| {
             Ok(Hit {
                 session: row.get(0)?,
                 position: row.get::<_, i64>(1)? as usize,
@@ -222,12 +244,13 @@ impl History {
     }
 
     /// The saved command lines of `project` containing `filter`, newest
-    /// first.
+    /// first: `!+` ones, and with `commands` the plain `!` ones too.
     pub fn commands(
         &self,
         project: &str,
         filter: &str,
         limit: usize,
+        commands: bool,
     ) -> rusqlite::Result<Vec<SavedCommand>> {
         let mut statement = self.conn.prepare(
             "SELECT e.session_id,
@@ -236,20 +259,22 @@ impl History {
              FROM entries e
              JOIN sessions s ON s.id = e.session_id
              JOIN projects p ON p.id = s.project_id
-             WHERE p.root = ?1 AND e.kind IN ('command', 'capture') AND instr(e.text, ?2) > 0
+             WHERE p.root = ?1 AND (e.kind = 'capture' OR (?4 AND e.kind = 'command'))
+               AND instr(e.text, ?2) > 0
              ORDER BY e.id DESC
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![project, filter, limit as i64], |row| {
-            let meta: String = row.get(4)?;
-            Ok(SavedCommand {
-                session: row.get(0)?,
-                at: row.get(1)?,
-                kind: row.get(2)?,
-                text: row.get(3)?,
-                meta: serde_json::from_str(&meta).unwrap_or_default(),
-            })
-        })?;
+        let rows =
+            statement.query_map(params![project, filter, limit as i64, commands], |row| {
+                let meta: String = row.get(4)?;
+                Ok(SavedCommand {
+                    session: row.get(0)?,
+                    at: row.get(1)?,
+                    kind: row.get(2)?,
+                    text: row.get(3)?,
+                    meta: serde_json::from_str(&meta).unwrap_or_default(),
+                })
+            })?;
         rows.collect()
     }
 
@@ -278,7 +303,9 @@ impl History {
     pub fn resumable(&self, project: &str, id: i64) -> rusqlite::Result<Option<Resumable>> {
         self.conn
             .query_row(
-                "SELECT s.agent, s.agent_session_id, s.cwd
+                "SELECT s.agent, s.agent_session_id, s.cwd,
+                        (SELECT count(*) FROM entries
+                         WHERE session_id = s.id AND kind = 'message')
                  FROM sessions s JOIN projects p ON p.id = s.project_id
                  WHERE s.id = ?1 AND p.root = ?2",
                 params![id, project],
@@ -287,6 +314,7 @@ impl History {
                         agent: row.get(0)?,
                         agent_session_id: row.get(1)?,
                         cwd: row.get(2)?,
+                        messages: row.get::<_, i64>(3)? as usize,
                     })
                 },
             )
@@ -388,7 +416,11 @@ impl History {
                     coalesce(s.title, (SELECT text FROM entries
                                        WHERE session_id = s.id AND kind = 'message'
                                        ORDER BY id LIMIT 1)),
-                    (SELECT count(*) FROM entries WHERE session_id = s.id)
+                    (SELECT count(*) FROM entries WHERE session_id = s.id),
+                    (SELECT count(*) FROM entries WHERE session_id = s.id AND kind = 'message'),
+                    (SELECT text FROM entries
+                     WHERE session_id = s.id AND kind IN ('command', 'capture')
+                     ORDER BY id LIMIT 1)
              FROM sessions s JOIN projects p ON p.id = s.project_id
              WHERE p.root = ?1
              ORDER BY s.updated_at DESC, s.id DESC",
@@ -400,6 +432,8 @@ impl History {
                 agent: row.get(2)?,
                 title: row.get(3)?,
                 entries: row.get::<_, i64>(4)? as usize,
+                messages: row.get::<_, i64>(5)? as usize,
+                first_command: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -726,17 +760,23 @@ mod tests {
             .add("user", "message", "retry elsewhere", &json!({}))
             .unwrap();
 
-        let hits = history.search("/p", "backoff", 10).unwrap();
+        let hits = history.search("/p", "backoff", 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!((hits[0].session, hits[0].position), (session, 1));
         assert_eq!(hits[0].snippet, "It retries with no [backoff].");
         assert_eq!(
-            history.search("/p", "retry OR retries", 10).unwrap().len(),
+            history
+                .search("/p", "retry OR retries", 10, false)
+                .unwrap()
+                .len(),
             2
         );
         // Not FTS5 syntax: searched as plain words.
         assert_eq!(
-            history.search("/p", "client.rs (retry", 10).unwrap().len(),
+            history
+                .search("/p", "client.rs (retry", 10, false)
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -756,11 +796,29 @@ mod tests {
             .add("user", "message", "make it pass", &json!({}))
             .unwrap();
 
-        let commands = history.commands("/p", "", 10).unwrap();
+        let commands = history.commands("/p", "", 10, true).unwrap();
         let texts: Vec<&str> = commands.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["git diff", "make test"]);
         assert_eq!(commands[1].meta, json!({"exit": 2}));
-        assert_eq!(history.commands("/p", "make", 10).unwrap().len(), 1);
+        assert_eq!(history.commands("/p", "make", 10, true).unwrap().len(), 1);
+        // Without the plain `!commands`: only the `!+` one, also in a search.
+        let shared_only = history.commands("/p", "", 10, false).unwrap();
+        assert_eq!(shared_only.len(), 1);
+        assert_eq!(shared_only[0].text, "git diff");
+        assert!(
+            history
+                .search("/p", "make", 10, false)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.kind != "command")
+        );
+        assert!(
+            history
+                .search("/p", "test", 10, true)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.kind == "command")
+        );
     }
 
     #[test]
@@ -779,6 +837,7 @@ mod tests {
                 agent: Some("claude".to_string()),
                 agent_session_id: Some("abc".to_string()),
                 cwd: "/p".to_string(),
+                messages: 1,
             })
         );
         assert!(history.resume("/p", first).unwrap());
