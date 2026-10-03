@@ -18,6 +18,7 @@ mod title;
 mod turn;
 mod ui;
 mod version;
+mod wrap;
 
 use clap::Parser;
 use std::process::ExitCode;

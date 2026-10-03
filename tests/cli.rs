@@ -981,3 +981,33 @@ fn the_resume_and_continue_flags_go_back_at_start() {
         "{screen}"
     );
 }
+
+/// On an ANSI terminal the answer is laid out for reading: `✦` before its
+/// first line, the others indented, broken between words at the terminal's
+/// width (80 here), and a blank line before the summary.
+#[test]
+fn the_answer_is_marked_wrapped_and_set_apart() {
+    let message = "explain in a few long sentences how the retry logic of the payment \
+                   client works and why its timeout was changed last week";
+    let screen = with_fake_agent_on("", &[message], "xterm-256color");
+
+    // The fake agent answers "[<session>|<mode>|<cwd>] <message>".
+    let answer = &screen[screen.find("✦ [s1|default|").expect(&screen)..];
+    let lines: Vec<&str> = answer.lines().collect();
+    let end = lines.iter().position(|line| line.is_empty()).expect(answer);
+    assert!(end >= 2, "not wrapped: {answer}");
+    assert!(lines[end + 1].starts_with("✓ 1 tool call"), "{answer}");
+    let words: Vec<&str> = message.split_whitespace().collect();
+    for line in &lines[1..end] {
+        assert!(
+            line.starts_with("  ") && !line.starts_with("   "),
+            "{line:?}"
+        );
+        assert!(line.chars().count() < 80, "{line:?}");
+        // Whole words only: none was cut at the edge.
+        for word in line.split_whitespace() {
+            assert!(words.contains(&word), "{word:?} in {line:?}");
+        }
+    }
+    assert!(lines[end - 1].ends_with("last week"), "{answer}");
+}
