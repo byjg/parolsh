@@ -81,6 +81,10 @@ class Terminal(pyte.Screen):
         os.write(self.fd, data.encode())
 
     def select_graphic_rendition(self, *attrs, **kwargs):
+        # In an extended color (38 or 48: `38;2;R;G;B`, `38;5;N`) the numbers
+        # are not attributes: a 2 there is not "faint".
+        if 38 in attrs or 48 in attrs:
+            return super().select_graphic_rendition(*attrs, **kwargs)
         dim = 2 in attrs
         attrs = tuple(a for a in attrs if a != 2)
         if attrs or not dim:
@@ -228,6 +232,8 @@ def main():
         write_config(tmp / "config", args.agent)
         env = {
             "HOME": str(home), "PATH": os.environ["PATH"], "TERM": "xterm-256color",
+            # 24-bit colors, for the logo's gradient.
+            "COLORTERM": "truecolor",
             "LANG": "C.UTF-8", "XDG_CONFIG_HOME": str(tmp / "config"),
             "XDG_STATE_HOME": str(tmp / "state"),
         }
