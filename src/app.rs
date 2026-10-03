@@ -1020,10 +1020,10 @@ impl Shared {
     }
 }
 
-/// Where to go when no agent is configured.
 /// Lines the prompt holds for printing; the agent's lines beyond wait.
 const PRINTER_LINES: usize = 64;
 
+/// Where to go when no agent is configured.
 fn no_agent() -> String {
     match config::global_path() {
         Some(path) => format!(
