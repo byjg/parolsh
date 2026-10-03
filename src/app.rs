@@ -61,6 +61,10 @@ pub struct App {
     /// Where shell commands run: `cwd` until a command ends in another
     /// directory (`cd`), and again after `#cd`.
     shell_cwd: PathBuf,
+    /// What your shell commands changed in their environment (`export`,
+    /// `unset`, `source`), applied to the next ones. In memory only, and not
+    /// the agent's.
+    shell_changes: shell::Changes,
     /// `shell_cwd`, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
     /// `cwd`, shared with the Tab completion of `@path`.
@@ -155,6 +159,7 @@ impl App {
             agent_cwd: Arc::new(Mutex::new(cwd.clone())),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
+            shell_changes: shell::Changes::default(),
             cwd,
             project_root,
             active: config.default_agent.clone(),
@@ -327,18 +332,23 @@ impl App {
             Input::Empty => return Flow::Continue,
             Input::Agent(text) => self.ask(text),
             Input::Shell(line) => {
-                let code = report(shell::run(&self.config.shell, &line, &self.shell_cwd).map(
-                    |(code, dir)| {
-                        self.move_shell(dir);
-                        code
-                    },
-                ));
+                let ran = shell::run(
+                    &self.config.shell,
+                    &line,
+                    &self.shell_cwd,
+                    &self.shell_changes,
+                );
+                let code = report(ran.map(|(code, left)| {
+                    self.after_shell(left);
+                    code
+                }));
                 self.audit
                     .add(Record::new(Actor::User, Kind::Command, line).meta(json!({"exit": code})));
                 code
             }
             Input::Bash => {
-                let code = report(shell::run_foreground(shell::bash(&self.shell_cwd)));
+                let bash = shell::bash(&self.shell_cwd, &self.shell_changes);
+                let code = report(shell::run_foreground(bash));
                 self.audit.add(
                     Record::new(Actor::User, Kind::Command, "bash").meta(json!({"exit": code})),
                 );
@@ -858,8 +868,15 @@ impl App {
         Ok(())
     }
 
-    /// Where the next shell command runs: the directory the last one ended
-    /// in, when the shell said.
+    /// Where and with what the next shell command runs: the directory the
+    /// last one ended in, when the shell said, and what it changed in its
+    /// environment.
+    fn after_shell(&mut self, left: shell::Left) {
+        self.move_shell(left.dir);
+        self.shell_changes = left.changes;
+    }
+
+    /// Where the next shell command runs.
     fn move_shell(&mut self, dir: Option<PathBuf>) {
         if let Some(dir) = dir {
             *self.completion_cwd.lock().expect("cwd lock") = dir.clone();
@@ -874,9 +891,16 @@ impl App {
             return 1;
         }
         let cwd = self.shell_cwd.clone();
-        match shell::run_shared(&self.config.shell, &line, &cwd, SHARED_LIMIT) {
-            Ok((code, captured, dir)) => {
-                self.move_shell(dir);
+        let ran = shell::run_shared(
+            &self.config.shell,
+            &line,
+            &cwd,
+            &self.shell_changes,
+            SHARED_LIMIT,
+        );
+        match ran {
+            Ok((code, captured, left)) => {
+                self.after_shell(left);
                 if code != 0 {
                     eprintln!("exit {code}");
                 }
