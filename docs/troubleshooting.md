@@ -95,6 +95,41 @@ What to do:
 
 Checked against Qwen Code 0.24.5.
 
+## Asking the history yourself
+
+When the agent does not find something from an earlier session, check what
+the [history](input-routing.md#the-history-of-sessions) holds, without the
+agent:
+
+- `#sessions` lists this project's sessions, and `#audit <n>` shows one. An
+  empty list means nothing was saved: `history_days = 0`, a `#new private`
+  conversation, or another project (sessions belong to the project's root).
+- `parolsh mcp` is the server the agent talks to. It reads requests on its
+  input, one JSON-RPC message per line, so you can ask it what the agent would
+  get:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_history","arguments":{"query":"retry OR backoff","limit":5}}}' \
+  | parolsh mcp --db ~/.local/state/parolsh/history.db --project "$PWD"
+```
+
+`--project` is the project's root: the directory with `.parolsh/`, or the
+agent's directory without one. Each request gets one line back; the second
+holds the matches, as the agent sees them:
+
+```text
+session 11 · entry 4 · 2026-09-30 10:07 · agent answer
+  It retries once, with no [backoff]. …
+```
+
+The tools are `search_history` (`query`, `limit`), `list_sessions` (`limit`),
+`get_session` (`session`, `from`, `limit`) and `commands` (`contains`,
+`limit`). If this finds it and the agent did not, the agent did not search:
+name the tools in your message, see
+[The agent can search the history](input-routing.md#the-agent-can-search-the-history).
+
 ## Logging the agent's messages
 
 To see what passes between Parolsh and the agent, for example when a turn

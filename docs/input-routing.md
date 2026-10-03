@@ -338,6 +338,9 @@ Resumed session 11: the agent remembers that conversation.
 [claude] ~/projects/wallet ✦ and the timeout, did we change it?
 ```
 
+From the command line, `parolsh --resume 11` starts in that session, and
+`parolsh --continue` in the last one of the project.
+
 The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
 removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
 saved.
@@ -361,6 +364,31 @@ Last Tuesday we added exponential backoff in src/client.rs …
 | `get_session` | The entries of one session, a page at a time, with their full text |
 | `commands` | The saved shell commands and their exit codes |
 
+Ask in your own words; the agent picks the tool:
+
+| You ask | The agent uses |
+|---|---|
+| `where did we change the retry logic?` | `search_history` |
+| `summarize session #2` | `get_session`, with the number `#sessions` shows |
+| `what did we work on last week?` | `list_sessions`, then `get_session` |
+| `which commands failed today?` | `commands` (plain `!command` lines only with `save_commands`) |
+
+```text
+[claude] ~/projects/wallet ✦ summarize session #2
+• mcp__parolsh-history__get_session
+Session #2 was about the billing rewrite, codename Falcon-9 …
+```
+
+- Start the line with a word, not with `#`: `#2 summarize` is a Parolsh
+  command.
+- The search matches words, not meanings. For something exact, give the words:
+  `search the history for Falcon-9`.
+- If the agent answers without looking, name the tools: `use the
+  parolsh-history tools to find …`. This was tried with Claude; other agents
+  get the same tools, and may need to be told.
+
 The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
-the history without changing it, and only this project's sessions: its tools
-cannot ask for another. A `#new private` conversation does not get it.
+the history without changing it, and its tools only return this project's
+sessions: they cannot ask for another. A `#new private` conversation does not
+get it. To see what the tools return without the agent, see
+[Asking the history yourself](troubleshooting.md#asking-the-history-yourself).

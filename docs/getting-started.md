@@ -116,6 +116,17 @@ To start with plain text going to bash, run `parolsh --input=shell` or set
 `input = "shell"` in the configuration (see
 [Shell mode](input-routing.md#shell-mode)).
 
+To pick up where you left off, `parolsh --continue` goes back to the last
+conversation of this project, and `parolsh --resume <n>` to session `n` (see
+[Resuming a session](input-routing.md#resuming-a-session)).
+
+`parolsh --version` prints the version. A build that is not the release, from
+a later commit or with changed files, says so:
+
+```text
+parolsh 0.6.0-dev (85cb214, dirty)
+```
+
 ## Use it from scripts
 
 `parolsh -c` runs a command with a plain, non-interactive `bash -c`, without
