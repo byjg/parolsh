@@ -250,6 +250,7 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
+| `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works) |
 
 ## `#audit`
@@ -338,6 +339,40 @@ Resumed session 11: the agent remembers that conversation.
 [claude] ~/projects/wallet ✦ and the timeout, did we change it?
 ```
 
+From the command line, `parolsh --resume 11` starts in that session, and
+`parolsh --continue` in the last one of the project. Either way, Parolsh first
+shows the session's last exchanges, so you see where it was.
+
+### Showing the conversation again
+
+`#redraw`, or `Ctrl+L`, clears the terminal and prints the last exchanges of
+the conversation again from the history, laid out for the terminal's width as
+it is now:
+
+```text
+[claude] ~/projects/wallet ✦ why is the api container restarting?
+• read: Read docker-compose.yml [docker-compose.yml] · completed
+✦ The container exits because DATABASE_URL is not set: the entrypoint reads
+  it before the compose file's env_file is loaded.
+
+turn ended · 18s
+[claude] ~/projects/wallet ✦
+```
+
+- Use it after resizing the window: what was already printed is not laid out
+  again by itself (see [During a turn](agents.md#during-a-turn)).
+- An exchange is your message and what followed it. `#redraw` shows the last
+  5, `#redraw 2` the last 2, and `redraw_exchanges` in the
+  [configuration](configuration.md#keys) changes the 5.
+- It shows your messages, the answers, and one line for each tool call,
+  question, answer of yours and `!+` output (its size, not its text).
+- **The whole terminal is cleared, its scrollback too.** The output of your
+  earlier `!commands` goes with it: Parolsh does not keep it and cannot print
+  it again.
+- `Ctrl+L` keeps the line you are typing.
+- In a conversation that is not saved (`#new private`, or `history_days = 0`)
+  there is nothing to show again: it only clears.
+
 The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
 removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
 saved.
@@ -361,6 +396,31 @@ Last Tuesday we added exponential backoff in src/client.rs …
 | `get_session` | The entries of one session, a page at a time, with their full text |
 | `commands` | The saved shell commands and their exit codes |
 
+Ask in your own words; the agent picks the tool:
+
+| You ask | The agent uses |
+|---|---|
+| `where did we change the retry logic?` | `search_history` |
+| `summarize session #2` | `get_session`, with the number `#sessions` shows |
+| `what did we work on last week?` | `list_sessions`, then `get_session` |
+| `which commands failed today?` | `commands` (plain `!command` lines only with `save_commands`) |
+
+```text
+[claude] ~/projects/wallet ✦ summarize session #2
+• mcp__parolsh-history__get_session
+Session #2 was about the billing rewrite, codename Falcon-9 …
+```
+
+- Start the line with a word, not with `#`: `#2 summarize` is a Parolsh
+  command.
+- The search matches words, not meanings. For something exact, give the words:
+  `search the history for Falcon-9`.
+- If the agent answers without looking, name the tools: `use the
+  parolsh-history tools to find …`. This was tried with Claude; other agents
+  get the same tools, and may need to be told.
+
 The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
-the history without changing it, and only this project's sessions: its tools
-cannot ask for another. A `#new private` conversation does not get it.
+the history without changing it, and its tools only return this project's
+sessions: they cannot ask for another. A `#new private` conversation does not
+get it. To see what the tools return without the agent, see
+[Asking the history yourself](troubleshooting.md#asking-the-history-yourself).

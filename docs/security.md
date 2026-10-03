@@ -91,9 +91,13 @@ The agent gets this history as an MCP server (see
 so **what was saved can reach the agent again**: any agent you use in this
 project, of any provider, can read what its searches return from earlier
 sessions, including what was first sent to another agent, and the `!command`
-lines when `save_commands` is on. It cannot see other projects' sessions. A
-`#new private` conversation does not get the server; `history_days = 0` turns
-both the history and the server off.
+lines when `save_commands` is on. A `#new private` conversation does not get
+the server; `history_days = 0` turns both the history and the server off.
+
+The server's tools only return this project's sessions. That keeps an agent
+from wandering into other projects by accident; it is not a barrier. Parolsh
+is not a sandbox: an agent that can run commands or read files does so as
+you, and can read `history.db`, like any other file of yours.
 
 ## The ACP log
 

@@ -11,19 +11,22 @@ mod markdown;
 mod mcp;
 mod mention;
 mod project;
+mod replay;
 mod setup;
 mod shell;
 mod shellenv;
 mod title;
 mod turn;
 mod ui;
+mod version;
+mod wrap;
 
 use clap::Parser;
 use std::process::ExitCode;
 
 /// Parolsh: a natural-language-first shell for ACP agents.
 #[derive(Parser)]
-#[command(version)]
+#[command(version = version::long())]
 struct Cli {
     /// Run COMMAND with a plain `bash -c` and exit, without the agent
     #[arg(short = 'c', value_name = "COMMAND")]
@@ -33,6 +36,19 @@ struct Cli {
     /// (overrides `input` in config.toml)
     #[arg(long, value_enum, conflicts_with = "command")]
     input: Option<input::Mode>,
+
+    /// Go back to session N of this project, like `#resume N` (see `#sessions`)
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(i64).range(1..),
+        conflicts_with_all = ["command", "continue_last"]
+    )]
+    resume: Option<i64>,
+
+    /// Go back to the last session of this project
+    #[arg(long = "continue", conflicts_with = "command")]
+    continue_last: bool,
 
     /// Arguments for COMMAND, available as $0, $1, ...
     #[arg(
@@ -94,13 +110,19 @@ fn main() -> ExitCode {
         .into_iter()
         .collect();
 
+    let resume = match (cli.resume, cli.continue_last) {
+        (Some(session), _) => Some(app::Resume::Session(session)),
+        (None, true) => Some(app::Resume::Latest),
+        (None, false) => None,
+    };
+
     if let Err(e) = turn::install_interrupt_handler() {
         eprintln!("parolsh: cannot handle Ctrl+C: {e}");
     }
 
     let result = std::env::current_dir()
         .map_err(anyhow::Error::from)
-        .and_then(|cwd| app::App::new(cwd, notices, cli.input))
+        .and_then(|cwd| app::App::new(cwd, notices, cli.input, resume))
         .and_then(|mut app| app.run());
 
     match result {

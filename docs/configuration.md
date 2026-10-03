@@ -113,6 +113,7 @@ launched as `claude-agent-acp`.
 | `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
 | `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
 | `audit_entries` | `1000` | How many entries [`#audit`](input-routing.md#audit) keeps, the oldest dropped first. `0` keeps none. |
+| `redraw_exchanges` | `5` | How many exchanges [`#redraw`](input-routing.md#showing-the-conversation-again) and `Ctrl+L` show again, and how many are shown when a session is resumed. |
 | `history_days` | `90` | Days an idle session stays in the [history of sessions](input-routing.md#the-history-of-sessions). `0` saves nothing. Global only. |
 | `save_commands` | `false` | Also save `!command` and `!bash` lines in the history. Global only. |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |

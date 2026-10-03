@@ -96,25 +96,14 @@ impl Markdown {
         out
     }
 
-    /// The current style again, for when something else (the status line)
-    /// reset the terminal's attributes in between.
-    pub fn resume(&self) -> String {
-        if self.style == Style::default() {
-            String::new()
-        } else {
-            self.style.sgr()
-        }
+    /// True inside a code block: its lines are not prose to wrap.
+    pub fn in_fence(&self) -> bool {
+        self.style.fence
     }
 
     /// True when text is held back: `finish` will print it (never a newline).
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
-    }
-
-    /// True when the cursor is at the start of a line (nothing held back
-    /// has been printed yet).
-    pub fn at_line_start(&self) -> bool {
-        self.line_start
     }
 
     fn set(&mut self, out: &mut String, style: Style) {

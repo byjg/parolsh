@@ -16,6 +16,7 @@ use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::markdown::Markdown;
 use crate::ui;
+use crate::wrap::Wrap;
 
 /// Set by the SIGINT handler. The terminal is in cooked mode while a turn
 /// runs, so Ctrl+C arrives as a signal instead of a key press.
@@ -156,6 +157,7 @@ pub fn run(
                 said.flush(audit);
                 out.hide();
                 out.end_line();
+                out.interrupted();
                 answer(request, audit);
                 out.show();
             }
@@ -499,6 +501,8 @@ pub fn watch(
 struct Lines {
     ansi: bool,
     markdown: Option<Markdown>,
+    /// Lays the text out at the terminal's width, on ANSI terminals.
+    wrap: Option<Wrap>,
     /// The start of the line being written.
     partial: String,
     /// Complete lines, to print.
@@ -511,6 +515,7 @@ impl Lines {
         Self {
             ansi,
             markdown,
+            wrap: ansi.then(|| Wrap::new(text_width())),
             partial: String::new(),
             ready: VecDeque::new(),
             headed: false,
@@ -518,11 +523,25 @@ impl Lines {
     }
 
     fn text(&mut self, text: &str) {
-        let text = match &mut self.markdown {
-            Some(markdown) => markdown.push(text),
+        // The terminal may have been resized since the last chunk.
+        self.text_within(text, text_width());
+    }
+
+    /// `text`, in lines of at most `width` columns.
+    fn text_within(&mut self, text: &str, width: usize) {
+        let text = match &mut self.wrap {
+            Some(wrap) => {
+                wrap.set_width(width);
+                laid_out(wrap, &mut self.markdown, text)
+            }
             None => text.to_string(),
         };
         self.partial.push_str(&text);
+        self.take_lines();
+    }
+
+    /// Makes the complete lines of `partial` ready.
+    fn take_lines(&mut self) {
         while let Some(end) = self.partial.find('\n') {
             let line = self.partial[..end].to_string();
             self.partial.drain(..=end);
@@ -539,15 +558,25 @@ impl Lines {
     /// Makes the line being written ready, unfinished.
     fn flush(&mut self) {
         let held_back = self.markdown.as_ref().is_some_and(Markdown::has_pending);
-        if self.partial.is_empty() && !held_back {
+        let writing = self.wrap.as_ref().is_some_and(|wrap| !wrap.idle());
+        // Nothing unfinished: leave a style that spans lines (a code block's)
+        // open.
+        if self.partial.is_empty() && !held_back && !writing {
             return;
         }
-        if let Some(markdown) = &mut self.markdown {
-            let rest = markdown.finish();
-            self.partial.push_str(&rest);
+        match &mut self.wrap {
+            Some(wrap) => {
+                let rest = self.markdown.as_mut().map(Markdown::finish);
+                let rest = rest.map_or(String::new(), |rest| wrap.feed(&rest, true));
+                self.partial.push_str(&rest);
+                self.partial.push_str(&wrap.end());
+                self.take_lines();
+            }
+            None => {
+                let line = std::mem::take(&mut self.partial);
+                self.push(line);
+            }
         }
-        let line = std::mem::take(&mut self.partial);
-        self.push(line);
     }
 
     fn push(&mut self, line: String) {
@@ -562,6 +591,29 @@ impl Lines {
         }
         self.ready.push_back(line);
     }
+}
+
+/// The columns the agent's text may take: the terminal's, less one. A line
+/// that fills the terminal makes some of them add a blank line.
+pub fn text_width() -> usize {
+    ui::width().saturating_sub(1)
+}
+
+/// A chunk of the agent's text, rendered and laid out. It goes line by line:
+/// the markdown says after each whether it is in a code block, which is not
+/// wrapped.
+pub fn laid_out(wrap: &mut Wrap, markdown: &mut Option<Markdown>, text: &str) -> String {
+    let mut out = String::new();
+    for piece in text.split_inclusive('\n') {
+        match markdown {
+            Some(markdown) => {
+                let rendered = markdown.push(piece);
+                out.push_str(&wrap.feed(&rendered, !markdown.in_fence()));
+            }
+            None => out.push_str(&wrap.feed(piece, true)),
+        }
+    }
+    out
 }
 
 fn describe(reason: StopReason) -> Option<&'static str> {
@@ -684,6 +736,10 @@ struct Output {
     in_thought: bool,
     /// Renders the answer's markdown, on ANSI terminals.
     markdown: Option<Markdown>,
+    /// Lays the answer out at the terminal's width, on ANSI terminals.
+    wrap: Option<Wrap>,
+    /// The agent wrote something in this turn.
+    answered: bool,
 }
 
 struct Status {
@@ -803,6 +859,8 @@ impl Output {
             in_thought: false,
             mid_line: false,
             status: ansi.then(Status::new),
+            wrap: ansi.then(|| Wrap::new(text_width())),
+            answered: false,
         }
     }
 
@@ -816,11 +874,15 @@ impl Output {
             self.end_line();
             self.in_thought = false;
         }
-        match &mut self.markdown {
-            Some(markdown) => {
+        self.answered = true;
+        match &mut self.wrap {
+            Some(wrap) => {
+                // The terminal may have been resized since the last chunk.
+                wrap.set_width(text_width());
                 // The status line resets the terminal's style: restore it.
-                print!("{}{}", markdown.resume(), markdown.push(text));
-                self.mid_line = !markdown.at_line_start();
+                let resumed = wrap.resume().to_string();
+                print!("{resumed}{}", laid_out(wrap, &mut self.markdown, text));
+                self.mid_line = wrap.mid_line();
             }
             None => {
                 print!("{text}");
@@ -926,22 +988,31 @@ impl Output {
     fn line(&mut self, line: &str) {
         self.hide();
         self.end_line();
+        self.interrupted();
         println!("{line}");
         self.show();
     }
 
     fn end_line(&mut self) {
-        // Print what the markdown held back, and close its styles.
-        if let Some(markdown) = &mut self.markdown {
-            let held_back = markdown.has_pending();
-            print!("{}", markdown.finish());
-            if held_back {
-                self.mid_line = true;
+        match &mut self.wrap {
+            // Print what the markdown and the wrapping held back, close the
+            // styles, and end the line.
+            Some(wrap) => {
+                let rest = self.markdown.as_mut().map(Markdown::finish);
+                let rest = rest.map_or(String::new(), |rest| wrap.feed(&rest, true));
+                print!("{rest}{}", wrap.end());
             }
+            None if self.mid_line => println!(),
+            None => {}
         }
-        if self.mid_line {
-            println!();
-            self.mid_line = false;
+        self.mid_line = false;
+    }
+
+    /// Something else is printed (a question, a notice): the answer that
+    /// goes on after it is marked again.
+    fn interrupted(&mut self) {
+        if let Some(wrap) = &mut self.wrap {
+            wrap.restart();
         }
     }
 
@@ -1007,6 +1078,10 @@ impl Output {
         self.hide();
         self.end_line();
         if let Some(status) = &self.status {
+            // A blank line sets the answer apart from the summary.
+            if self.answered {
+                println!();
+            }
             println!("{}", ui::summary(status.tools, status.started.elapsed()));
         }
     }
@@ -1087,6 +1162,49 @@ mod tests {
         status.update_tool("t1", None, Some(false));
 
         assert_eq!(status.activity(), "Cancelling…");
+    }
+
+    /// Without the escape sequences.
+    fn plain(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                chars.by_ref().find(|c| c.is_ascii_alphabetic());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_answer_wraps_its_prose_but_not_its_code_blocks() {
+        let mut wrap = Wrap::new(24);
+        let mut markdown = Some(Markdown::default());
+        let answer = "Run this to **rebuild everything** now:\n\
+                      ```\ncargo build --release --locked --all-targets\n```\nThen try it again please.\n";
+        // In chunks that cut words and markers, as an agent streams.
+        let mut out = String::new();
+        for chunk in answer.as_bytes().chunks(7) {
+            let chunk = std::str::from_utf8(chunk).unwrap();
+            out.push_str(&laid_out(&mut wrap, &mut markdown, chunk));
+        }
+        out.push_str(&wrap.end());
+
+        assert_eq!(
+            plain(&out),
+            "✦ Run this to rebuild\n  everything now:\n  ```\n  cargo build --release --locked --all-targets\n  ```\n  Then try it again\n  please.\n"
+        );
+    }
+
+    #[test]
+    fn text_between_turns_is_wrapped_under_the_mark() {
+        let mut lines = Lines::new(true, None);
+        lines.text_within("the batch finished without any error\n", 20);
+
+        let shown: Vec<String> = lines.ready.iter().skip(1).map(|line| plain(line)).collect();
+        assert_eq!(shown, ["✦ the batch finished", "  without any error"]);
     }
 
     fn ready(lines: &Lines) -> Vec<&str> {

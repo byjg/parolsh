@@ -74,6 +74,10 @@
 # oldest dropped first. Each is at most 200 characters. 0 keeps none.
 # audit_entries = 1000
 
+# How many exchanges (a message of yours and what followed) #redraw and Ctrl+L
+# show again after clearing the terminal, and a resumed session shows.
+# redraw_exchanges = 5
+
 # Days an idle session stays in the history (~/.local/state/parolsh/history.db:
 # your messages, shared outputs, the agent's answers and tool calls; #sessions,
 # #audit <n>). 0 saves nothing. Global only.

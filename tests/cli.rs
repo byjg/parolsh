@@ -56,9 +56,19 @@ fn dash_c_does_not_load_bashrc() {
 fn version_matches_the_crate() {
     let output = parolsh().arg("--version").output().unwrap();
 
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        format!("parolsh {}\n", env!("CARGO_PKG_VERSION"))
+    let version = String::from_utf8(output.stdout).unwrap();
+    let rest = version
+        .strip_prefix(&format!("parolsh {}", env!("CARGO_PKG_VERSION")))
+        .unwrap_or_else(|| panic!("{version}"));
+
+    // The release's tag, or work in progress: `-dev (<commit>[, dirty])`.
+    let dev = rest
+        .strip_prefix("-dev (")
+        .and_then(|rest| rest.strip_suffix(")\n"))
+        .map(|inside| inside.strip_suffix(", dirty").unwrap_or(inside));
+    assert!(
+        rest == "\n" || dev.is_some_and(|commit| commit.chars().all(|c| c.is_ascii_hexdigit())),
+        "{version}"
     );
 }
 
@@ -941,4 +951,147 @@ fn parolsh_mcp_serves_the_history() {
     );
     let found = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
     assert!(found.contains("why does it [retry]"), "{found}");
+}
+
+/// `--continue` goes back to the project's last session and `--resume N` to
+/// session N, before the first prompt: the agent is in its old conversation.
+#[test]
+fn the_resume_and_continue_flags_go_back_at_start() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+    // The next runs' own conversations start at s10: only a resume gives s1.
+    set_agent_args(home.path(), &["--sessions-from", "10"]);
+
+    for flags in ["--continue", "--resume 1"] {
+        let screen = run_in(home.path(), flags, &["who"], "dumb", false);
+        assert!(screen.contains("Resumed session 1"), "{flags}: {screen}");
+        assert!(screen.contains("[s1|default|"), "{flags}: {screen}");
+        assert!(!screen.contains("[s10|"), "{flags}: {screen}");
+    }
+
+    let screen = run_in(home.path(), "--resume 9", &[], "dumb", false);
+    assert!(
+        screen.contains("parolsh: no session 9 in this project"),
+        "{screen}"
+    );
+    let empty = fake_agent_home_with(&[]);
+    let screen = run_in(empty.path(), "--continue", &[], "dumb", false);
+    assert!(
+        screen.contains("parolsh: no session saved in this project yet"),
+        "{screen}"
+    );
+}
+
+/// On an ANSI terminal the answer is laid out for reading: `✦` before its
+/// first line, the others indented, broken between words at the terminal's
+/// width (80 here), and a blank line before the summary.
+#[test]
+fn the_answer_is_marked_wrapped_and_set_apart() {
+    let message = "explain in a few long sentences how the retry logic of the payment \
+                   client works and why its timeout was changed last week";
+    let screen = with_fake_agent_on("", &[message], "xterm-256color");
+
+    // The fake agent answers "[<session>|<mode>|<cwd>] <message>".
+    let answer = &screen[screen.find("✦ [s1|default|").expect(&screen)..];
+    let lines: Vec<&str> = answer.lines().collect();
+    let end = lines.iter().position(|line| line.is_empty()).expect(answer);
+    assert!(end >= 2, "not wrapped: {answer}");
+    assert!(lines[end + 1].starts_with("✓ 1 tool call"), "{answer}");
+    let words: Vec<&str> = message.split_whitespace().collect();
+    for line in &lines[1..end] {
+        assert!(
+            line.starts_with("  ") && !line.starts_with("   "),
+            "{line:?}"
+        );
+        assert!(line.chars().count() < 80, "{line:?}");
+        // Whole words only: none was cut at the edge.
+        for word in line.split_whitespace() {
+            assert!(words.contains(&word), "{word:?} in {line:?}");
+        }
+    }
+    assert!(lines[end - 1].ends_with("last week"), "{answer}");
+}
+
+const WIPE: &str = "\x1b[H\x1b[2J\x1b[3J";
+
+/// What the terminal shows after the last wipe, without escape sequences.
+fn after_wipe(output: &str) -> String {
+    let after = &output[output.rfind(WIPE).expect("not wiped") + WIPE.len()..];
+    let mut plain = String::new();
+    let mut chars = after.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+}
+
+/// `#redraw` wipes the terminal and shows the last exchanges again, from the
+/// history; `#redraw 1` only the last. `Ctrl+L` does the same and keeps the
+/// line being typed.
+#[test]
+fn redraw_wipes_and_shows_the_last_exchanges_again() {
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "perm", "1", "#redraw"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+
+    let expected = [
+        "✦ first question\n",
+        "• Read README.md\n",
+        "] first question\n",
+        "✦ perm\n",
+        "asks: Writing to notes.txt\n",
+        "→ Allow once\n",
+        "✦ chose:allow-once\n",
+    ];
+    let mut rest = shown.as_str();
+    for line in expected {
+        let at = rest
+            .find(line)
+            .unwrap_or_else(|| panic!("missing or out of order: {line:?}\n{shown}"));
+        rest = &rest[at + line.len()..];
+    }
+
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "second question", "#redraw 1"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+    assert!(shown.contains("✦ second question\n"), "{shown}");
+    assert!(!shown.contains("first question"), "{shown}");
+
+    let home = fake_agent_home_with(&[]);
+    let lines = ["first question", "key:half typed", "key:\\x0c", "key:\\r"];
+    let output = run_in(home.path(), "", &lines, "xterm-256color", true);
+    assert_eq!(output.matches(WIPE).count(), 1, "{output:?}");
+    let shown = after_wipe(&output);
+    assert!(shown.contains("✦ first question\n"), "{shown}");
+    // The line typed before Ctrl+L is still there, and Enter sends it.
+    assert!(shown.contains("] half typed\n"), "{shown}");
+}
+
+/// A conversation that is not saved has nothing to show again: `#redraw`
+/// only wipes.
+#[test]
+fn redraw_of_a_private_conversation_only_wipes() {
+    let home = fake_agent_home_with(&[]);
+    let lines = ["#new private", "secret plan", "#redraw"];
+    let shown = after_wipe(&run_in(home.path(), "", &lines, "xterm-256color", true));
+
+    assert!(!shown.contains("secret"), "{shown}");
+}
+
+/// Going back to a session shows where it was: its last exchanges, before
+/// the prompt.
+#[test]
+fn a_resumed_session_shows_its_last_exchanges() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["what is the plan"], "dumb", false);
+
+    let screen = run_in(home.path(), "--continue", &[], "dumb", false);
+    let at = screen.find("Resumed session 1").expect(&screen);
+    let before = &screen[..at];
+    assert!(before.contains("✦ what is the plan\n"), "{screen}");
+    assert!(before.contains("] what is the plan\n"), "{screen}");
 }

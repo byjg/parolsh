@@ -459,13 +459,37 @@ environment for that case; `shell_env = "always"` forces it.
 
 ## During a turn
 
-The answer is printed as it arrives. On an ANSI terminal its markdown is
-rendered on the fly: `**bold**` in bold, `` `code` `` and code blocks in cyan,
-`#` headings bold and underlined, `-` bullets as `•`, with the markers hidden.
-Only a marker cut in half between two chunks waits for the next one, so the
-text is never held back. An unclosed `**` only affects the rest of its line.
-`markdown = false` in the [configuration](configuration.md#keys) prints the
-raw text.
+The answer is printed as it arrives. On an ANSI terminal it is laid out for
+reading, apart from the output of your commands:
+
+```text
+[claude] ~/projects/wallet ✦ why is the api container restarting?
+✦ The container exits because DATABASE_URL is not set: the entrypoint reads
+  it before the compose file's env_file is loaded.
+
+  Move it to the service's environment and restart.
+
+✓ 3 tool calls · 18s
+```
+
+- `✦` marks where the answer starts, and its other lines are indented under
+  it. After a question from the agent, or a notice, the answer that goes on is
+  marked again.
+- Lines break between words at the width of your terminal, never in the
+  middle of a word. The width is read as the text arrives, so after you resize
+  the window the next lines follow it; what is already printed stays as it is
+  (`Ctrl+L` shows the conversation again at the new width, see
+  [Showing the conversation again](input-routing.md#showing-the-conversation-again)).
+- Code blocks and table rows are not broken, and a list item wraps under its
+  own text.
+- Only the word being received is held back, until its end arrives.
+
+Its markdown is rendered on the fly: `**bold**` in bold, `` `code` `` and code
+blocks in cyan, `#` headings bold and underlined, `-` bullets as `•`, with the
+markers hidden. A marker cut in half between two chunks waits for the next
+one. An unclosed `**` only affects the rest of its line. `markdown = false` in
+the [configuration](configuration.md#keys) keeps the raw text, still laid out
+as above.
 
 Links `[text](url)` show their text underlined and clickable, followed by the
 URL: `text (https://...)`. Most terminals open it with Ctrl+click (GNOME
@@ -505,15 +529,18 @@ A quiet agent may still be working, for example waiting for a slow tool or
 its API, since agents send nothing while they wait. To see what it really
 sent, see [Logging the agent's messages](troubleshooting.md#logging-the-agents-messages).
 
-When the turn ends, the status line is replaced by a summary:
+When the turn ends, the status line is replaced by a summary, after a blank
+line:
 
 ```text
-The container exits because DATABASE_URL is not set...
+✦ The container exits because DATABASE_URL is not set...
+
 ✓ 3 tool calls · 18s
 ```
 
-Without an ANSI terminal (output piped, or `TERM=dumb`), there is no status
-line and each tool call is printed as a `• <title>` line.
+Without an ANSI terminal (output piped, or `TERM=dumb`), the answer is printed
+as the agent sends it: no mark, no indent and no wrapping. There is no status
+line either, and each tool call is printed as a `• <title>` line.
 
 When the agent asks for permission, Parolsh shows what it wants to do, then
 its options:
@@ -580,7 +607,7 @@ while you type:
 [claude] ~/projects/wallet ✦
 (the agent, between turns)
 • Check batch log
-The batch finished: 34 repositories created, none failed.
+✦ The batch finished: 34 repositories created, none failed.
 [claude] ~/projects/wallet ✦ █
 ```
 

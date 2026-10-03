@@ -10,6 +10,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use crate::history::History;
+use crate::version;
 
 /// The server's name, as the agent shows its tools (`parolsh-history`).
 pub const NAME: &str = "parolsh-history";
@@ -69,7 +70,7 @@ fn handle(history: &History, project: &str, message: &Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or(json!("2025-06-18")),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")},
+            "serverInfo": {"name": NAME, "version": version::short()},
             "instructions": "Earlier Parolsh sessions of this project: what the user asked, \
                 what you answered, the tools you ran, the outputs the user shared. Search \
                 it when the user refers to earlier work, or before redoing something.",
