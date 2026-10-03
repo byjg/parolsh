@@ -51,8 +51,8 @@ unlocked:
 
 Unlike `!bash`, shell mode stays in Parolsh: the agent is a `?` away, `!+`
 shares output with it, and `#` commands work. Each command runs in its own
-shell, but a `cd` carries over to the next (see [`!command`](#command)). The
-mode lasts until you change it or leave Parolsh.
+shell, but a `cd` and the variables you export carry over to the next (see
+[`!command`](#command)). The mode lasts until you change it or leave Parolsh.
 
 To start in shell mode, set `input = "shell"` in `config.toml` (see
 [Configuration](configuration.md#keys)), or run `parolsh --input=shell`;
@@ -125,9 +125,26 @@ command ended in.
   right away when the shell is not interactive.
 - **A `cd` carries over.** When a command ends, its shell tells Parolsh the
   directory it ended in, and the next command runs there: `cd src`,
-  `cd - && make`, `pushd`, a `cd` before `exit 1`. Nothing else does:
-  `export FOO=1`, a variable or an alias defined in the line is gone when
-  the command ends. Use `!bash` for a session that keeps all of its state.
+  `cd -`, `pushd`, a `cd` before `exit 1`.
+- **So do the variables you export.** `export FOO=1`, `unset FOO`,
+  `source .envrc`, `nvm use 20`, `source venv/bin/activate`: what a command
+  changed in its exported variables is applied again before the next one,
+  after your startup files, so it wins over them as in a terminal (the
+  virtualenv stays first in `PATH`). For each variable the last value replaces
+  the one before.
+
+  ```text
+  [claude] ~/projects/wallet ❯ source venv/bin/activate
+  [claude] ~/projects/wallet ❯ which python
+  /home/joao/projects/wallet/venv/bin/python
+  ```
+
+  Only exported variables: a plain `FOO=1`, an alias or a function defined in
+  a line is gone when it ends (so a virtualenv's `deactivate` is not there;
+  `set -a; source .env; set +a` exports a file of plain `KEY=value` lines).
+  `!bash` starts with these changes, and is a session that keeps all of its
+  state. They are kept in memory until you leave Parolsh, and are not given to
+  the agent: it keeps the environment it started with.
 - **The agent stays where it is.** A `cd` moves your commands, not the
   conversation: the agent keeps working in the directory it started in, and
   the prompt shows both while they differ:

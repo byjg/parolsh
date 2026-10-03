@@ -61,6 +61,13 @@ On top of that, the agent gets its `env` from the global configuration.
 Keep secrets the agent does not need out of the environment you start
 Parolsh from.
 
+What you export later with a shell command (`!export TOKEN=…`,
+`!source .env`) carries over to your next shell commands only (see
+[`!command`](input-routing.md#command)). The values are kept in memory, not
+in the history, and are not given to the agent, whose environment is the one
+it started with. The line you typed is saved like any `!command`: only with
+`save_commands = true`.
+
 ## Project configuration
 
 A `.parolsh/config.toml` comes with the directory, often from a repository
