@@ -9,17 +9,21 @@ use std::time::Duration;
 use crate::acp::{Activity, ActivityWatch, Detail};
 use crate::input::Mode;
 
-const LOGO: [&str; 3] = [
-    "┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻",
-    "┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫",
-    "╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹",
-];
+/// The logo, a speech bubble with a prompt in it (`docs/images/logo.png`). The `>` is
+/// white, the cursor `_` green, and the bubble in the gradient below.
+const LOGO: [&str; 4] = ["╭─────────╮", "│  > _    │", "╰─┬───────╯", "  ╱"];
+/// The logo's width, for the text beside it.
+const LOGO_WIDTH: usize = 11;
+/// The border's gradient, left to right: purple, blue, green.
+const LOGO_GRADIENT: [Rgb; 3] = [(118, 24, 252), (0, 140, 253), (0, 237, 157)];
+
+type Rgb = (u8, u8, u8);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-const CYAN: &str = "\x1b[36m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const BLUE: &str = "\x1b[34m";
+const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 /// Back to column 0 and erase the line.
@@ -249,17 +253,6 @@ pub fn banner(
     cwd: &Path,
     home: Option<&Path>,
 ) -> String {
-    let mut out = String::new();
-    for (i, line) in LOGO.iter().enumerate() {
-        let version = if i == LOGO.len() - 1 {
-            format!("  {DIM}{version}{RESET}")
-        } else {
-            String::new()
-        };
-        out.push_str(&format!("  {CYAN}{line}{RESET}{version}\n"));
-    }
-    out.push_str("  Speak to your terminal. Natural language first.\n");
-
     let agent = match agent {
         Some(BannerAgent {
             name,
@@ -268,11 +261,76 @@ pub fn banner(
         Some(BannerAgent { name, mode: None }) => format!("agent: {name}"),
         None => "no agent configured".to_string(),
     };
-    out.push_str(&format!(
-        "  {DIM}{agent} · {} · #help{RESET}\n",
-        tilde(cwd, home)
-    ));
+    let beside = [
+        format!("{BOLD}Parolsh{RESET} {DIM}{version}{RESET}"),
+        format!("{DIM}{agent}{RESET}"),
+        format!("{DIM}project: {}{RESET}", short_path(cwd, home)),
+        format!("{DIM}#help{RESET}"),
+    ];
+    let truecolor = truecolor();
+    let mut out = String::new();
+    for (art, text) in LOGO.iter().zip(beside) {
+        out.push_str(&logo_line(art, truecolor));
+        out.push_str(&" ".repeat(LOGO_WIDTH - art.chars().count() + 5));
+        out.push_str(&text);
+        out.push('\n');
+    }
+    out.push_str("\nSpeak to your terminal. Natural language first.\n");
     out
+}
+
+/// The terminal shows 24-bit colors (`COLORTERM`); otherwise the 256 colors
+/// of xterm are used.
+fn truecolor() -> bool {
+    std::env::var("COLORTERM").is_ok_and(|value| value == "truecolor" || value == "24bit")
+}
+
+/// One row of the logo, each character in its color.
+fn logo_line(art: &str, truecolor: bool) -> String {
+    let mut line = String::new();
+    for (x, ch) in art.chars().enumerate() {
+        let (r, g, b) = match ch {
+            ' ' => {
+                line.push(' ');
+                continue;
+            }
+            '>' => (240, 242, 248),
+            '_' => (0, 240, 150),
+            _ => gradient(x),
+        };
+        let color = if truecolor {
+            format!("38;2;{r};{g};{b}")
+        } else {
+            format!("38;5;{}", xterm256((r, g, b)))
+        };
+        line.push_str(&format!("\x1b[{color}m{ch}{RESET}"));
+    }
+    line
+}
+
+/// The border's color in column `x`.
+fn gradient(x: usize) -> Rgb {
+    let steps = (LOGO_GRADIENT.len() - 1) as f32;
+    let t = x as f32 / (LOGO_WIDTH - 1) as f32 * steps;
+    let i = (t as usize).min(LOGO_GRADIENT.len() - 2);
+    let (a, b) = (LOGO_GRADIENT[i], LOGO_GRADIENT[i + 1]);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * (t - i as f32)).round() as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// The nearest color of xterm's 6×6×6 cube (16 to 231).
+fn xterm256((r, g, b): Rgb) -> u8 {
+    let level = |v: u8| -> u8 {
+        // The cube's levels: 0, 95, 135, 175, 215, 255.
+        if v < 48 {
+            0
+        } else if v < 115 {
+            1
+        } else {
+            ((v - 35) / 40).min(5)
+        }
+    };
+    16 + 36 * level(r) + 6 * level(g) + level(b)
 }
 
 /// Silence after which the status line says how long the agent has been quiet.
@@ -501,24 +559,25 @@ mod tests {
     }
 
     #[test]
-    fn banner_shows_the_logo_version_agent_and_directory() {
+    fn banner_shows_the_logo_name_agent_and_project() {
         let text = banner(
             "x.y.z",
             Some(BannerAgent {
                 name: "claude",
                 mode: Some("auto"),
             }),
-            Path::new("/home/joao/projects/wallet"),
+            Path::new("/home/joao/projects/opensource/wallet"),
             Some(Path::new("/home/joao")),
         );
 
         assert_eq!(
             plain(&text),
-            "  ┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻\n\
-             \x20 ┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫\n\
-             \x20 ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  x.y.z\n\
-             \x20 Speak to your terminal. Natural language first.\n\
-             \x20 agent: claude (auto) · ~/projects/wallet · #help\n"
+            "╭─────────╮     Parolsh x.y.z\n\
+             │  > _    │     agent: claude (auto)\n\
+             ╰─┬───────╯     project: ~/…/opensource/wallet\n\
+             \x20 ╱             #help\n\
+             \n\
+             Speak to your terminal. Natural language first.\n"
         );
     }
 
@@ -540,8 +599,37 @@ mod tests {
             Some(Path::new("/home/joao")),
         );
 
-        assert!(plain(&no_mode).ends_with("agent: kilo · ~ · #help\n"));
-        assert!(plain(&no_agent).ends_with("no agent configured · /srv · #help\n"));
+        assert!(plain(&no_mode).contains("│     agent: kilo\n"));
+        assert!(plain(&no_agent).contains("│     no agent configured\n"));
+        assert!(plain(&no_agent).contains("╯     project: /srv\n"));
+    }
+
+    #[test]
+    fn the_logo_is_drawn_in_24_bit_colors_or_xterm_256() {
+        let true_color = logo_line(LOGO[1], true);
+        let palette = logo_line(LOGO[1], false);
+
+        // Purple border on the left, white `>`, green cursor.
+        assert!(
+            true_color.starts_with("\x1b[38;2;118;24;252m│"),
+            "{true_color:?}"
+        );
+        assert!(
+            true_color.contains("\x1b[38;2;240;242;248m>"),
+            "{true_color:?}"
+        );
+        assert!(
+            true_color.contains("\x1b[38;2;0;240;150m_"),
+            "{true_color:?}"
+        );
+        assert!(!palette.contains(";2;"), "{palette:?}");
+        assert!(palette.contains("\x1b[38;5;"), "{palette:?}");
+    }
+
+    #[test]
+    fn the_logo_border_goes_from_purple_to_green() {
+        assert_eq!(gradient(0), (118, 24, 252));
+        assert_eq!(gradient(LOGO_WIDTH - 1), (0, 237, 157));
     }
 
     #[test]

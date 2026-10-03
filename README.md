@@ -5,6 +5,10 @@ tags: [ai, rust, shell, acp]
 
 # Parolsh
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="Parolsh logo: a speech bubble with a terminal prompt, above the name parolsh" width="360" />
+</p>
+
 [![Build Status](https://github.com/byjg/parolsh/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/byjg/parolsh/actions/workflows/build.yml)
 [![Opensource ByJG](https://img.shields.io/badge/opensource-byjg-success.svg)](http://opensource.byjg.com)
 [![GitHub source](https://img.shields.io/badge/Github-source-informational?logo=github)](https://github.com/byjg/parolsh/)

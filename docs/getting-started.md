@@ -85,11 +85,12 @@ On an ANSI terminal, Parolsh greets you with a banner showing the agent, its
 mode and the directory:
 
 ```text
-  ┏━┓┏━┓┏━┓┏━┓╻  ┏━┓╻ ╻
-  ┣━┛┣━┫┣┳┛┃ ┃┃  ┗━┓┣━┫
-  ╹  ╹ ╹╹┗╸┗━┛┗━╸┗━┛╹ ╹  x.y.z
-  Speak to your terminal. Natural language first.
-  agent: claude (auto) · ~/projects/wallet · #help
+╭─────────╮     Parolsh x.y.z
+│  > _    │     agent: claude (auto)
+╰─┬───────╯     project: ~/projects/wallet
+  ╱             #help
+
+Speak to your terminal. Natural language first.
 [claude] ~/projects/wallet ✦
 ```
 
