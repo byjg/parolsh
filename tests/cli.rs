@@ -952,3 +952,32 @@ fn parolsh_mcp_serves_the_history() {
     let found = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
     assert!(found.contains("why does it [retry]"), "{found}");
 }
+
+/// `--continue` goes back to the project's last session and `--resume N` to
+/// session N, before the first prompt: the agent is in its old conversation.
+#[test]
+fn the_resume_and_continue_flags_go_back_at_start() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+    // The next runs' own conversations start at s10: only a resume gives s1.
+    set_agent_args(home.path(), &["--sessions-from", "10"]);
+
+    for flags in ["--continue", "--resume 1"] {
+        let screen = run_in(home.path(), flags, &["who"], "dumb", false);
+        assert!(screen.contains("Resumed session 1"), "{flags}: {screen}");
+        assert!(screen.contains("[s1|default|"), "{flags}: {screen}");
+        assert!(!screen.contains("[s10|"), "{flags}: {screen}");
+    }
+
+    let screen = run_in(home.path(), "--resume 9", &[], "dumb", false);
+    assert!(
+        screen.contains("parolsh: no session 9 in this project"),
+        "{screen}"
+    );
+    let empty = fake_agent_home_with(&[]);
+    let screen = run_in(empty.path(), "--continue", &[], "dumb", false);
+    assert!(
+        screen.contains("parolsh: no session saved in this project yet"),
+        "{screen}"
+    );
+}

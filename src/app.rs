@@ -89,6 +89,16 @@ pub struct App {
     /// The history database, when there is one: the agent gets it as an MCP
     /// server.
     history_db: Option<PathBuf>,
+    /// The session to go back to once the banner is printed.
+    resume: Option<Resume>,
+}
+
+/// The session to go back to at start: `--resume <n>`, or `--continue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    Session(i64),
+    /// The last one of this project.
+    Latest,
 }
 
 enum Flow {
@@ -100,7 +110,13 @@ impl App {
     /// `notices` are shown after the banner, with the first run's.
     /// `input` is `--input`: where plain text goes at start, over the
     /// configuration's `input`.
-    pub fn new(cwd: PathBuf, mut notices: Vec<String>, input: Option<Mode>) -> Result<Self> {
+    /// `resume` is `--resume` or `--continue`: the session to go back to.
+    pub fn new(
+        cwd: PathBuf,
+        mut notices: Vec<String>,
+        input: Option<Mode>,
+        resume: Option<Resume>,
+    ) -> Result<Self> {
         // Before loading: the first run may write the global configuration.
         let search_path = std::env::var("PATH").ok();
         notices.extend(
@@ -150,6 +166,7 @@ impl App {
             interrupt: Arc::new(AtomicBool::new(false)),
             title: None,
             history_db,
+            resume,
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -192,6 +209,11 @@ impl App {
             println!("{notice}");
         }
         self.title = Title::start(self.place());
+        if let Some(resume) = self.resume.take()
+            && let Err(e) = self.resume_at_start(resume)
+        {
+            eprintln!("parolsh: {e:#}");
+        }
 
         loop {
             if let Some(title) = &self.title {
@@ -495,7 +517,27 @@ impl App {
     /// `#resume <n>`: goes back to session `n` of this project with its
     /// agent, in its directory, and goes on saving to it.
     fn resume_command(&mut self, args: &str) -> Result<()> {
-        let id = session_number(args)?;
+        self.resume_session(session_number(args)?)
+    }
+
+    /// `--resume <n>` or `--continue`. The agent is still starting: the
+    /// resume waits for it.
+    fn resume_at_start(&mut self, resume: Resume) -> Result<()> {
+        let id = match resume {
+            Resume::Session(id) => id,
+            Resume::Latest => {
+                // This run's own session is only written with its first entry.
+                self.history()?
+                    .sessions(&self.project_key())?
+                    .first()
+                    .map(|session| session.id)
+                    .context("no session saved in this project yet")?
+            }
+        };
+        self.resume_session(id)
+    }
+
+    fn resume_session(&mut self, id: i64) -> Result<()> {
         let session = self
             .history()?
             .resumable(&self.project_key(), id)?
