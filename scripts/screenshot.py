@@ -10,7 +10,11 @@ git repository at ~/projects/wallet (a temporary HOME), with the real
 `claude-agent-acp`. Types the lines in SESSION, waits for each to finish,
 and renders the screen with headless Chrome.
 
-Usage: scripts/screenshot.py [--agent COMMAND] [--out PATH]
+Usage: scripts/screenshot.py [--agent COMMAND] [--out PATH] [--parolsh BINARY]
+
+Without --parolsh, this tree is built: unless it is a clean checkout of the
+release's tag, its banner says `-dev`. Give a build of the tag to show the
+release's version.
 
 Needs uv, cargo, git, Google Chrome and a logged-in agent. The agent keeps
 your real HOME, so its login works; everything else sees the temporary one.
@@ -221,10 +225,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--agent", default="claude-agent-acp", help="ACP agent command")
     parser.add_argument("--out", default=ROOT / "docs" / "images" / "shell-mode.png", type=Path)
+    parser.add_argument("--parolsh", type=Path, help="the binary to run, instead of building this tree")
     args = parser.parse_args()
 
-    subprocess.run(["cargo", "build", "--quiet"], cwd=ROOT, check=True)
-    parolsh = str(ROOT / "target" / "debug" / "parolsh")
+    if args.parolsh:
+        parolsh = str(args.parolsh.resolve())
+    else:
+        subprocess.run(["cargo", "build", "--quiet"], cwd=ROOT, check=True)
+        parolsh = str(ROOT / "target" / "debug" / "parolsh")
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         home = tmp / "home"
