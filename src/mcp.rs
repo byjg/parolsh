@@ -18,25 +18,36 @@ pub const NAME: &str = "parolsh-history";
 /// Longest entry text `get_session` returns.
 const MAX_ENTRY: usize = 4000;
 
-/// The MCP server Parolsh gives the agent: this program, reading `db` for
-/// `project`. `None` when Parolsh cannot tell where its own program is.
-pub fn server(db: &Path, project: &str) -> Option<McpServer> {
+/// What the tools may return: the sessions of one project, and its plain
+/// `!command` lines only when you share them (`commands = "shared"`).
+#[derive(Debug, Clone, Copy)]
+pub struct Scope<'a> {
+    pub project: &'a str,
+    pub commands: bool,
+}
+
+/// The MCP server Parolsh gives the agent: this program, reading `db` within
+/// `scope`. `None` when Parolsh cannot tell where its own program is.
+pub fn server(db: &Path, scope: Scope) -> Option<McpServer> {
     let program = std::env::current_exe().ok()?;
-    let args = vec![
+    let mut args = vec![
         "mcp".to_string(),
         "--db".to_string(),
         db.display().to_string(),
         "--project".to_string(),
-        project.to_string(),
+        scope.project.to_string(),
     ];
+    if scope.commands {
+        args.push("--commands".to_string());
+    }
     Some(McpServer::Stdio(
         McpServerStdio::new(NAME, program).args(args),
     ))
 }
 
-/// Serves the history of `project` in `db` on stdin and stdout until stdin
-/// closes.
-pub fn serve(db: &Path, project: &str) -> anyhow::Result<()> {
+/// Serves the history in `db`, within `scope`, on stdin and stdout until
+/// stdin closes.
+pub fn serve(db: &Path, scope: Scope) -> anyhow::Result<()> {
     let history = History::open_read_only(db)?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
@@ -46,7 +57,7 @@ pub fn serve(db: &Path, project: &str) -> anyhow::Result<()> {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(&history, project, &message),
+            Ok(message) => handle(&history, scope, &message),
             Err(e) => Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
         };
         if let Some(reply) = reply {
@@ -58,7 +69,7 @@ pub fn serve(db: &Path, project: &str) -> anyhow::Result<()> {
 }
 
 /// The reply to one message; `None` for notifications.
-fn handle(history: &History, project: &str, message: &Value) -> Option<Value> {
+fn handle(history: &History, scope: Scope, message: &Value) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -80,7 +91,7 @@ fn handle(history: &History, project: &str, message: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call(history, project, name, &arguments) {
+            match call(history, scope, name, &arguments) {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
                 Err(e) => json!({
                     "content": [{"type": "text", "text": e.to_string()}],
@@ -142,8 +153,8 @@ fn tools() -> Value {
         {
             "name": "commands",
             "description": "Shell commands the user ran in this project, newest first, with \
-                their exit code. Plain `!commands` are only there when the user chose to \
-                save them.",
+                their exit code: the ones whose output was shared with you, and the others \
+                only when the user chose to share them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -156,7 +167,8 @@ fn tools() -> Value {
 }
 
 /// Runs tool `name`, as text for the agent.
-fn call(history: &History, project: &str, name: &str, arguments: &Value) -> anyhow::Result<String> {
+fn call(history: &History, scope: Scope, name: &str, arguments: &Value) -> anyhow::Result<String> {
+    let project = scope.project;
     let number = |key: &str, default: usize| {
         arguments
             .get(key)
@@ -167,7 +179,8 @@ fn call(history: &History, project: &str, name: &str, arguments: &Value) -> anyh
     let mut out = String::new();
     match name {
         "search_history" => {
-            let hits = history.search(project, text("query"), number("limit", 20))?;
+            let hits =
+                history.search(project, text("query"), number("limit", 20), scope.commands)?;
             if hits.is_empty() {
                 out.push_str("No matches.");
             }
@@ -204,7 +217,16 @@ fn call(history: &History, project: &str, name: &str, arguments: &Value) -> anyh
                 .ok_or_else(|| anyhow::anyhow!("no session {session} in this project"))?;
             let from = number("from", 0);
             let limit = number("limit", 30);
-            for (position, entry) in entries.iter().enumerate().skip(from).take(limit) {
+            // A plain `!command` keeps its position, and is left out unless
+            // shared.
+            let shown = |entry: &&crate::history::Stored| scope.commands || entry.kind != "command";
+            for (position, entry) in entries
+                .iter()
+                .enumerate()
+                .skip(from)
+                .take(limit)
+                .filter(|(_, entry)| shown(entry))
+            {
                 let mut text: String = entry.text.chars().take(MAX_ENTRY).collect();
                 if entry.text.chars().count() > MAX_ENTRY {
                     text.push_str(" […cut]");
@@ -220,16 +242,19 @@ fn call(history: &History, project: &str, name: &str, arguments: &Value) -> anyh
                     },
                 ));
             }
-            if entries.len() > from + limit {
-                out.push_str(&format!(
-                    "({} more: from = {})\n",
-                    entries.len() - from - limit,
-                    from + limit
-                ));
+            // Only what may be shown counts: a hidden command is not hinted.
+            let more = entries.iter().skip(from + limit).filter(shown).count();
+            if more > 0 {
+                out.push_str(&format!("({more} more: from = {})\n", from + limit));
             }
         }
         "commands" => {
-            let commands = history.commands(project, text("contains"), number("limit", 30))?;
+            let commands = history.commands(
+                project,
+                text("contains"),
+                number("limit", 30),
+                scope.commands,
+            )?;
             if commands.is_empty() {
                 out.push_str("No commands saved.");
             }
@@ -280,22 +305,45 @@ mod tests {
             history
                 .add("user", "capture", "cargo test", &json!({"exit": 101}))
                 .unwrap();
+            // A plain `!command`: yours, unless you share them.
+            history
+                .add("user", "command", "make retry-deploy", &json!({"exit": 2}))
+                .unwrap();
         }
         (dir, db)
     }
 
+    /// The project's sessions, without the plain `!commands`: the default.
+    const PRIVATE: Scope = Scope {
+        project: "/p",
+        commands: false,
+    };
+    const SHARED: Scope = Scope {
+        project: "/p",
+        commands: true,
+    };
+
     fn request(history: &History, method: &str, params: Value) -> Value {
+        request_within(history, PRIVATE, method, params)
+    }
+
+    fn request_within(history: &History, scope: Scope, method: &str, params: Value) -> Value {
         handle(
             history,
-            "/p",
+            scope,
             &json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}),
         )
         .unwrap()
     }
 
     fn tool(history: &History, name: &str, arguments: Value) -> String {
-        let reply = request(
+        tool_within(history, PRIVATE, name, arguments)
+    }
+
+    fn tool_within(history: &History, scope: Scope, name: &str, arguments: Value) -> String {
+        let reply = request_within(
             history,
+            scope,
             "tools/call",
             json!({"name": name, "arguments": arguments}),
         );
@@ -330,7 +378,7 @@ mod tests {
             ["search_history", "list_sessions", "get_session", "commands"]
         );
         let notification = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        assert!(handle(&history, "/p", &notification).is_none());
+        assert!(handle(&history, PRIVATE, &notification).is_none());
     }
 
     #[test]
@@ -380,6 +428,48 @@ mod tests {
             "{commands}"
         );
         assert_eq!(commands.lines().count(), 1);
+    }
+
+    /// Your plain `!commands` are saved for you, not for the agent: its tools
+    /// leave them out, unless you share them.
+    #[test]
+    fn plain_commands_are_returned_only_when_shared() {
+        let (_dir, db) = fixture();
+        let history = History::open_read_only(&db).unwrap();
+        let search = json!({"query": "retry"});
+        let session = json!({"session": 1});
+
+        let private = [
+            tool(&history, "search_history", search.clone()),
+            tool(&history, "get_session", session.clone()),
+            tool(&history, "commands", json!({})),
+        ];
+        for text in &private {
+            assert!(!text.contains("retry-deploy"), "{text}");
+        }
+        // The `!+` one, sent to the agent when it ran, is still there.
+        assert!(
+            private[2].contains("!+cargo test · exit 101"),
+            "{}",
+            private[2]
+        );
+
+        let shared = [
+            tool_within(&history, SHARED, "search_history", search),
+            tool_within(&history, SHARED, "get_session", session),
+            tool_within(&history, SHARED, "commands", json!({})),
+        ];
+        assert!(shared[0].contains("make [retry]-deploy"), "{}", shared[0]);
+        assert!(
+            shared[1].contains("[3] user command {\"exit\":2}: make retry-deploy"),
+            "{}",
+            shared[1]
+        );
+        assert!(
+            shared[2].contains("!make retry-deploy · exit 2"),
+            "{}",
+            shared[2]
+        );
     }
 
     #[test]

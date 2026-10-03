@@ -4,13 +4,13 @@
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
-    ElicitationFormCapabilities, ElicitationMode, InitializeRequest, LoadSessionRequest, McpServer,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus,
-    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions, SessionId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason, TextContent, ToolCallContent, ToolCallStatus,
+    ElicitationFormCapabilities, ElicitationMode, ErrorCode, InitializeRequest, LoadSessionRequest,
+    McpServer, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    PlanEntryStatus, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, StopReason, TextContent, ToolCallContent, ToolCallStatus,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{
@@ -652,6 +652,16 @@ fn stop_reason(error: &agent_client_protocol::Error) -> String {
     text.trim_end().to_string()
 }
 
+/// Why a conversation could not be resumed, in one line: agents keep
+/// conversations themselves, and may not have this one any more.
+fn resume_error(error: &agent_client_protocol::Error) -> String {
+    if error.code == ErrorCode::ResourceNotFound {
+        return "the agent no longer has that conversation".to_string();
+    }
+    let reason = stop_reason(error);
+    reason.lines().next().unwrap_or_default().to_string()
+}
+
 /// Names the file that gets the agent's stdio, for diagnostics.
 const LOG_VAR: &str = "PAROLSH_ACP_LOG";
 
@@ -836,7 +846,7 @@ async fn serve(
                                 Event::Resumed(Ok(()))
                             }
                             Err(e) if is_incoming_transport_closed(&e) => return Err(e),
-                            Err(e) => Event::Resumed(Err(stop_reason(&e))),
+                            Err(e) => Event::Resumed(Err(resume_error(&e))),
                         };
                         let _ = events.send(event);
                     }

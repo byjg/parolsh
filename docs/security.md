@@ -65,8 +65,8 @@ What you export later with a shell command (`!export TOKEN=…`,
 `!source .env`) carries over to your next shell commands only (see
 [`!command`](input-routing.md#command)). The values are kept in memory, not
 in the history, and are not given to the agent, whose environment is the one
-it started with. The line you typed is saved like any `!command`: only with
-`save_commands = true`.
+it started with. The line you typed is saved like any `!command` (see
+[Looking back](#looking-back)).
 
 ## Project configuration
 
@@ -87,8 +87,12 @@ on disk: your messages, the outputs you shared, the agent's answers, reasoning
 and tool calls, and your answers to its questions, for 90 days by default. It
 is `~/.local/state/parolsh/history.db`, readable only by you.
 
-- `!command` lines are not in it unless you set `save_commands = true`, which
-  the banner then says.
+- Your `!command` lines are in it too, with their exit code and never their
+  output, so that `#redraw` and a resumed session show them. A secret typed in
+  a command (`!mysql -pS3cret`) is therefore in the file, as it is in the
+  input history (`~/.local/state/parolsh/history`, also readable only by you)
+  and would be in `~/.bash_history` in a terminal. `commands = "off"` does not
+  save them.
 - `#forget` removes a session, `#new private` keeps a conversation out of it,
   and `history_days = 0` saves nothing.
 - A project file cannot change these settings.
@@ -97,8 +101,9 @@ The agent gets this history as an MCP server (see
 [The agent can search the history](input-routing.md#the-agent-can-search-the-history)),
 so **what was saved can reach the agent again**: any agent you use in this
 project, of any provider, can read what its searches return from earlier
-sessions, including what was first sent to another agent, and the `!command`
-lines when `save_commands` is on. A `#new private` conversation does not get
+sessions, including what was first sent to another agent. Its tools do not
+return your `!command` lines, unless you set `commands = "shared"`, which the
+banner then says. A `#new private` conversation does not get
 the server; `history_days = 0` turns both the history and the server off.
 
 The server's tools only return this project's sessions. That keeps an agent

@@ -87,6 +87,20 @@ pub enum ThinkingDisplay {
     Show,
 }
 
+/// What happens to the lines of your `!commands` (never their output).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Commands {
+    /// Saved in the history for you (`#redraw`, `#resume`, `#audit`), and
+    /// not returned by the tools the agent searches it with.
+    #[default]
+    Private,
+    /// Saved, and returned to the agent too.
+    Shared,
+    /// Not saved: only `#audit` of the current run has them.
+    Off,
+}
+
 /// How the input prompt is drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -136,8 +150,8 @@ pub struct Config {
     pub redraw_exchanges: usize,
     /// Days an idle session stays in the history; 0 keeps no history.
     pub history_days: u32,
-    /// Also save `!command` lines in the history.
-    pub save_commands: bool,
+    /// Whether `!command` lines are saved in the history, and for whom.
+    pub commands: Commands,
 }
 
 /// One config file as written on disk: every field is optional so a project
@@ -158,6 +172,8 @@ struct ConfigFile {
     audit_entries: Option<usize>,
     redraw_exchanges: Option<usize>,
     history_days: Option<u32>,
+    commands: Option<Commands>,
+    /// Before `commands`: true is `shared`, false is `off`.
     save_commands: Option<bool>,
 }
 
@@ -189,10 +205,11 @@ impl ConfigFile {
     /// it uses, never what is executed.
     fn check_project(&self) -> Result<()> {
         // What is kept about your sessions is yours to choose, not a
-        // repository's: it could turn on saving your commands.
+        // repository's: it could give your commands to the agent.
         for (key, set) in [
             ("shell", self.shell.is_some()),
             ("history_days", self.history_days.is_some()),
+            ("commands", self.commands.is_some()),
             ("save_commands", self.save_commands.is_some()),
         ] {
             if set {
@@ -301,7 +318,13 @@ impl Config {
             audit_entries: file.audit_entries.unwrap_or(1000),
             redraw_exchanges: file.redraw_exchanges.unwrap_or(5),
             history_days: file.history_days.unwrap_or(90),
-            save_commands: file.save_commands.unwrap_or(false),
+            commands: file
+                .commands
+                .or(file.save_commands.map(|save| match save {
+                    true => Commands::Shared,
+                    false => Commands::Off,
+                }))
+                .unwrap_or_default(),
         })
     }
 }
@@ -349,7 +372,7 @@ mod tests {
         assert_eq!(config.audit_entries, 1000);
         assert_eq!(config.redraw_exchanges, 5);
         assert_eq!(config.history_days, 90);
-        assert!(!config.save_commands);
+        assert_eq!(config.commands, Commands::Private);
     }
 
     #[test]
@@ -433,6 +456,7 @@ mod tests {
             ),
             ("default_agent = \"evil\"\n", "`default_agent` is `evil`"),
             // Nor what is kept about your sessions.
+            ("commands = \"shared\"\n", "`commands`"),
             ("save_commands = true\n", "`save_commands`"),
             ("history_days = 3650\n", "`history_days`"),
         ];
@@ -441,6 +465,33 @@ mod tests {
             let project = write(tmp.path(), &format!("project{i}.toml"), text);
             let error = Config::load_files(Some(&global), Some(&project)).unwrap_err();
             assert!(format!("{error:#}").contains(message), "{text}: {error:#}");
+        }
+    }
+
+    /// `save_commands`, from before `commands`, is still read; `commands`
+    /// wins when both are there.
+    #[test]
+    fn commands_can_be_private_shared_or_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("commands = \"private\"\n", Commands::Private),
+            ("commands = \"shared\"\n", Commands::Shared),
+            ("commands = \"off\"\n", Commands::Off),
+            ("save_commands = true\n", Commands::Shared),
+            ("save_commands = false\n", Commands::Off),
+            (
+                "save_commands = true\ncommands = \"private\"\n",
+                Commands::Private,
+            ),
+        ];
+
+        for (i, (text, expected)) in cases.iter().enumerate() {
+            let path = write(tmp.path(), &format!("config{i}.toml"), text);
+            assert_eq!(
+                Config::load_file(&path).unwrap().commands,
+                *expected,
+                "{text}"
+            );
         }
     }
 

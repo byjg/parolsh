@@ -126,7 +126,9 @@ session 11 · entry 4 · 2026-09-30 10:07 · agent answer
 
 The tools are `search_history` (`query`, `limit`), `list_sessions` (`limit`),
 `get_session` (`session`, `from`, `limit`) and `commands` (`contains`,
-`limit`). If this finds it and the agent did not, the agent did not search:
+`limit`). As for the agent, your plain `!command` lines are left out; add
+`--commands` to see them, which is what `commands = "shared"` gives the
+agent. If this finds it and the agent did not, the agent did not search:
 name the tools in your message, see
 [The agent can search the history](input-routing.md#the-agent-can-search-the-history).
 

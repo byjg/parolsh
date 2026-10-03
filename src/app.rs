@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{AgentHandle, Block};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
-use crate::config::{Agent, Config, OptionValue, PromptStyle};
+use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
 use crate::history::{History, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
@@ -139,11 +139,12 @@ impl App {
         {
             match History::open(&path, config.history_days) {
                 Ok(history) => {
-                    audit = audit.with_history(history, config.save_commands);
+                    audit = audit.with_history(history, config.commands != Commands::Off);
                     history_db = Some(path);
-                    if config.save_commands {
+                    if config.commands == Commands::Shared {
                         notices.push(
-                            "!commands are saved to the history · save_commands = false to stop"
+                            "the agent can read your !commands in the history · \
+                             commands = \"private\" keeps them to you"
                                 .to_string(),
                         );
                     }
@@ -209,6 +210,7 @@ impl App {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
+            keep_private(&path)?;
             editor = editor.with_history(Box::new(FileBackedHistory::with_file(1000, path)?));
         }
         if ui::is_ansi() {
@@ -485,10 +487,14 @@ impl App {
         }
         let current = history.current();
         for session in sessions {
-            let title = session
-                .title
-                .as_deref()
-                .map(|title| audit::excerpt(title, 60));
+            // Without a message, the session is named by its first command.
+            let title = match (&session.title, &session.first_command) {
+                (Some(title), _) => Some(audit::excerpt(title, 60)),
+                (None, Some(command)) => {
+                    Some(format!("(commands only) !{}", audit::excerpt(command, 44)))
+                }
+                (None, None) => None,
+            };
             let line = format!(
                 "{} {:>4}  {}  {:<8} {:>4} entries  {}",
                 if current == Some(session.id) {
@@ -557,39 +563,61 @@ impl App {
             .history()?
             .resumable(&self.project_key(), id)?
             .with_context(|| format!("no session {id} in this project, see #sessions"))?;
-        let agent_name = session
-            .agent
-            .with_context(|| format!("session {id} had no agent"))?;
-        let agent_session = session.agent_session_id.with_context(|| {
-            format!("session {id} cannot be resumed: the agent gave no id for it")
-        })?;
+        // A session of shell commands only: the agent has no conversation
+        // to go back to (it keeps one from its first message), so it goes on
+        // with the one it has, and the session with what follows.
+        let conversation = session.messages > 0;
         if Path::new(&session.cwd) != self.cwd {
             self.change_dir(&session.cwd)?;
         }
-        if self.active.as_deref() != Some(agent_name.as_str()) || self.agent.is_none() {
-            self.switch_agent(&agent_name)?;
+        let other_agent =
+            |name: &String| self.active.as_ref() != Some(name) || self.agent.is_none();
+        match &session.agent {
+            Some(name) if other_agent(name) => {
+                // Its agent may be gone from the configuration: only a
+                // conversation needs it.
+                if conversation || self.config.agents.contains_key(name) {
+                    self.switch_agent(name)?;
+                }
+            }
+            Some(_) => {}
+            None if conversation => anyhow::bail!("session {id} had no agent"),
+            None => {}
         }
-        let mcp = self.mcp_servers(false);
-        let agent = self.agent.as_ref().with_context(no_agent)?;
-        anyhow::ensure!(
-            agent.resume(agent_session, self.cwd.clone(), mcp),
-            "the agent stopped"
-        );
-        match turn::wait_resumed(agent) {
-            turn::Resumed::Yes => {}
-            turn::Resumed::No(why) => anyhow::bail!("cannot resume session {id}: {why}"),
-            turn::Resumed::AgentStopped(why) => {
-                self.agent = None;
-                anyhow::bail!("{why}. Run #new to start it again.");
+        if conversation {
+            let agent_session = session.agent_session_id.with_context(|| {
+                format!("session {id} cannot be resumed: the agent gave no id for it")
+            })?;
+            let mcp = self.mcp_servers(false);
+            let agent = self.agent.as_ref().with_context(no_agent)?;
+            anyhow::ensure!(
+                agent.resume(agent_session, self.cwd.clone(), mcp),
+                "the agent stopped"
+            );
+            match turn::wait_resumed(agent) {
+                turn::Resumed::Yes => {}
+                turn::Resumed::No(why) => anyhow::bail!(
+                    "cannot resume session {id}: {why}. #audit {id} shows what Parolsh saved of it"
+                ),
+                turn::Resumed::AgentStopped(why) => {
+                    self.agent = None;
+                    anyhow::bail!("{why}. Run #new to start it again.");
+                }
             }
         }
         let project = self.project_key();
         if let Some(history) = self.audit.history_mut() {
             history.resume(&project, id)?;
         }
-        // Where the conversation was, before going on.
+        // Where the session was, before going on.
         self.show_exchanges(self.config.redraw_exchanges)?;
-        println!("Resumed session {id}: the agent remembers that conversation.");
+        if conversation {
+            println!("Resumed session {id}: the agent remembers that conversation.");
+        } else {
+            println!(
+                "Continued session {id}: it has only shell commands, so the agent starts a new conversation."
+            );
+        }
         Ok(())
     }
 
@@ -1012,7 +1040,13 @@ impl App {
     /// project, unless the conversation is private or there is no history.
     fn mcp_servers(&self, private: bool) -> Vec<McpServer> {
         match &self.history_db {
-            Some(db) if !private => mcp::server(db, &self.project_key()).into_iter().collect(),
+            Some(db) if !private => {
+                let scope = mcp::Scope {
+                    project: &self.project_key(),
+                    commands: self.config.commands == Commands::Shared,
+                };
+                mcp::server(db, scope).into_iter().collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -1199,6 +1233,19 @@ fn resolve_dir(cwd: &Path, args: &str) -> Result<PathBuf> {
 /// The input history: the lines you typed.
 fn history_path() -> Option<PathBuf> {
     state_dir().map(|dir| dir.join("history"))
+}
+
+/// Makes `path` readable by the user only, creating it if needed: the input
+/// history holds every line typed, `!commands` with their arguments too.
+fn keep_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    // One made by an earlier version, with the default permissions.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// `$XDG_STATE_HOME/parolsh`, or `~/.local/state/parolsh`.

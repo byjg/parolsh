@@ -725,8 +725,8 @@ fn audit_of(screen: &str) -> Vec<String> {
 }
 
 /// What a run did is still there in the next one: `#sessions` lists it and
-/// `#audit 1` shows it, with the agent's answers. `!command` lines are not
-/// saved by default; `#forget` removes the session.
+/// `#audit 1` shows it, with the agent's answers and your `!command` lines
+/// (never their output); `#forget` removes the session.
 #[test]
 fn the_history_keeps_sessions_across_runs() {
     let home = fake_agent_home("");
@@ -751,6 +751,7 @@ fn the_history_keeps_sessions_across_runs() {
     );
     let audit = audit_of(&screen);
     let expected = [
+        "USER     !echo local · exit 0",
         "USER     !+echo shared · exit 0 · 7 B kept",
         "SHARED   1 output(s), 7 B → fake",
         "USER     → fake: perm",
@@ -768,10 +769,8 @@ fn the_history_keeps_sessions_across_runs() {
             "missing {line}: {audit:#?}"
         );
     }
-    assert!(
-        !audit.iter().any(|line| line.contains("echo local")),
-        "{audit:#?}"
-    );
+    // The command's line is kept, not what it printed.
+    assert!(!audit.iter().any(|line| line == "local"), "{audit:#?}");
 
     let screen = run_in(home.path(), "", &["#forget 1", "#audit 1"], "dumb", false);
     assert!(
@@ -781,19 +780,113 @@ fn the_history_keeps_sessions_across_runs() {
     assert!(screen.contains("no session 1 in this project"), "{screen}");
 }
 
-/// With `save_commands = true`, `!command` lines are saved too, and the
-/// banner says so.
-#[test]
-fn save_commands_saves_them_and_says_so() {
-    let home = fake_agent_home("save_commands = true");
-    let first = run_in(home.path(), "", &["!echo local"], "dumb", false);
-    assert!(
-        first.contains("!commands are saved to the history · save_commands = false to stop"),
-        "{first}"
+/// A search of the history as the agent's tools do it: `parolsh mcp`, with
+/// `flags` after the project.
+fn agent_search(home: &std::path::Path, flags: &[&str], query: &str) -> String {
+    use std::io::Write;
+    let mut server = parolsh()
+        .args(["mcp", "--db"])
+        .arg(home.join("parolsh/history.db"))
+        .args(["--project", env!("CARGO_MANIFEST_DIR")])
+        .args(flags)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"search_history","arguments":{{"query":"{query}"}}}}}}"#
     );
+    writeln!(server.stdin.take().unwrap(), "{request}").unwrap();
+    let output = server.wait_with_output().unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
 
+/// By default your `!commands`, typed with `!` or in shell mode, are saved for
+/// you: `#redraw` shows them again in the next run. The agent's tools do not
+/// return them, and it does not get the flag that would.
+#[test]
+fn commands_are_saved_for_you_and_not_for_the_agent() {
+    let home = fake_agent_home("");
+    let lines = [
+        "!echo with-bang",
+        "!",
+        "echo in-lock-mode",
+        "?hello",
+        "?mcp",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        !screen.contains("the agent can read your !commands"),
+        "{screen}"
+    );
+    // The MCP server the agent got: without `--commands`.
+    assert!(screen.contains(r#""--project", ""#), "{screen}");
+    assert!(!screen.contains("--commands"), "{screen}");
+
+    let screen = run_in(home.path(), "--continue", &["#redraw"], "dumb", false);
+    let shown = &screen[screen.rfind("#redraw").unwrap()..];
+    for line in ["!echo with-bang · exit 0", "!echo in-lock-mode · exit 0"] {
+        assert!(shown.contains(line), "missing {line}\n{shown}");
+    }
+
+    assert_eq!(agent_search(home.path(), &[], "echo"), "No matches.");
+    assert!(agent_search(home.path(), &[], "hello").contains("[hello]"));
+    let shared = agent_search(home.path(), &["--commands"], "echo");
+    assert!(shared.contains("[echo] with-bang"), "{shared}");
+}
+
+/// `commands = "shared"` gives them to the agent too, and the banner says
+/// so; `save_commands = true`, from before, means the same. With `"off"`
+/// they are not saved.
+#[test]
+fn commands_can_be_shared_with_the_agent_or_not_saved() {
+    for setting in ["commands = \"shared\"", "save_commands = true"] {
+        let home = fake_agent_home(setting);
+        let screen = run_in(home.path(), "", &["!echo local", "mcp"], "dumb", false);
+        assert!(
+            screen.contains("the agent can read your !commands in the history"),
+            "{setting}: {screen}"
+        );
+        assert!(screen.contains(r#""--commands"]"#), "{setting}: {screen}");
+    }
+
+    let home = fake_agent_home("commands = \"off\"");
+    run_in(home.path(), "", &["!echo local", "hello"], "dumb", false);
     let screen = run_in(home.path(), "", &["#audit 1"], "dumb", false);
-    assert_eq!(audit_of(&screen), ["USER     !echo local · exit 0"]);
+    let audit = audit_of(&screen);
+    assert!(
+        audit.iter().any(|line| line == "USER     → fake: hello"),
+        "{audit:#?}"
+    );
+    assert!(
+        !audit.iter().any(|line| line.contains("echo local")),
+        "{audit:#?}"
+    );
+}
+
+/// The input history holds every line typed, `!commands` too: it is readable
+/// by the user only, even one made by an earlier version.
+#[test]
+fn the_input_history_is_readable_by_the_user_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = fake_agent_home("");
+    let history = home.path().join("parolsh/history");
+    std::fs::write(&history, "!old line\n").unwrap();
+    std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+    run_in(home.path(), "", &["!echo typed"], "dumb", false);
+
+    let mode = std::fs::metadata(&history).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let lines = std::fs::read_to_string(&history).unwrap();
+    assert!(
+        lines.contains("!old line") && lines.contains("!echo typed"),
+        "{lines}"
+    );
 }
 
 /// `#new private` saves nothing of that conversation; the next `#new` saves
@@ -1094,4 +1187,64 @@ fn a_resumed_session_shows_its_last_exchanges() {
     let before = &screen[..at];
     assert!(before.contains("✦ what is the plan\n"), "{screen}");
     assert!(before.contains("] what is the plan\n"), "{screen}");
+}
+
+/// A session of shell commands only has no conversation for the agent to go
+/// back to (it keeps one from its first message): `#resume` shows its
+/// commands and goes on with it, without asking the agent. `#sessions` names
+/// it by its first command.
+#[test]
+fn a_session_of_commands_only_is_continued_without_the_agent() {
+    // An agent that would fail a resume: it must not be asked.
+    let home = fake_agent_home_with(&["--forgets"]);
+    run_in(
+        home.path(),
+        "",
+        &["!echo first", "!echo second"],
+        "dumb",
+        false,
+    );
+
+    let lines = ["#sessions", "#resume 1", "hello", "#sessions"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        screen.contains("2 entries  (commands only) !echo first"),
+        "{screen}"
+    );
+    let resumed = &screen[screen.find("#resume 1").unwrap()..];
+    let said = resumed
+        .find("Continued session 1: it has only shell commands")
+        .expect(&screen);
+    // Its commands are shown first, then the conversation goes on in it.
+    for line in ["!echo first · exit 0", "!echo second · exit 0"] {
+        assert!(resumed[..said].contains(line), "missing {line}\n{resumed}");
+    }
+    assert!(!screen.contains("cannot resume"), "{screen}");
+    assert!(resumed.contains("] hello\n"), "{resumed}");
+    // One session, now with a message: named by it.
+    let after = &screen[screen.rfind("#sessions").unwrap()..];
+    assert!(after.contains("*    1 "), "{after}");
+    assert!(after.contains("  hello"), "{after}");
+    assert!(!after.contains("(commands only)"), "{after}");
+}
+
+/// When the agent no longer has a conversation, `#resume` says so in one
+/// line, and where what Parolsh saved of it is.
+#[test]
+fn a_conversation_the_agent_forgot_is_said_plainly() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+    set_agent_args(home.path(), &["--forgets"]);
+
+    let screen = run_in(home.path(), "", &["#resume 1"], "dumb", false);
+
+    assert!(
+        screen.contains(
+            "parolsh: cannot resume session 1: the agent no longer has that conversation. \
+             #audit 1 shows what Parolsh saved of it"
+        ),
+        "{screen}"
+    );
+    assert!(!screen.contains("Resource not found"), "{screen}");
+    assert!(!screen.contains("\"uri\""), "{screen}");
 }

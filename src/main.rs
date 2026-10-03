@@ -74,14 +74,26 @@ enum Tool {
         /// Only the sessions of this project
         #[arg(long)]
         project: String,
+        /// Also return the plain `!command` lines (`commands = "shared"`)
+        #[arg(long)]
+        commands: bool,
     },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    if let Some(Tool::Mcp { db, project }) = cli.tool {
-        return match mcp::serve(&db, &project) {
+    if let Some(Tool::Mcp {
+        db,
+        project,
+        commands,
+    }) = cli.tool
+    {
+        let scope = mcp::Scope {
+            project: &project,
+            commands,
+        };
+        return match mcp::serve(&db, scope) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("parolsh mcp: {e:#}");
