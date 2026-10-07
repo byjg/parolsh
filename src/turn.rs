@@ -8,12 +8,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crate::acp::{AgentHandle, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage};
 use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
+use crate::jobs::Job;
 use crate::markdown::Markdown;
 use crate::ui;
 use crate::wrap::Wrap;
@@ -27,8 +29,30 @@ pub fn install_interrupt_handler() -> Result<(), ctrlc::Error> {
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
 }
 
+/// Set by SIGTSTP: Ctrl+Z during a turn, which sends it to the background.
+static BACKGROUND: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
+
+/// Makes Ctrl+Z send the running turn to the background instead of stopping
+/// Parolsh. At the prompt Ctrl+Z is a key, and during a shell command it
+/// goes to the command.
+pub fn install_background_handler() -> std::io::Result<()> {
+    signal_hook::flag::register(signal_hook::consts::SIGTSTP, BACKGROUND.clone()).map(|_| ())
+}
+
+/// True once when Ctrl+Z was pressed since the last call.
+pub fn background_asked() -> bool {
+    BACKGROUND.swap(false, Ordering::SeqCst)
+}
+
+/// True once when Ctrl+C was pressed since the last call.
+pub fn interrupt_asked() -> bool {
+    INTERRUPTED.swap(false, Ordering::SeqCst)
+}
+
 /// What happened to the agent during the turn.
 pub enum Outcome {
+    /// Ctrl+Z: the turn goes on, to be followed in the background.
+    Background(Box<Turn>),
     Finished,
     /// The agent answered with an error, and keeps running.
     Failed,
@@ -47,6 +71,214 @@ pub struct Display {
 /// How long the agent has to confirm a cancel before Parolsh stops waiting.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// A prompt the agent is working on: what is kept of it while it runs, in
+/// the foreground or, after Ctrl+Z, in the background.
+pub struct Turn {
+    id: TurnId,
+    started: Instant,
+    tools: ToolAudit,
+    said: Said,
+    usage: Option<TurnUsage>,
+    /// Where it is recorded: this run and the current session, or only the
+    /// session of the history it was moved to.
+    session: Option<i64>,
+    /// The agent's text since its last tool call: its answer, once ended.
+    answer: String,
+    tool_calls: usize,
+    /// What the agent is doing, to say it while the turn is not shown.
+    doing: Status,
+}
+
+/// What a turn in the background needs, or how it ended.
+pub enum Polled {
+    Running,
+    /// A permission request or a form: `answer_in` it.
+    Asks(Event),
+    Ended(Ended),
+}
+
+/// How a turn in the background ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// With how, when it is not a plain end: `cancelled`, ...
+    Finished(Option<&'static str>),
+    /// The agent answered with an error, and keeps running.
+    Failed(String),
+    AgentStopped(String),
+}
+
+impl Turn {
+    fn new(id: TurnId) -> Self {
+        Self {
+            id,
+            started: Instant::now(),
+            tools: ToolAudit::default(),
+            said: Said::default(),
+            usage: None,
+            session: None,
+            answer: String::new(),
+            tool_calls: 0,
+            doing: Status::new(),
+        }
+    }
+
+    pub fn started(&self) -> Instant {
+        self.started
+    }
+
+    /// The agent's text since its last tool call.
+    pub fn answer(&self) -> &str {
+        &self.answer
+    }
+
+    pub fn tool_calls(&self) -> usize {
+        self.tool_calls
+    }
+
+    /// What the agent is doing, as the status line of a turn says it:
+    /// `Running: cargo test (42s)`, `Writing`, `Thinking`.
+    pub fn activity(&self) -> String {
+        self.doing.activity()
+    }
+
+    /// The session of the history it is recorded in, when it was moved.
+    pub fn session(&self) -> Option<i64> {
+        self.session
+    }
+
+    /// From now on it is recorded in `session` of the history.
+    pub fn move_to(&mut self, session: Option<i64>) {
+        self.session = session;
+    }
+
+    fn text(&mut self, text: &str, audit: &mut Audit) {
+        self.said.answer(text, audit, self.session);
+        self.answer.push_str(text);
+        self.doing.set_activity("Writing".to_string());
+    }
+
+    fn thought(&mut self, text: &str, audit: &mut Audit) {
+        self.said.thought(text, audit, self.session);
+        self.doing.set_activity("Thinking".to_string());
+    }
+
+    fn flush(&mut self, audit: &mut Audit) {
+        self.said.flush(audit, self.session);
+    }
+
+    fn tool(
+        &mut self,
+        audit: &mut Audit,
+        id: String,
+        title: String,
+        kind: String,
+        files: Vec<PathBuf>,
+    ) {
+        self.flush(audit);
+        self.doing.start_tool(id.clone(), title.clone());
+        self.tools
+            .start(audit, self.session, id, title, kind, files);
+        self.answer.clear();
+        self.tool_calls += 1;
+    }
+
+    fn tool_update(
+        &mut self,
+        audit: &mut Audit,
+        id: &str,
+        title: Option<&str>,
+        finished: Option<bool>,
+    ) {
+        self.tools.update(audit, id, title, finished);
+        self.doing
+            .update_tool(id, title.map(str::to_string), finished);
+    }
+
+    fn compacted(&mut self, audit: &mut Audit, compacted: &Compacted) {
+        audit.add_in(self.session, compaction_record(compacted));
+    }
+
+    /// The turn's end, in the record, with what it used.
+    fn end(&mut self, audit: &mut Audit, how: Option<&str>, context: Option<&Context>) {
+        self.flush(audit);
+        let ended = parolsh_event(format!(
+            "turn ended{} · {}s",
+            how.map(|how| format!(" ({how})")).unwrap_or_default(),
+            self.started.elapsed().as_secs()
+        ));
+        audit.add_in(
+            self.session,
+            match usage_meta(self.usage.as_ref(), context) {
+                Some(meta) => ended.meta(meta),
+                None => ended,
+            },
+        );
+    }
+
+    fn fail(&mut self, audit: &mut Audit, message: &str) {
+        self.flush(audit);
+        let failed = format!("turn failed: {}", audit::excerpt(message, 80));
+        audit.add_in(self.session, parolsh_event(failed));
+    }
+
+    /// In the background: records what the agent sent since the last call,
+    /// without showing it, until it asks something or the turn ends.
+    pub fn poll(&mut self, agent: &AgentHandle, audit: &mut Audit) -> Polled {
+        loop {
+            let event = match agent.try_next() {
+                Ok(Some(event)) => event,
+                Ok(None) => return Polled::Running,
+                Err(()) => {
+                    self.flush(audit);
+                    return Polled::Ended(Ended::AgentStopped("the agent stopped".to_string()));
+                }
+            };
+            match event {
+                Event::Text(text) => self.text(&text, audit),
+                Event::Thought(text) => self.thought(&text, audit),
+                Event::Tool {
+                    id,
+                    title,
+                    kind,
+                    files,
+                } => self.tool(audit, id, title, kind, files),
+                Event::ToolUpdate {
+                    id,
+                    title,
+                    finished,
+                } => self.tool_update(audit, &id, title.as_deref(), finished),
+                Event::Compacted(compacted) => self.compacted(audit, &compacted),
+                Event::Usage(used) => self.usage = Some(used),
+                request @ (Event::Permission { .. } | Event::Form { .. }) => {
+                    self.flush(audit);
+                    return Polled::Asks(request);
+                }
+                Event::TurnEnd(id, reason) if id == self.id => {
+                    let how = describe(reason);
+                    let context = agent.activity().get().context;
+                    self.end(audit, how, context.as_ref());
+                    return Polled::Ended(Ended::Finished(how));
+                }
+                Event::TurnFailed(id, message) if id == self.id => {
+                    self.fail(audit, &message);
+                    return Polled::Ended(Ended::Failed(message));
+                }
+                Event::Error(message) => {
+                    self.flush(audit);
+                    return Polled::Ended(Ended::AgentStopped(message));
+                }
+                Event::TurnEnd(..)
+                | Event::TurnFailed(..)
+                | Event::Plan { .. }
+                | Event::Activity
+                | Event::Resumed(_)
+                | Event::Compacting
+                | Event::Notice(_) => {}
+            }
+        }
+    }
+}
+
 /// Sends one message (text blocks, the user's text last) and prints the
 /// agent's answer as it arrives.
 ///
@@ -54,20 +286,25 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// `CANCEL_GRACE`, or on a second Ctrl+C, the turn ends on Parolsh's side and
 /// the agent keeps running: its late events are dropped.
 ///
-/// What the agent does and what you answer go to `audit`.
+/// Ctrl+Z leaves the turn running and returns it, to go on in the
+/// background.
+///
+/// What the agent does and what you answer go to `audit`. The turns already
+/// in the background (`jobs`) are followed meanwhile: what they ask is asked
+/// here.
 pub fn run(
     agent: &AgentHandle,
     blocks: Vec<Block>,
     display: Display,
     audit: &mut Audit,
+    jobs: &mut [Job],
 ) -> Outcome {
-    let Some(turn) = agent.prompt_blocks(blocks) else {
+    let Some(id) = agent.prompt_blocks(blocks) else {
         return Outcome::AgentStopped;
     };
-    let started = Instant::now();
-    let mut tools = ToolAudit::default();
-    let mut said = Said::default();
+    let mut turn = Turn::new(id);
     INTERRUPTED.store(false, Ordering::SeqCst);
+    BACKGROUND.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
     let mut out = Output::new(ansi, display.thinking, markdown);
@@ -77,21 +314,50 @@ pub fn run(
     out.show();
     let mut cancelled: Option<Instant> = None;
     let activity = agent.activity();
-    let mut usage: Option<TurnUsage> = None;
+    // The turns in the background that wait for an answer.
+    let mut waiting: Vec<usize> = Vec::new();
 
     loop {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
             if cancelled.is_some() {
-                said.flush(audit);
-                return give_up(agent, turn, &mut out, audit);
+                turn.flush(audit);
+                return give_up(agent, id, &mut out, audit);
             }
             agent.cancel();
             cancelled = Some(Instant::now());
             out.pin("Cancelling…");
         }
         if cancelled.is_some_and(|at| at.elapsed() >= CANCEL_GRACE) {
-            said.flush(audit);
-            return give_up(agent, turn, &mut out, audit);
+            turn.flush(audit);
+            return give_up(agent, id, &mut out, audit);
+        }
+        // A turn being cancelled, or waiting for one, stays here.
+        if BACKGROUND.swap(false, Ordering::SeqCst)
+            && cancelled.is_none()
+            && agent.abandoned().is_none()
+        {
+            turn.flush(audit);
+            out.hide();
+            out.end_line();
+            return Outcome::Background(Box::new(turn));
+        }
+        // What a turn in the background asks waits for this one to end: it
+        // is asked at the prompt, not in the middle of this answer.
+        for job in jobs.iter_mut() {
+            job.poll(audit);
+        }
+        let asking: Vec<usize> = jobs
+            .iter()
+            .filter(|job| job.asks())
+            .map(|job| job.number)
+            .collect();
+        if asking != waiting {
+            // Without a status line, said once.
+            if let (false, Some(note)) = (ansi, ui::waiting(&asking)) {
+                out.line(&format!("({note}: asked when this turn ends)"));
+            }
+            out.waiting(ui::waiting(&asking));
+            waiting = asking;
         }
 
         out.background(activity.get().tasks);
@@ -102,7 +368,7 @@ pub fn run(
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                said.flush(audit);
+                turn.flush(audit);
                 out.hide();
                 out.end_line();
                 return Outcome::AgentStopped;
@@ -127,11 +393,11 @@ pub fn run(
             // Dropping the reply cancels the request.
             Event::Permission { .. } | Event::Form { .. } if stale => {}
             Event::Text(text) => {
-                said.answer(&text, audit);
+                turn.text(&text, audit);
                 out.text(&text);
             }
             Event::Thought(text) => {
-                said.thought(&text, audit);
+                turn.thought(&text, audit);
                 out.thought(&text);
             }
             Event::Tool {
@@ -140,8 +406,7 @@ pub fn run(
                 kind,
                 files,
             } => {
-                said.flush(audit);
-                tools.start(audit, id.clone(), title.clone(), kind, files);
+                turn.tool(audit, id.clone(), title.clone(), kind, files);
                 out.tool(id, title);
             }
             Event::ToolUpdate {
@@ -149,23 +414,23 @@ pub fn run(
                 title,
                 finished,
             } => {
-                tools.update(audit, &id, title.as_deref(), finished);
+                turn.tool_update(audit, &id, title.as_deref(), finished);
                 out.tool_update(&id, title, finished);
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
             Event::Activity | Event::Resumed(_) => {}
             Event::Compacting => {
-                said.flush(audit);
+                turn.flush(audit);
                 out.pin("Compacting…");
             }
             Event::Compacted(compacted) => {
                 out.unpin("Thinking");
                 out.line(&ui::compacted(&compacted));
-                audit.add(compaction_record(&compacted));
+                turn.compacted(audit, &compacted);
             }
-            Event::Usage(used) => usage = Some(used),
+            Event::Usage(used) => turn.usage = Some(used),
             request @ (Event::Permission { .. } | Event::Form { .. }) => {
-                said.flush(audit);
+                turn.flush(audit);
                 out.hide();
                 out.end_line();
                 out.interrupted();
@@ -174,38 +439,25 @@ pub fn run(
             }
             Event::Notice(message) => out.line(&format!("parolsh: {message}")),
             Event::Error(message) => {
-                said.flush(audit);
+                turn.flush(audit);
                 out.line(&format!("parolsh: {message}"));
                 out.hide();
                 return Outcome::AgentStopped;
             }
             Event::TurnEnd(_, reason) => {
-                said.flush(audit);
                 let context = activity.get().context;
                 out.finish(context.as_ref());
                 let how = describe(reason);
                 if let Some(message) = how {
                     eprintln!("({message})");
                 }
-                let ended = parolsh_event(format!(
-                    "turn ended{} · {}s",
-                    how.map(|how| format!(" ({how})")).unwrap_or_default(),
-                    started.elapsed().as_secs()
-                ));
-                audit.add(match usage_meta(usage.as_ref(), context.as_ref()) {
-                    Some(meta) => ended.meta(meta),
-                    None => ended,
-                });
+                turn.end(audit, how, context.as_ref());
                 return Outcome::Finished;
             }
             Event::TurnFailed(_, message) => {
-                said.flush(audit);
                 out.finish(None);
                 eprintln!("parolsh: {message}");
-                audit.add(parolsh_event(format!(
-                    "turn failed: {}",
-                    audit::excerpt(&message, 80)
-                )));
+                turn.fail(audit, &message);
                 return Outcome::Failed;
             }
         }
@@ -270,6 +522,11 @@ fn usage_meta(usage: Option<&TurnUsage>, context: Option<&Context>) -> Option<se
 /// Asks the user the agent's permission request or form, and sends the
 /// answer back. Other events are ignored.
 pub fn answer(request: Event, audit: &mut Audit) {
+    answer_in(request, audit, None);
+}
+
+/// `answer`, for a turn recorded in `session` of the history.
+pub fn answer_in(request: Event, audit: &mut Audit, session: Option<i64>) {
     match request {
         Event::Permission {
             title,
@@ -277,18 +534,19 @@ pub fn answer(request: Event, audit: &mut Audit) {
             options,
             reply,
         } => {
-            audit.add(Record::new(Actor::Agent, Kind::Ask, title.clone()));
+            audit.add_in(session, Record::new(Actor::Agent, Kind::Ask, title.clone()));
             let choice = ask_permission(&title, &details, &options);
             let answer = choice
                 .as_ref()
                 .and_then(|id| options.iter().find(|option| &option.option_id == id))
                 .map_or("no choice".to_string(), |option| option.name.clone());
-            audit.add(Record::new(Actor::User, Kind::Reply, answer));
+            audit.add_in(session, Record::new(Actor::User, Kind::Reply, answer));
             let _ = reply.send(choice);
         }
         Event::Form { form, reply } => {
             let questions = form.fields.len();
-            audit.add(
+            audit.add_in(
+                session,
                 Record::new(Actor::Agent, Kind::Ask, form.message.clone())
                     .meta(json!({"questions": questions})),
             );
@@ -298,7 +556,7 @@ pub fn answer(request: Event, audit: &mut Audit) {
                 Some(answers) if answers.is_empty() => "declined",
                 Some(_) => "answered",
             };
-            audit.add(Record::new(Actor::User, Kind::Reply, reply_text));
+            audit.add_in(session, Record::new(Actor::User, Kind::Reply, reply_text));
             let _ = reply.send(answers);
         }
         _ => {}
@@ -313,6 +571,7 @@ impl ToolAudit {
     fn start(
         &mut self,
         audit: &mut Audit,
+        session: Option<i64>,
         id: String,
         title: String,
         kind: String,
@@ -324,7 +583,7 @@ impl ToolAudit {
             .collect();
         let record = Record::new(Actor::Agent, Kind::Tool, title)
             .meta(json!({"kind": kind, "files": files}));
-        let handle = audit.add(record.clone());
+        let handle = audit.add_in(session, record.clone());
         self.0.insert(id, (handle, record));
     }
 
@@ -351,27 +610,27 @@ struct Said {
 }
 
 impl Said {
-    fn answer(&mut self, text: &str, audit: &mut Audit) {
+    fn answer(&mut self, text: &str, audit: &mut Audit, session: Option<i64>) {
         if !self.thought.is_empty() {
-            self.flush(audit);
+            self.flush(audit, session);
         }
         self.answer.push_str(text);
     }
 
-    fn thought(&mut self, text: &str, audit: &mut Audit) {
+    fn thought(&mut self, text: &str, audit: &mut Audit, session: Option<i64>) {
         if !self.answer.is_empty() {
-            self.flush(audit);
+            self.flush(audit, session);
         }
         self.thought.push_str(text);
     }
 
-    fn flush(&mut self, audit: &mut Audit) {
+    fn flush(&mut self, audit: &mut Audit, session: Option<i64>) {
         for (kind, text) in [
             (Kind::Thought, std::mem::take(&mut self.thought)),
             (Kind::Answer, std::mem::take(&mut self.answer)),
         ] {
             if !text.trim().is_empty() {
-                audit.add(Record::new(Actor::Agent, kind, text));
+                audit.add_in(session, Record::new(Actor::Agent, kind, text));
             }
         }
     }
@@ -430,6 +689,15 @@ pub fn drain(agent: &AgentHandle) -> bool {
 /// is shown unfinished.
 const QUIET: Duration = Duration::from_millis(300);
 
+/// The flags `watch` shares with the input loop.
+#[derive(Clone, Copy)]
+pub struct Flags<'a> {
+    /// Set by the input loop when the prompt returned: `watch` ends.
+    pub stop: &'a AtomicBool,
+    /// The prompt's break signal: set by `watch` to make it return.
+    pub interrupt: &'a AtomicBool,
+}
+
 /// What `watch` leaves to the input loop, once the prompt is gone.
 #[derive(Default)]
 pub struct Watched {
@@ -453,10 +721,11 @@ pub fn watch(
     display: Display,
     printer: &ExternalPrinter<String>,
     repaint: &(dyn Fn() + Sync),
-    stop: &AtomicBool,
-    interrupt: &AtomicBool,
+    flags: Flags,
     audit: &mut Audit,
+    jobs: &mut [Job],
 ) -> Watched {
+    let Flags { stop, interrupt } = flags;
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
     let mut lines = Lines::new(ansi, markdown);
@@ -470,6 +739,15 @@ pub fn watch(
     let mut painted = Instant::now();
 
     while !stop.load(Ordering::SeqCst) {
+        // A turn in the background that asks something or ended needs the
+        // prompt gone too.
+        for job in jobs.iter_mut() {
+            job.poll(audit);
+        }
+        if jobs.iter().any(Job::wants_attention) {
+            interrupt.store(true, Ordering::SeqCst);
+            break;
+        }
         let running = activity.get().tasks;
         if running != tasks || (running > 0 && painted.elapsed() >= Duration::from_secs(1)) {
             tasks = running;
@@ -513,7 +791,7 @@ pub fn watch(
             | Event::Form { .. }
                 if stale => {}
             Event::Text(text) => {
-                said.answer(&text, audit);
+                said.answer(&text, audit, None);
                 lines.text(&text);
             }
             Event::Tool {
@@ -522,8 +800,8 @@ pub fn watch(
                 kind,
                 files,
             } => {
-                said.flush(audit);
-                tools.start(audit, id, title.clone(), kind, files);
+                said.flush(audit, None);
+                tools.start(audit, None, id, title.clone(), kind, files);
                 lines.line(format!("• {title}"));
             }
             Event::ToolUpdate {
@@ -544,7 +822,7 @@ pub fn watch(
                 break;
             }
             Event::Compacted(compacted) => {
-                said.flush(audit);
+                said.flush(audit, None);
                 lines.line(ui::compacted(&compacted));
                 audit.add(compaction_record(&compacted));
             }
@@ -558,7 +836,7 @@ pub fn watch(
             | Event::Usage(_) => {}
         }
     }
-    said.flush(audit);
+    said.flush(audit, None);
     lines.flush();
     watched.lines = lines.ready.into();
     watched
@@ -831,6 +1109,8 @@ struct Status {
     pinned: bool,
     /// The agent's background tasks running.
     background: usize,
+    /// Turns in the background wait for an answer: said before the activity.
+    waiting: Option<String>,
 }
 
 struct Tool {
@@ -860,6 +1140,7 @@ impl Status {
             shown: false,
             pinned: false,
             background: 0,
+            waiting: None,
         }
     }
 
@@ -1046,6 +1327,13 @@ impl Output {
         }
     }
 
+    /// Says on the status line that turns in the background wait for you.
+    fn waiting(&mut self, note: Option<String>) {
+        if let Some(status) = &mut self.status {
+            status.waiting = note;
+        }
+    }
+
     /// The agent sent something: it is not quiet.
     fn heard(&mut self) {
         if let Some(status) = &mut self.status {
@@ -1117,9 +1405,13 @@ impl Output {
             return;
         }
         if let Some(status) = &mut self.status {
+            let activity = match &status.waiting {
+                Some(note) => format!("{note} · {}", status.activity()),
+                None => status.activity(),
+            };
             let line = ui::status(
                 status.frame,
-                &status.activity(),
+                &activity,
                 status.started.elapsed(),
                 status.background,
                 status.heard.elapsed(),

@@ -11,11 +11,14 @@ readme = "README.md"
 
 [dependencies]
 # unstable_end_turn_token_usage: the tokens of a turn, in its response.
-agent-client-protocol = { version = "2.2.0", features = ["unstable_end_turn_token_usage"] }
+# unstable_session_fork: a copy of a conversation, for a turn sent to the
+# background.
+agent-client-protocol = { version = "2.2.0", features = ["unstable_end_turn_token_usage", "unstable_session_fork"] }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "string"] }
 crossterm = "0.29"
 ctrlc = "3.5.2"
+signal-hook = "0.3"
 libc = "0.2"
 nix = { version = "0.31", features = ["process", "signal", "term"] }
 nu-ansi-term = "0.50"

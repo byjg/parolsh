@@ -418,6 +418,83 @@ impl History {
         Ok(Some(id))
     }
 
+    /// Adds an entry to session `session`, which is not the current one: a
+    /// turn that goes on in the background.
+    pub fn add_to(
+        &mut self,
+        session: i64,
+        actor: &str,
+        kind: &str,
+        text: &str,
+        meta: &serde_json::Value,
+    ) -> rusqlite::Result<i64> {
+        let now = now();
+        self.conn.execute(
+            "INSERT INTO entries (session_id, at, actor, kind, text, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session, now, actor, kind, text, meta.to_string()],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session],
+        )?;
+        Ok(id)
+    }
+
+    /// Splits the current session: its entries from `first` on go to a new
+    /// session, which keeps the agent's conversation, and the current one
+    /// goes on without them, with the conversation the agent gives next.
+    /// The new session; `None` when nothing is being written.
+    pub fn split(&mut self, first: i64) -> rusqlite::Result<Option<i64>> {
+        let Some(current) = self.current else {
+            return Ok(None);
+        };
+        let now = now();
+        self.conn.execute(
+            "INSERT INTO sessions (project_id, agent, agent_session_id, cwd, started_at, updated_at)
+             SELECT project_id, agent, agent_session_id, cwd, ?2, ?2 FROM sessions WHERE id = ?1",
+            params![current, now],
+        )?;
+        let split = self.conn.last_insert_rowid();
+        self.conn.execute(
+            "UPDATE entries SET session_id = ?1 WHERE session_id = ?2 AND id >= ?3",
+            params![split, current, first],
+        )?;
+        // The current session's conversation is another one from now on.
+        self.agent_session_id = None;
+        self.conn.execute(
+            "UPDATE sessions SET agent_session_id = NULL WHERE id = ?1",
+            [current],
+        )?;
+        Ok(Some(split))
+    }
+
+    /// Puts the entries of session `from` at the end of the current one, in
+    /// their order and with their times, and removes `from`: a turn sent to
+    /// the background ended. False when there is no current session, or it
+    /// is `from`.
+    pub fn append(&mut self, from: i64) -> rusqlite::Result<bool> {
+        let Some(current) = self.current.filter(|&current| current != from) else {
+            return Ok(false);
+        };
+        self.conn.execute(
+            "INSERT INTO entries (session_id, at, actor, kind, text, meta)
+             SELECT ?1, at, actor, kind, text, meta FROM entries
+             WHERE session_id = ?2 ORDER BY id",
+            params![current, from],
+        )?;
+        self.conn
+            .execute("DELETE FROM entries WHERE session_id = ?1", [from])?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [from])?;
+        self.conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now(), current],
+        )?;
+        Ok(true)
+    }
+
     /// Changes an entry: a tool call that got a new title or finished.
     pub fn update(
         &mut self,
@@ -623,6 +700,12 @@ mod tests {
         }
     }
 
+    /// The text of each entry of a session, in order.
+    fn said(history: &History, id: i64) -> Vec<String> {
+        let entries = history.entries("/p", id).unwrap().unwrap();
+        entries.into_iter().map(|entry| entry.text).collect()
+    }
+
     fn texts(history: &History, project: &str, id: i64) -> Vec<String> {
         history
             .entries(project, id)
@@ -735,6 +818,78 @@ mod tests {
         );
         assert_eq!(used.tokens(), 202);
         assert_eq!(sessions[0].usage, Usage::default());
+    }
+
+    /// A turn sent to the background: its entries leave the session, with
+    /// the agent's conversation, and come back at its end when it ends.
+    #[test]
+    fn a_session_is_split_and_put_back_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        history.begin(start("/p"));
+        history.set_agent_session_id(Some("a".to_string()));
+        history.add("user", "message", "first", &json!({})).unwrap();
+        history.add("agent", "answer", "one", &json!({})).unwrap();
+        let long = history.add("user", "message", "long", &json!({})).unwrap();
+        history.add("agent", "tool", "Read a", &json!({})).unwrap();
+        let current = history.current().unwrap();
+
+        let split = history.split(long.unwrap()).unwrap().unwrap();
+        assert_ne!(split, current);
+        assert_eq!(said(&history, current), ["first", "one"]);
+        assert_eq!(said(&history, split), ["long", "Read a"]);
+        // The turn keeps the conversation; this session gets the copy's.
+        let agent_session = |id| {
+            history
+                .resumable("/p", id)
+                .unwrap()
+                .unwrap()
+                .agent_session_id
+        };
+        assert_eq!(agent_session(split), Some("a".to_string()));
+        assert_eq!(agent_session(current), None);
+        history.set_agent_session_id(Some("copy".to_string()));
+        assert_eq!(
+            history
+                .resumable("/p", current)
+                .unwrap()
+                .unwrap()
+                .agent_session_id,
+            Some("copy".to_string())
+        );
+
+        // Both go on, each in its session.
+        history
+            .add("user", "message", "meanwhile", &json!({}))
+            .unwrap();
+        history
+            .add_to(split, "agent", "answer", "long answer", &json!({}))
+            .unwrap();
+        assert_eq!(said(&history, current), ["first", "one", "meanwhile"]);
+
+        assert!(history.append(split).unwrap());
+        assert_eq!(
+            said(&history, current),
+            ["first", "one", "meanwhile", "long", "Read a", "long answer"]
+        );
+        assert_eq!(history.sessions("/p").unwrap().len(), 1);
+        assert_eq!(history.search("/p", "long", 10, false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nothing_is_split_or_appended_without_a_current_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        history.begin(start("/p"));
+        let first = history.add("user", "message", "first", &json!({})).unwrap();
+        let session = history.current().unwrap();
+
+        // A session is not appended to itself.
+        assert!(!history.append(session).unwrap());
+        history.pause();
+        assert_eq!(history.split(first.unwrap()).unwrap(), None);
+        assert!(!history.append(session).unwrap());
+        assert_eq!(said(&history, session), ["first"]);
     }
 
     #[test]

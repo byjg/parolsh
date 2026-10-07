@@ -1343,3 +1343,244 @@ fn the_prompt_warns_when_the_context_fills_up() {
     assert!(output.contains("\x1b[33mctx 82%"), "{output:?}");
     assert!(output.contains("\x1b[31mctx 95%"), "{output:?}");
 }
+
+/// The number of sessions `#sessions` lists.
+fn sessions_listed(screen: &str) -> usize {
+    screen
+        .lines()
+        .filter(|line| line.contains(" entries "))
+        .count()
+}
+
+/// Ctrl+Z during a turn sends it to the background: the prompt comes back,
+/// and the conversation goes on in a copy that ends before that turn's
+/// message. When the turn ends its answer is shown, its entries go to the end
+/// of the session, and the agent is told with the next message.
+#[test]
+fn ctrl_z_sends_the_turn_to_the_background_and_its_answer_comes_back() {
+    let home = fake_agent_home_with(&["--fork-upto"]);
+    let lines = [
+        "hello",
+        "nap 4",
+        "key:\\x1a",
+        "fork",
+        "wait:3",
+        "blocks now",
+        "#sessions",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+
+    let sent = screen.find("[1] in the background: nap 4").expect(&screen);
+    // A copy of the conversation, up to the answer to "hello".
+    let copy = screen.find(r#"{"of": "s1", "upTo": "m1"}"#).expect(&screen);
+    // On a line of its own, below the prompt it interrupted.
+    let done = screen.find("\n[1] done: nap 4\nnapped 4\n").expect(&screen);
+    assert!(sent < copy && copy < done, "{screen}");
+    // The agent here was not told of that request: it is, with its answer.
+    let told = &screen[screen.find("✦ blocks now").expect(&screen)..];
+    assert!(
+        told.contains(r"The request:\nnap 4\n\nIts answer:\nnapped 4"),
+        "{told}"
+    );
+    // One session, with the turn's entries after what was said meanwhile.
+    assert_eq!(sessions_listed(&screen), 1, "{screen}");
+    let audit = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    let order: Vec<usize> = [
+        "fake: hello",
+        "fake: fork",
+        "fake: nap 4",
+        "Nap",
+        "napped 4",
+    ]
+    .iter()
+    .map(|text| {
+        audit
+            .find(text)
+            .unwrap_or_else(|| panic!("no {text} in {audit}"))
+    })
+    .collect();
+    assert!(order.is_sorted(), "{audit}");
+    // Told once.
+    let again = run_in(
+        home.path(),
+        "",
+        &["#resume 1", "blocks again"],
+        "dumb",
+        false,
+    );
+    let again = &again[again.rfind("blocks again").expect(&again)..];
+    assert!(again.starts_with("blocks again\n[]\n"), "{again}");
+}
+
+/// An agent that only copies a whole conversation has that turn's request in
+/// the copy: it is told not to work on it. One that cannot copy starts a new
+/// conversation.
+#[test]
+fn the_conversation_goes_on_as_the_agent_can_copy_it() {
+    let lines = [
+        "hello",
+        "nap 3",
+        "key:\\x1a",
+        "blocks now",
+        "fork",
+        "wait:2",
+    ];
+
+    let whole = with_fake_agent_args(&["--fork"], &lines);
+    assert!(whole.contains(r#"{"of": "s1", "upTo": null}"#), "{whole}");
+    assert!(whole.contains("do not work on it here"), "{whole}");
+    assert!(whole.contains(r"The request:\nnap 3"), "{whole}");
+
+    let none = with_fake_agent_args(&[], &lines);
+    assert!(
+        none.contains("The conversation here is a new one."),
+        "{none}"
+    );
+    assert!(none.contains("\nnull\n"), "{none}");
+    assert!(!none.contains("do not work on it here"), "{none}");
+    assert!(none.contains("[1] done: nap 3\nnapped 3\n"), "{none}");
+}
+
+fn with_fake_agent_args(args: &[&str], lines: &[&str]) -> String {
+    let home = fake_agent_home_with(args);
+    run_in(home.path(), "", lines, "dumb", false)
+}
+
+/// `#jobs` lists the turns in the background, `#fg` waits for one, and
+/// `#exit` does not leave the first time while one runs.
+#[test]
+fn background_turns_are_listed_waited_for_and_keep_parolsh_from_leaving() {
+    let lines = [
+        "nap 6",
+        "key:\\x1a",
+        "#jobs",
+        "#exit",
+        "#fg",
+        "wait:4",
+        "#jobs",
+    ];
+    let screen = with_fake_agent_args(&[], &lines);
+
+    // What it asked, what the agent is doing, and for how long.
+    let listed = screen
+        .lines()
+        .find(|line| line.starts_with("[1] nap 6 · Running: Nap ("))
+        .expect(&screen);
+    assert!(listed.contains("s) · 1 tool call · 0:0"), "{listed}");
+    assert!(
+        screen.contains(
+            "Still running: 1 turn in the background (#jobs). \
+             Leaving stops them: #exit again to leave."
+        ),
+        "{screen}"
+    );
+    // Parolsh stayed: `#fg` waited for the turn and showed its answer.
+    let waited = &screen[screen.find("#fg").expect(&screen)..];
+    assert!(waited.contains("[1] done: nap 6\nnapped 6\n"), "{waited}");
+    assert!(waited.contains("No turns in the background."), "{waited}");
+
+    // Twice in a row leaves.
+    let screen = with_fake_agent_args(&[], &["nap 30", "key:\\x1a", "#exit", "#exit", "echo left"]);
+    assert_eq!(screen.matches("Still running").count(), 1, "{screen}");
+    assert!(screen.contains("\nleft\n"), "{screen}");
+}
+
+/// Ctrl+C while waiting with `#fg` cancels the turn, and Ctrl+Z goes back to
+/// the prompt, leaving it running. A cancelled turn is not handed over.
+#[test]
+fn a_background_turn_is_cancelled_from_fg() {
+    let lines = [
+        "slow",
+        "key:\\x1a",
+        "#fg",
+        "key:\\x1a",
+        "#jobs",
+        "#fg 1",
+        "key:\\x03",
+        "blocks now",
+    ];
+    let screen = with_fake_agent_args(&[], &lines);
+
+    let back = &screen[screen.find("#fg").expect(&screen)..];
+    assert!(back.contains("[1] in the background: slow"), "{back}");
+    assert!(back.contains("[1] slow · Writing · 0:0"), "{back}");
+    assert!(back.contains("[1] cancelled: slow"), "{back}");
+    assert!(!screen.contains("no such turn"), "{screen}");
+    // What it wrote before the cancel ("working") is not an answer: the
+    // agent is not told of it.
+    let told = &screen[screen.rfind("blocks now").expect(&screen)..];
+    assert!(told.starts_with("blocks now\n[]\n"), "{told}");
+}
+
+/// What a background turn asks is asked at the prompt, saying which turn
+/// asks, and the answer goes to it.
+#[test]
+fn a_background_turn_asks_its_permission_at_the_prompt() {
+    let lines = ["nap 2 perm", "key:\\x1a", "wait:2", "1", "wait:1"];
+    let screen = with_fake_agent_args(&[], &lines);
+
+    let asks = screen
+        .find("── background turn 1: nap 2 perm ──")
+        .expect(&screen);
+    let request = screen
+        .find("Permission requested: Writing to notes.txt")
+        .expect(&screen);
+    let done = screen.find("[1] done: nap 2 perm").expect(&screen);
+    let end = screen
+        .find("── end of background turn 1's question ──")
+        .expect(&screen);
+    assert!(asks < request && request < end && end < done, "{screen}");
+    assert!(screen[done..].contains("napped 2 chose:"), "{screen}");
+}
+
+/// A turn that ends after the conversation it left was replaced stays a
+/// session of its own, and its answer is not given to the new conversation.
+#[test]
+fn a_background_turn_of_another_conversation_stays_its_own_session() {
+    let home = fake_agent_home_with(&["--fork-upto"]);
+    let lines = [
+        "hello",
+        "nap 3",
+        "key:\\x1a",
+        "#new",
+        "wait:3",
+        "blocks now",
+        "#sessions",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+
+    assert!(screen.contains("[1] done: nap 3\nnapped 3\n"), "{screen}");
+    assert!(
+        screen.contains("It is session 2 in the history: #audit 2 shows it."),
+        "{screen}"
+    );
+    assert!(!screen.contains("Its answer"), "{screen}");
+    assert_eq!(sessions_listed(&screen), 3, "{screen}");
+}
+
+/// The prompt says on its right how many turns run in the background.
+#[test]
+fn the_prompt_counts_the_background_turns() {
+    let output = raw_output(&["nap 5", "key:\\x1a", "wait:1"]);
+
+    assert!(output.contains("1 job"), "{output:?}");
+}
+
+/// What a background turn asks does not interrupt the turn you are in: it
+/// is said to be waiting, and asked when that turn ends.
+#[test]
+fn a_background_question_waits_for_the_turn_in_the_foreground() {
+    // The first turn asks after 5 seconds, during the second one's 6.
+    let lines = ["nap 5 perm", "key:\\x1a", "nap 6", "wait:6", "1", "wait:1"];
+    let screen = with_fake_agent_args(&[], &lines);
+
+    let waiting = screen
+        .find("(job 1 is waiting for you: asked when this turn ends)")
+        .expect(&screen);
+    let answered = screen.find("napped 6").expect(&screen);
+    let asked = screen
+        .find("── background turn 1: nap 5 perm ──")
+        .expect(&screen);
+    assert!(waiting < answered && answered < asked, "{screen}");
+    assert!(screen[asked..].contains("napped 5 chose:"), "{screen}");
+}

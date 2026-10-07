@@ -66,7 +66,7 @@ pub fn render(
 }
 
 /// An answer, with a blank line after it as before a turn's summary.
-fn answer(record: &Record, display: Display, ansi: bool, width: usize) -> String {
+pub fn answer(record: &Record, display: Display, ansi: bool, width: usize) -> String {
     if !ansi {
         return format!("{}\n", record.text.trim_end());
     }

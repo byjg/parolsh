@@ -233,6 +233,13 @@ pub struct Handle {
     row: Option<i64>,
 }
 
+impl Handle {
+    /// The entry's row in the history, when it was saved.
+    pub fn row(&self) -> Option<i64> {
+        self.row
+    }
+}
+
 pub struct Audit {
     started: Instant,
     /// The newest entries, at most `limit`.
@@ -326,6 +333,25 @@ impl Audit {
             None
         };
         Handle { memory, row }
+    }
+
+    /// `add`, or with `session` an entry of that session of the history
+    /// only: a turn that goes on in the background, apart from this run's
+    /// list.
+    pub fn add_in(&mut self, session: Option<i64>, record: Record) -> Handle {
+        let Some(session) = session else {
+            return self.add(record);
+        };
+        let row = self.write(|history| {
+            history.add_to(
+                session,
+                record.actor.key(),
+                record.kind.key(),
+                &record.text,
+                &record.meta,
+            )
+        });
+        Handle { memory: None, row }
     }
 
     /// Changes the entry added as `handle`: a tool call that got a new title

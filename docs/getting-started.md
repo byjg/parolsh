@@ -110,7 +110,8 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 ```
 
 The answer is printed as it arrives. `Ctrl+C` cancels it and returns to the
-prompt.
+prompt. `Ctrl+Z` gives you the prompt back while the agent goes on with it,
+see [Turns in the background](agents.md#turns-in-the-background).
 
 To start with plain text going to bash, run `parolsh --input=shell` or set
 `input = "shell"` in the configuration (see

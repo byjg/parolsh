@@ -1177,6 +1177,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "signal-hook",
  "similar",
  "tempfile",
  "tokio",

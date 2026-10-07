@@ -164,8 +164,9 @@ command ended in.
   for them and keeps its own history.
 - A non-zero exit code is printed after the output, for example `exit 1`.
 - `Ctrl+C` stops the running command, not Parolsh.
-- Parolsh has no job control. With the default `bash -ic`, `Ctrl+Z` is handled
-  by that bash, as if you had typed the line in bash: the running program is
+- Parolsh has no job control for your commands (for the agent's turns, see
+  [Turns in the background](agents.md#turns-in-the-background)). With the
+  default `bash -ic`, `Ctrl+Z` is handled by that bash, as if you had typed the line in bash: the running program is
   paused (`Stopped`), the rest of the line continues, and the paused program
   ends when the command finishes. With a non-interactive `shell` such as
   `["bash", "-c"]`, Parolsh resumes the command right away. Use `!bash` when
@@ -268,7 +269,9 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
-| `#exit` | Leave Parolsh (`Ctrl+D` also works) |
+| `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](agents.md#turns-in-the-background) |
+| `#fg [n]` | Wait for background turn `n`, or the last one. `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
+| `#exit` | Leave Parolsh (`Ctrl+D` also works). While a turn or a task of the agent runs in the background, the first one says so and stays: leaving stops them |
 
 ## `#audit`
 
@@ -426,6 +429,17 @@ Continued session 7: it has only shell commands, so the agent starts a new conve
 
 What the commands had set up is not there again: the directory your commands
 were in, and what they exported, are not saved.
+
+### A turn in the background
+
+A turn sent to the background with `Ctrl+Z` (see
+[Turns in the background](agents.md#turns-in-the-background)) leaves the
+session while it runs: its entries, from your message on, are a session of
+their own, which `#sessions` lists and `#audit <n>` shows. When the turn ends
+they go to the end of the session it left, where it ended, and that session
+of its own is gone. If the conversation it left was replaced meanwhile
+(`#new`, `#cd`, `#agent`, `#resume`), or you left Parolsh, it stays a session
+of its own, which `#resume <n>` can go back to.
 
 ### Usage in the database
 

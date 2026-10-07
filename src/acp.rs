@@ -5,9 +5,9 @@ use agent_client_protocol::schema::v1::Meta;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
-    ElicitationFormCapabilities, ElicitationMode, ErrorCode, InitializeRequest, LoadSessionRequest,
-    McpServer, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    ElicitationFormCapabilities, ElicitationMode, ErrorCode, ForkSessionRequest, InitializeRequest,
+    LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
@@ -165,6 +165,41 @@ impl Compaction {
     }
 }
 
+/// What Claude adds to the title of a conversation it copied.
+const COPY_TITLE: &str = " (fork)";
+
+/// How an agent copies a conversation (`session/fork`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Forks {
+    /// It does not.
+    #[default]
+    No,
+    /// Whole, with the prompt in flight.
+    Whole,
+    /// Up to a message: the adapters of Claude and Codex, with a field named
+    /// after JetBrains' AIR, which they read whoever sends it.
+    UpTo,
+}
+
+/// The conversation to copy for a turn sent to the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkOf {
+    /// The agent's id for the conversation.
+    pub session: String,
+    /// The message the copy ends with, when the agent copies up to one.
+    pub up_to: Option<String>,
+}
+
+/// The conversation an agent starts with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Start {
+    #[default]
+    New,
+    /// A copy of another agent process's conversation. A new one when the
+    /// copy cannot be made.
+    Fork(ForkOf),
+}
+
 /// The session modes the agent offers, as it reports them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionModes {
@@ -236,6 +271,15 @@ struct SessionState {
     loading: bool,
     /// The context and cost, once the agent reported them.
     context: Option<Context>,
+    /// How the agent copies a conversation. Kept across conversations.
+    forks: Forks,
+    /// The conversation is a copy Parolsh asked for: Claude titles it as
+    /// the original with " (fork)", which is not said.
+    copy: bool,
+    /// The agent's last message, and the last one before the prompt in
+    /// flight: where a copy without that prompt ends.
+    last_message: Option<String>,
+    before_prompt: Option<String>,
     /// The cost already counted in a prompt's usage.
     cost_counted: f64,
     compaction: Option<Compaction>,
@@ -258,6 +302,10 @@ pub struct Activity {
     pub session_id: Option<String>,
     /// How full its context is, once the agent reported it.
     pub context: Option<Context>,
+    /// How the agent copies a conversation.
+    pub forks: Forks,
+    /// The agent's last message before the prompt in flight.
+    pub before_prompt: Option<String>,
 }
 
 /// Reads what an agent is doing, from any thread, for as long as it runs.
@@ -282,9 +330,14 @@ impl ActivityWatch {
             busy: state.prompting,
             tasks: state.tasks.len(),
             oldest: state.tasks.values().min().copied(),
-            title: state.title.clone(),
+            title: state.title.as_deref().map(|title| {
+                let own = title.strip_suffix(COPY_TITLE).filter(|_| state.copy);
+                own.unwrap_or(title).to_string()
+            }),
             session_id: state.session_id.clone(),
             context: state.context.clone(),
+            forks: state.forks,
+            before_prompt: state.before_prompt.clone(),
         }
     }
 }
@@ -470,6 +523,9 @@ fn set_loading(shared: &Shared, loading: bool) {
 fn set_prompting(shared: &Shared, prompting: bool) {
     if let Ok(mut state) = shared.lock() {
         state.prompting = prompting;
+        if prompting {
+            state.before_prompt = state.last_message.clone();
+        }
     }
 }
 
@@ -534,10 +590,21 @@ impl AgentHandle {
     /// this returns immediately, and prompts sent meanwhile wait for it.
     /// `mcp`: the MCP servers the agent gets in that conversation.
     pub fn start(agent: &config::Agent, cwd: PathBuf, mcp: Vec<McpServer>) -> Self {
+        Self::start_with(agent, cwd, mcp, Start::New)
+    }
+
+    /// `start`, with the conversation to begin with. A copy answers with
+    /// `Event::Resumed`: whether it was made, or a new conversation instead.
+    pub fn start_with(
+        agent: &config::Agent,
+        cwd: PathBuf,
+        mcp: Vec<McpServer>,
+        start: Start,
+    ) -> Self {
         let log = std::env::var_os(LOG_VAR)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
-        Self::spawn(agent, cwd, mcp, log)
+        Self::spawn(agent, cwd, mcp, log, start)
     }
 
     /// `start`, logging the agent's stdio to `log`.
@@ -546,6 +613,7 @@ impl AgentHandle {
         cwd: PathBuf,
         mcp: Vec<McpServer>,
         log: Option<PathBuf>,
+        start: Start,
     ) -> Self {
         let missing = missing_command(&agent.command);
         let config = AcpAgentConfig::new(&agent.command)
@@ -585,8 +653,7 @@ impl AgentHandle {
                         .block_on(serve(
                             acp_agent,
                             wanted,
-                            cwd,
-                            mcp,
+                            First { cwd, mcp, start },
                             commands_rx,
                             events_tx.clone(),
                             session_state,
@@ -678,6 +745,16 @@ impl AgentHandle {
         match self.events.lock() {
             Ok(events) => events.recv_timeout(timeout),
             Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+        }
+    }
+
+    /// The next event, if one is waiting; an error once the agent stopped
+    /// and nothing is left.
+    pub fn try_next(&self) -> Result<Option<Event>, ()> {
+        match self.events.lock().map_err(|_| ())?.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(()),
         }
     }
 
@@ -805,12 +882,12 @@ fn missing_command(command: &str) -> Option<String> {
 async fn serve(
     agent: AcpAgent,
     mut wanted: Wanted,
-    cwd: PathBuf,
-    mcp: Vec<McpServer>,
+    first: First,
     mut commands: tokio_mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
     shared: Shared,
 ) -> Result<(), agent_client_protocol::Error> {
+    let First { cwd, mcp, start } = first;
     let update_events = events.clone();
     let permission_events = events.clone();
     let form_events = events.clone();
@@ -870,18 +947,71 @@ async fn serve(
                     ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
                 )
                 .meta(air_async_tasks());
-            let agent_capabilities = cx
+            let initialized = cx
                 .send_request(
                     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
                 )
                 .block_task()
-                .await?
-                .agent_capabilities;
+                .await?;
+            let agent_capabilities = initialized.agent_capabilities;
+            let forks = match &agent_capabilities.session_capabilities.fork {
+                None => Forks::No,
+                Some(_)
+                    if initialized
+                        .meta
+                        .is_some_and(|meta| meta.contains_key("jetbrains")) =>
+                {
+                    Forks::UpTo
+                }
+                Some(_) => Forks::Whole,
+            };
+            if let Ok(mut state) = shared.lock() {
+                state.forks = forks;
+            }
             // `session/resume` does not replay the conversation; `session/load` does.
             let can_resume = agent_capabilities.session_capabilities.resume.is_some();
             let can_load = agent_capabilities.load_session;
-            let mut session =
-                open_session(&cx, Opening::New, &cwd, mcp, &wanted, &events, &shared).await?;
+            // A copy has to be opened before its first prompt: Claude does
+            // not find it otherwise, and Codex never answers.
+            let copy = match &start {
+                Start::Fork(of) if forks != Forks::No => {
+                    let opening: Option<fn(String) -> Opening> = match (can_resume, can_load) {
+                        (true, _) => Some(Opening::Resume),
+                        (false, true) => Some(Opening::Load),
+                        (false, false) => None,
+                    };
+                    match (fork(&cx, of, forks, &cwd).await, opening) {
+                        (Ok(id), Some(opening)) => Some(opening(id)),
+                        (Err(e), _) if is_incoming_transport_closed(&e) => return Err(e),
+                        (Ok(_), None) | (Err(_), _) => None,
+                    }
+                }
+                _ => None,
+            };
+            let copied = match copy {
+                Some(opening) => {
+                    open_session(&cx, opening, &cwd, mcp.clone(), &wanted, &events, &shared).await
+                }
+                None => Err(agent_client_protocol::Error::internal_error()),
+            };
+            let mut session = match copied {
+                Ok(session) => {
+                    if let Ok(mut state) = shared.lock() {
+                        state.copy = true;
+                    }
+                    let _ = events.send(Event::Resumed(Ok(())));
+                    session
+                }
+                Err(e) if is_incoming_transport_closed(&e) => return Err(e),
+                Err(_) => {
+                    if start != Start::New {
+                        let _ = events.send(Event::Resumed(Err(
+                            "the conversation could not be copied".to_string(),
+                        )));
+                    }
+                    open_session(&cx, Opening::New, &cwd, mcp, &wanted, &events, &shared).await?
+                }
+            };
             // Commands that arrived during a turn, run after it.
             let mut pending = VecDeque::new();
 
@@ -901,7 +1031,8 @@ async fn serve(
                                 .await;
                         set_prompting(&shared, false);
                         let event = match result {
-                            Ok(response) => {
+                            Ok(None) => break,
+                            Ok(Some(response)) => {
                                 // A compaction whose sizes never came.
                                 if let Some(compacted) = take_compaction(&shared, true) {
                                     let _ = events.send(Event::Compacted(compacted));
@@ -1009,7 +1140,8 @@ async fn ask_form(events: &mpsc::Sender<Event>, form: Form) -> Option<Answers> {
 }
 
 /// Runs one prompt turn. A `Cancel` received meanwhile is sent to the agent,
-/// which then ends the turn with `StopReason::Cancelled`. Other commands are
+/// which then ends the turn with `StopReason::Cancelled`. `None` when the
+/// handle was dropped meanwhile. Other commands are
 /// kept in `pending`, to run after the turn; a new prompt means Parolsh
 /// stopped waiting for this one, so it cancels it again, and a `Cancel`
 /// drops the prompts waiting.
@@ -1020,7 +1152,7 @@ async fn prompt(
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending: &mut VecDeque<Command>,
     events: &mpsc::Sender<Event>,
-) -> Result<PromptResponse, agent_client_protocol::Error> {
+) -> Result<Option<PromptResponse>, agent_client_protocol::Error> {
     let blocks = blocks.iter().map(Block::to_acp).collect();
     let turn = cx
         .send_request(PromptRequest::new(session.clone(), blocks))
@@ -1029,9 +1161,12 @@ async fn prompt(
 
     loop {
         tokio::select! {
-            response = &mut turn => return response,
-            Some(command) = commands.recv() => match command {
-                Command::Cancel => {
+            response = &mut turn => return response.map(Some),
+            command = commands.recv() => match command {
+                // The handle was dropped: Parolsh is done with this agent,
+                // without waiting for the turn.
+                None => return Ok(None),
+                Some(Command::Cancel) => {
                     pending.retain(|command| match command {
                         Command::Prompt(turn, _) => {
                             let _ = events.send(Event::TurnEnd(*turn, StopReason::Cancelled));
@@ -1041,14 +1176,40 @@ async fn prompt(
                     });
                     cx.send_notification(CancelNotification::new(session.clone()))?;
                 }
-                Command::Prompt(..) => {
+                Some(command @ Command::Prompt(..)) => {
                     pending.push_back(command);
                     cx.send_notification(CancelNotification::new(session.clone()))?;
                 }
-                command => pending.push_back(command),
+                Some(command) => pending.push_back(command),
             },
         }
     }
+}
+
+/// The agent's first conversation: where, with what, and whether it is new.
+struct First {
+    cwd: PathBuf,
+    mcp: Vec<McpServer>,
+    start: Start,
+}
+
+/// Copies the conversation `of`, which another agent process may be working
+/// on. The copy's id.
+async fn fork(
+    cx: &ConnectionTo<Agent>,
+    of: &ForkOf,
+    forks: Forks,
+    cwd: &Path,
+) -> Result<String, agent_client_protocol::Error> {
+    let mut request = ForkSessionRequest::new(of.session.clone(), cwd);
+    if let (Forks::UpTo, Some(message)) = (forks, &of.up_to) {
+        let point = serde_json::json!({"air": {"fork": {"version": 1, "messageId": message}}});
+        let mut meta = Meta::new();
+        meta.insert("jetbrains".to_string(), point);
+        request = request.meta(meta);
+    }
+    let response = cx.send_request(request).block_task().await?;
+    Ok(response.session_id.to_string())
 }
 
 /// Creates a session, then sets the wanted mode and options.
@@ -1144,6 +1305,7 @@ async fn open_session(
             modes,
             options,
             session_id: Some(session.to_string()),
+            forks: state.forks,
             ..Default::default()
         };
     }
@@ -1374,8 +1536,16 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
         }
         SessionUpdate::AgentMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
+            message_id,
             ..
-        }) => Event::Text(text.text),
+        }) => {
+            if let Some(id) = message_id
+                && let Ok(mut state) = shared.lock()
+            {
+                state.last_message = Some(id.0.to_string());
+            }
+            Event::Text(text.text)
+        }
         SessionUpdate::AgentThoughtChunk(ContentChunk {
             content: ContentBlock::Text(text),
             ..
@@ -1777,6 +1947,7 @@ mod tests {
             dir.path().to_path_buf(),
             Vec::new(),
             Some(log.clone()),
+            Start::New,
         );
         let (text, _) = turn(&agent, "warn");
         assert_eq!(text, "warned");
@@ -1888,6 +2059,95 @@ mod tests {
             }
             events => panic!("{events:?}"),
         }
+    }
+
+    /// An agent started with a copy of the conversation `s9`, as far as the
+    /// agent can copy it, and what the copy is of: the fake agent's answer
+    /// to `fork`.
+    fn copy_of_s9(flags: &[&str], dir: &Path) -> (AgentHandle, Result<(), String>, String) {
+        let mut args = vec![FAKE_AGENT.to_string()];
+        args.extend(flags.iter().map(|flag| flag.to_string()));
+        let of = ForkOf {
+            session: "s9".to_string(),
+            up_to: Some("m3".to_string()),
+        };
+        let agent = AgentHandle::start_with(
+            &fake_agent(None, args),
+            dir.to_path_buf(),
+            Vec::new(),
+            Start::Fork(of),
+        );
+        let copied = match next(&agent) {
+            Event::Resumed(copied) => copied,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let (text, _) = turn(&agent, "fork");
+        (agent, copied, text)
+    }
+
+    #[test]
+    fn an_agent_starts_in_a_copy_up_to_a_message_when_it_can_make_one() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (agent, copied, of) = copy_of_s9(&["--fork-upto"], dir.path());
+        assert_eq!(copied, Ok(()));
+        assert_eq!(of, r#"{"of": "s9", "upTo": "m3"}"#);
+        assert_eq!(agent.activity().get().forks, Forks::UpTo);
+        // The agent titles the copy "Fake work (fork)": it goes on as the
+        // conversation it was.
+        assert_eq!(agent.activity().get().title.as_deref(), Some("Fake work"));
+        // The copy was opened: it is the session that answers.
+        assert_eq!(agent.activity().get().session_id.as_deref(), Some("f1"));
+
+        // An agent that only copies the whole conversation.
+        let (agent, copied, of) = copy_of_s9(&["--fork"], dir.path());
+        assert_eq!(copied, Ok(()));
+        assert_eq!(of, r#"{"of": "s9", "upTo": null}"#);
+        assert_eq!(agent.activity().get().forks, Forks::Whole);
+    }
+
+    /// Only a copy Parolsh asked for loses the "(fork)" of its title.
+    #[test]
+    fn a_title_is_only_changed_for_a_copy() {
+        let state = |copy| {
+            let state = SessionState {
+                title: Some("Why a fork (fork)".to_string()),
+                copy,
+                ..SessionState::default()
+            };
+            ActivityWatch(Arc::new(Mutex::new(state))).get().title
+        };
+
+        assert_eq!(state(true).as_deref(), Some("Why a fork"));
+        assert_eq!(state(false).as_deref(), Some("Why a fork (fork)"));
+    }
+
+    #[test]
+    fn an_agent_that_cannot_copy_starts_a_new_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (agent, copied, of) = copy_of_s9(&[], dir.path());
+
+        assert!(copied.is_err(), "{copied:?}");
+        assert_eq!(of, "null");
+        assert_eq!(agent.activity().get().forks, Forks::No);
+        assert_eq!(agent.activity().get().session_id.as_deref(), Some("s1"));
+    }
+
+    /// Where a copy without the prompt in flight ends: the agent's last
+    /// message before it.
+    #[test]
+    fn the_message_before_the_prompt_in_flight_is_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        assert_eq!(agent.activity().get().before_prompt, None);
+
+        turn(&agent, "warn");
+        assert!(agent.prompt("slow".to_string()).is_some());
+        // `slow` answers "working" and waits to be cancelled.
+        assert!(matches!(next(&agent), Event::Text(_)));
+        assert_eq!(agent.activity().get().before_prompt.as_deref(), Some("m1"));
+        agent.cancel();
     }
 
     #[test]

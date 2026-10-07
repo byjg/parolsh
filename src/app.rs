@@ -12,13 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Block};
+use crate::acp::{AgentHandle, Block, ForkOf, Forks, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
 use crate::history::{History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
+use crate::jobs::{self, Job};
 use crate::title::Title;
+use crate::turn::Ended;
 use crate::{
     config, hints, mcp, mention, project, replay, setup, shell, shellenv, turn, ui, version,
 };
@@ -53,6 +55,8 @@ Control commands:
   #forget [n]     remove a session from the history; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex)
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
+  #jobs           the turns sent to the background (Ctrl+Z during a turn)
+  #fg [n]         wait for background turn n, or the last one (Ctrl+C cancels it)
   #exit           leave Parolsh";
 
 pub struct App {
@@ -99,6 +103,20 @@ pub struct App {
     history_db: Option<PathBuf>,
     /// The session to go back to once the banner is printed.
     resume: Option<Resume>,
+    /// Turns sent to the background with Ctrl+Z, until they are reported.
+    jobs: Vec<Job>,
+    /// The number of the next one.
+    next_job: usize,
+    /// Numbers the conversations: what a background turn answered only goes
+    /// back to the one it left.
+    conversation: u64,
+    /// The current conversation is not saved (`#new private`).
+    private: bool,
+    /// What background turns answered, for the agent with the next message:
+    /// its conversation was copied before them.
+    handover: Vec<String>,
+    /// Leaving was refused once, because something is still running.
+    leaving: bool,
 }
 
 /// The session to go back to at start: `--resume <n>`, or `--continue`.
@@ -177,6 +195,12 @@ impl App {
             title: None,
             history_db,
             resume,
+            jobs: Vec::new(),
+            next_job: 1,
+            conversation: 0,
+            private: false,
+            handover: Vec::new(),
+            leaving: false,
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -242,16 +266,19 @@ impl App {
                     history.set_agent_session_id(activity.session_id);
                 }
             }
+            self.attend_jobs();
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
                 // A key bound to a command (Ctrl+L) is a line like any other.
                 Signal::Success(line) | Signal::HostCommand(line) => {
-                    if let Flow::Exit = self.handle(route(&line, self.mode.get())) {
-                        return Ok(());
+                    match self.handle(route(&line, self.mode.get())) {
+                        Flow::Exit if self.may_leave() => return Ok(()),
+                        Flow::Exit => {}
+                        Flow::Continue => self.leaving = false,
                     }
                 }
                 Signal::CtrlC => continue,
-                Signal::CtrlD => return Ok(()),
+                Signal::CtrlD if self.may_leave() => return Ok(()),
                 _ => continue,
             }
         }
@@ -274,9 +301,12 @@ impl App {
                     display,
                     &self.printer,
                     &repaint,
-                    &stop,
-                    &self.interrupt,
+                    turn::Flags {
+                        stop: &stop,
+                        interrupt: &self.interrupt,
+                    },
                     &mut self.audit,
+                    &mut self.jobs,
                 )
             });
             let signal = editor.read_line(prompt);
@@ -288,8 +318,15 @@ impl App {
 
         let late = std::iter::from_fn(|| self.printer.get_line());
         let lines: Vec<String> = late.chain(watched.lines).collect();
+        let job = self.jobs.iter().any(Job::wants_attention);
         if !lines.is_empty() || watched.request.is_some() || watched.stopped {
             // Below the line the prompt was on.
+            println!();
+        } else if job && ui::is_ansi() {
+            // Only a background turn made the prompt return: its line goes,
+            // and what was typed comes back with the next prompt.
+            print!("{}", ui::CLEAR_LINE);
+        } else if job {
             println!();
         }
         for line in lines {
@@ -402,6 +439,7 @@ impl App {
         if fell_back {
             self.prompt_override = Some(PromptStyle::Parolsh);
         }
+        let prompt = prompt.with_jobs(self.jobs.len());
         match &self.agent {
             Some(agent) => prompt.with_background(agent.activity(), ansi),
             None => prompt,
@@ -624,6 +662,10 @@ impl App {
         if let Some(history) = self.audit.history_mut() {
             history.resume(&project, id)?;
         }
+        // Another conversation: what a background turn answers is not its.
+        self.conversation += 1;
+        self.private = false;
+        self.handover.clear();
         // Where the session was, before going on.
         self.show_exchanges(self.config.redraw_exchanges)?;
         if conversation {
@@ -714,6 +756,10 @@ impl App {
 
     /// A new conversation: a new session in the history, unless private.
     fn begin_session(&mut self, private: bool) {
+        self.conversation += 1;
+        self.private = private;
+        // What a background turn answered was for the conversation it left.
+        self.handover.clear();
         self.audit.begin(SessionStart {
             project: self.project_key(),
             agent: self.agent.as_ref().and(self.active.clone()),
@@ -785,10 +831,15 @@ impl App {
             "config" => self.config_command(args),
             "options" => self.options_command(args),
             // Not recorded: looking changes nothing.
-            "audit" | "sessions" | "redraw" => {
+            "audit" | "sessions" | "redraw" | "jobs" | "fg" => {
                 let result = match name {
                     "audit" => self.audit_command(args),
                     "sessions" => self.sessions_command(),
+                    "jobs" => {
+                        self.jobs_command();
+                        Ok(())
+                    }
+                    "fg" => self.fg_command(args),
                     _ => self.redraw_command(args),
                 };
                 return Some(match result {
@@ -990,14 +1041,24 @@ impl App {
             );
         }
         let files = mention::mentioned(&text, &self.cwd, home().as_deref());
-        self.audit.add(
+        let message = self.audit.add(
             Record::new(Actor::User, Kind::Message, text.clone())
                 .meta(json!({"agent": name, "files": files.len()})),
         );
-        let mut blocks: Vec<Block> = shared.into_iter().map(Block::Text).collect();
+        // What background turns answered since the last message comes first.
+        let told = std::mem::take(&mut self.handover);
+        let mut blocks: Vec<Block> = told.iter().cloned().map(Block::Text).collect();
+        blocks.extend(shared.into_iter().map(Block::Text));
         blocks.extend(files.into_iter().map(Block::File));
-        blocks.push(Block::Text(text));
-        match turn::run(agent, blocks, self.display(), &mut self.audit) {
+        blocks.push(Block::Text(text.clone()));
+        let display = self.display();
+        match turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs) {
+            turn::Outcome::Background(turn) => {
+                // The copy the conversation goes on in was not told either.
+                self.handover = told;
+                self.send_to_background(*turn, text, message.row());
+                0
+            }
             turn::Outcome::Finished => 0,
             turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
@@ -1012,6 +1073,247 @@ impl App {
                 1
             }
         }
+    }
+
+    /// Ctrl+Z during a turn: the turn goes on in the background, with the
+    /// agent process and the conversation it has, and the session's entries
+    /// from its message on move to a session of their own. The conversation
+    /// here goes on in another process: in a copy that ends before that
+    /// message when the agent can make one, in a new one otherwise.
+    fn send_to_background(&mut self, mut turn: turn::Turn, request: String, message: Option<i64>) {
+        let Some(old) = self.agent.take() else {
+            return;
+        };
+        let activity = old.activity().get();
+        let start = match (activity.forks, activity.session_id, activity.before_prompt) {
+            (Forks::UpTo, Some(session), Some(message)) => Start::Fork(ForkOf {
+                session,
+                up_to: Some(message),
+            }),
+            (Forks::Whole, Some(session), _) => Start::Fork(ForkOf {
+                session,
+                up_to: None,
+            }),
+            // No copy, or nothing was said before that message.
+            _ => Start::New,
+        };
+        let split = message.and_then(|first| {
+            let history = self.audit.history_mut()?;
+            history.split(first).ok().flatten()
+        });
+        turn.move_to(split);
+        let job = Job::new(self.next_job, request.clone(), self.conversation, old, turn);
+        self.next_job += 1;
+        // Over the `^Z` the terminal echoed.
+        print!("{}", if ui::is_ansi() { ui::CLEAR_LINE } else { "\r" });
+        println!("{}", job.label("in the background"));
+        self.jobs.push(job);
+
+        let mcp = self.mcp_servers(self.private);
+        let agent = self
+            .active_agent()
+            .map(|agent| AgentHandle::start_with(agent, self.cwd.clone(), mcp, start.clone()));
+        self.agent = agent;
+        let Some(agent) = &self.agent else {
+            eprintln!("parolsh: {}", no_agent());
+            return;
+        };
+        match &start {
+            Start::New => println!("The conversation here is a new one."),
+            Start::Fork(of) => match turn::wait_resumed(agent) {
+                // A whole copy has the request: the agent would do it again.
+                turn::Resumed::Yes if of.up_to.is_none() => self.handover.push(format!(
+                    "For your information only: do not answer this or comment on it.\n\n\
+                     My last request is being worked on in the background, in another \
+                     conversation: do not work on it here. Its answer will follow.\n\n\
+                     The request:\n{request}"
+                )),
+                turn::Resumed::Yes => {}
+                turn::Resumed::No(why) => {
+                    println!("parolsh: {why}. The conversation here is a new one.");
+                }
+                turn::Resumed::AgentStopped(why) => {
+                    self.agent = None;
+                    eprintln!("parolsh: {why}. Run #new to start it again.");
+                }
+            },
+        }
+    }
+
+    /// Deals with the background turns that ask something or ended.
+    fn attend_jobs(&mut self) {
+        for job in &mut self.jobs {
+            job.poll(&mut self.audit);
+            job.answer(&mut self.audit);
+        }
+        while let Some(done) = self.jobs.iter().position(|job| job.ended().is_some()) {
+            let job = self.jobs.remove(done);
+            self.report(job);
+        }
+    }
+
+    /// A background turn ended: shows its answer, puts its entries at the
+    /// end of the session it left, and keeps the answer for the agent, with
+    /// the next message. Left as a session of its own when the conversation
+    /// here is no longer the one it left.
+    fn report(&mut self, job: Job) {
+        let Some(ended) = job.ended().cloned() else {
+            return;
+        };
+        println!("{}", job.label(jobs::outcome(&ended)));
+        if let Ended::Failed(why) | Ended::AgentStopped(why) = &ended {
+            eprintln!("parolsh: {why}");
+        }
+        let turn = job.turn();
+        let answer = turn.answer().trim();
+        if !answer.is_empty() {
+            let record = Record::new(Actor::Agent, Kind::Answer, answer);
+            let (ansi, width) = (ui::is_ansi(), turn::text_width());
+            print!("{}", replay::answer(&record, self.display(), ansi, width));
+        }
+        if ui::is_ansi() {
+            let summary = ui::summary(turn.tool_calls(), turn.started().elapsed(), None);
+            println!("{summary}");
+        }
+        let here = job.conversation == self.conversation;
+        match (turn.session(), here) {
+            (Some(session), true) => {
+                if let Some(history) = self.audit.history_mut()
+                    && let Err(e) = history.append(session)
+                {
+                    eprintln!("parolsh: history: {e}");
+                }
+            }
+            (Some(session), false) => {
+                println!("It is session {session} in the history: #audit {session} shows it.");
+            }
+            (None, _) => {}
+        }
+        // Only an answer: what a cancelled or failed turn wrote is not one.
+        if here && !answer.is_empty() && ended == Ended::Finished(None) {
+            self.handover.push(handover(&job.request, answer));
+        }
+    }
+
+    /// `#jobs`: the turns in the background.
+    fn jobs_command(&mut self) {
+        if self.jobs.is_empty() {
+            println!("No turns in the background. Ctrl+Z sends the running one there.");
+        }
+        for job in &mut self.jobs {
+            job.poll(&mut self.audit);
+            let line = format!(
+                "[{}] {} · {}",
+                job.number,
+                audit::excerpt(&job.request, 40),
+                job.progress()
+            );
+            println!("{}", audit::excerpt(&line, ui::width()));
+        }
+    }
+
+    /// `#fg [n]`: waits for background turn `n`, or the last one. Ctrl+C
+    /// cancels it, Ctrl+Z goes back to the prompt.
+    fn fg_command(&mut self, args: &str) -> Result<()> {
+        let number = match args {
+            "" => self.jobs.last().map(|job| job.number),
+            number => Some(
+                number
+                    .parse()
+                    .with_context(|| format!("`#fg {number}`: not a number"))?,
+            ),
+        };
+        let index = number
+            .and_then(|number| self.jobs.iter().position(|job| job.number == number))
+            .context("no such turn in the background, see #jobs")?;
+        let ansi = ui::is_ansi();
+        let clear = || {
+            if ansi {
+                eprint!("{}", ui::CLEAR_LINE);
+            }
+        };
+        // Keys pressed before do not count.
+        turn::interrupt_asked();
+        turn::background_asked();
+        println!("{}", self.jobs[index].label("waiting for"));
+        let mut cancelling = false;
+        loop {
+            let job = &mut self.jobs[index];
+            job.poll(&mut self.audit);
+            if job.asks() {
+                clear();
+                job.answer(&mut self.audit);
+                continue;
+            }
+            if job.ended().is_some() {
+                clear();
+                break;
+            }
+            if turn::interrupt_asked() {
+                job.cancel();
+                cancelling = true;
+            }
+            if turn::background_asked() {
+                clear();
+                println!("{}", job.label("in the background"));
+                return Ok(());
+            }
+            if ansi {
+                let cancelling = if cancelling { "Cancelling… · " } else { "" };
+                let line = format!(
+                    "[{}] {cancelling}{}  (Ctrl+Z: back to the prompt, Ctrl+C: cancel it)",
+                    job.number,
+                    job.progress()
+                );
+                eprint!(
+                    "{}{}",
+                    ui::CLEAR_LINE,
+                    ui::dim(&audit::excerpt(&line, ui::width()))
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        self.attend_jobs();
+        Ok(())
+    }
+
+    /// `#exit` and Ctrl+D do not leave the first time while something is
+    /// still running: it would stop with Parolsh.
+    fn may_leave(&mut self) -> bool {
+        let jobs = self.jobs.len();
+        let tasks = self
+            .agent
+            .as_ref()
+            .map_or(0, |agent| agent.activity().get().tasks);
+        if self.leaving || (jobs == 0 && tasks == 0) {
+            return true;
+        }
+        self.leaving = true;
+        let count = |n: usize, one: &str, many: &str| match n {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {many}")),
+        };
+        let running: Vec<String> = [
+            count(
+                jobs,
+                "turn in the background (#jobs)",
+                "turns in the background (#jobs)",
+            ),
+            count(
+                tasks,
+                "background task of the agent",
+                "background tasks of the agent",
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        println!(
+            "Still running: {}. Leaving stops them: #exit again to leave.",
+            running.join(" and ")
+        );
+        false
     }
 
     fn new_conversation(&mut self, private: bool) {
@@ -1202,6 +1504,27 @@ impl Shared {
 const PRINTER_LINES: usize = 64;
 
 /// Where to go when no agent is configured.
+/// What the agent is told of a background turn that ended, with the next
+/// message: its conversation is a copy made before it. At most the last
+/// `HANDOVER_LIMIT` bytes of the answer.
+fn handover(request: &str, answer: &str) -> String {
+    let mut start = answer.len().saturating_sub(HANDOVER_LIMIT);
+    while !answer.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = if start > 0 { "(the end of it)\n" } else { "" };
+    format!(
+        "For your information only: do not answer this or comment on it, unless I ask about \
+         it.\n\nWhile we talked, a request of mine was worked on in the background, in another \
+         conversation, and it ended. You were not told of it before.\n\n\
+         The request:\n{request}\n\nIts answer:\n{cut}{}",
+        &answer[start..]
+    )
+}
+
+/// As much as a `!+` output keeps.
+const HANDOVER_LIMIT: usize = 16 * 1024;
+
 fn no_agent() -> String {
     match config::global_path() {
         Some(path) => format!(
@@ -1285,6 +1608,30 @@ fn session_number(text: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_background_answer_is_handed_over_with_its_request_and_cut_at_the_limit() {
+        let short = handover("compare with 0.6.0", "Three things changed.");
+        assert!(
+            short.ends_with(
+                "The request:\ncompare with 0.6.0\n\nIts answer:\nThree things changed."
+            ),
+            "{short}"
+        );
+
+        // The end is kept, cut between characters.
+        let long = format!("start {} the end", "é".repeat(HANDOVER_LIMIT));
+        let cut = handover("write a lot", &long);
+        let answer = cut.split_once("Its answer:\n").unwrap().1;
+        assert!(
+            answer.starts_with("(the end of it)\né"),
+            "{}",
+            &answer[..40]
+        );
+        assert!(answer.ends_with("é the end"));
+        assert!(answer.len() <= HANDOVER_LIMIT + "(the end of it)\n".len());
+        assert!(!cut.contains("start"));
+    }
 
     /// Tab completes the `#` commands `#help` lists, no more, no fewer.
     #[test]
