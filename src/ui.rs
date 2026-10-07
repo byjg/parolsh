@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::acp::{Activity, ActivityWatch, Detail};
+use crate::acp::{Activity, ActivityWatch, Compacted, Context, Detail};
 use crate::input::Mode;
 
 /// The logo, a speech bubble with a prompt in it (`docs/images/logo.png`). The `>` is
@@ -22,6 +22,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
 const BLUE: &str = "\x1b[34m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -163,8 +164,9 @@ impl Prompt {
 }
 
 impl Prompt {
-    /// Shows `agent`'s running background tasks on the right, before what
-    /// is there: `⧗ 2 bg · 0:42`, with the time of the oldest.
+    /// Shows on the right, before what is there, `agent`'s running
+    /// background tasks (`⧗ 2 bg · 0:42`, with the time of the oldest) and
+    /// its context when it is filling up (`ctx 82%`).
     pub fn with_background(mut self, agent: ActivityWatch, ansi: bool) -> Self {
         self.background = Some((agent, ansi));
         self
@@ -181,18 +183,23 @@ impl reedline::Prompt for Prompt {
         let Some((agent, ansi)) = &self.background else {
             return Cow::Borrowed(&self.right);
         };
-        let Some(tasks) = background(&agent.get()) else {
+        let activity = agent.get();
+        let tasks = background(&activity).map(|tasks| match ansi {
+            true => format!("{DIM}{tasks}{RESET}"),
+            false => tasks,
+        });
+        let parts: Vec<String> = [context_warning(&activity, *ansi), tasks]
+            .into_iter()
+            .flatten()
+            .collect();
+        if parts.is_empty() {
             return Cow::Borrowed(&self.right);
-        };
-        let tasks = if *ansi {
-            format!("{DIM}{tasks}{RESET}")
-        } else {
-            tasks
-        };
+        }
+        let agent = parts.join(" ");
         if self.right.is_empty() {
-            Cow::Owned(tasks)
+            Cow::Owned(agent)
         } else {
-            Cow::Owned(format!("{tasks} {}", self.right))
+            Cow::Owned(format!("{agent} {}", self.right))
         }
     }
 
@@ -481,14 +488,82 @@ pub fn dim(text: &str) -> String {
     format!("{DIM}{text}{RESET}")
 }
 
-/// The line printed when a turn ends.
-pub fn summary(tools: usize, elapsed: Duration) -> String {
+/// The line printed when a turn ends: `✓ 2 tool calls · 18s`, then how full
+/// the agent's context is and what the conversation cost, when it says:
+/// `· 24k of 1M (2%) · $0.35`.
+pub fn summary(tools: usize, elapsed: Duration, context: Option<&Context>) -> String {
     let tools = match tools {
         0 => String::new(),
         1 => "1 tool call · ".to_string(),
         n => format!("{n} tool calls · "),
     };
-    format!("{DIM}✓ {tools}{}s{RESET}", elapsed.as_secs())
+    let context = context
+        .map(|context| format!(" · {}", usage(context)))
+        .unwrap_or_default();
+    format!("{DIM}✓ {tools}{}s{context}{RESET}", elapsed.as_secs())
+}
+
+/// `24k of 1M (2%)`, and ` · $0.35` with a cost.
+fn usage(context: &Context) -> String {
+    let mut text = format!(
+        "{} of {} ({}%)",
+        tokens(context.used),
+        tokens(context.size),
+        context.percent()
+    );
+    if let Some(cost) = &context.cost {
+        text.push_str(&format!(" · {}", money(cost.amount, &cost.currency)));
+    }
+    text
+}
+
+/// A number of tokens, short: `950`, `24k`, `1.2M`.
+pub fn tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..999_500 => format!("{}k", (count + 500) / 1_000),
+        _ => {
+            let millions = format!("{:.1}", count as f64 / 1_000_000.0);
+            format!("{}M", millions.trim_end_matches(".0"))
+        }
+    }
+}
+
+/// `$0.35`, or `0.35 EUR` for another currency.
+pub fn money(amount: f64, currency: &str) -> String {
+    match currency {
+        "USD" => format!("${amount:.2}"),
+        currency => format!("{amount:.2} {currency}"),
+    }
+}
+
+/// The line for a compaction: `Compacted: 28k → 5k tokens (6.8s)`.
+pub fn compacted(compacted: &Compacted) -> String {
+    let sizes = match (compacted.before, compacted.after) {
+        (Some(before), Some(after)) => format!(": {} → {} tokens", tokens(before), tokens(after)),
+        _ => String::new(),
+    };
+    format!("Compacted{sizes} ({:.1}s)", compacted.took.as_secs_f64())
+}
+
+/// From how full the context is said on the right of the prompt, and from
+/// where in red.
+const CONTEXT_WARNING: u64 = 75;
+const CONTEXT_ALMOST_FULL: u64 = 90;
+
+/// `ctx 82%` when the agent's context is filling up: time to compact, or to
+/// start a new conversation. `None` below that.
+pub fn context_warning(activity: &Activity, ansi: bool) -> Option<String> {
+    let percent = activity.context.as_ref()?.percent();
+    if percent < CONTEXT_WARNING {
+        return None;
+    }
+    let text = format!("ctx {percent}%");
+    Some(match (ansi, percent >= CONTEXT_ALMOST_FULL) {
+        (false, _) => text,
+        (true, true) => format!("{RED}{text}{RESET}"),
+        (true, false) => format!("{YELLOW}{text}{RESET}"),
+    })
 }
 
 /// First line of `text`, without control characters.
@@ -926,15 +1001,88 @@ mod tests {
         assert_eq!(lines, ["1", "2", "3", "… 7 more lines"]);
     }
 
+    fn filled(used: u64, size: u64, cost: Option<f64>) -> Context {
+        Context {
+            used,
+            size,
+            cost: cost.map(|amount| crate::acp::Cost {
+                amount,
+                currency: "USD".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_summary_says_how_full_the_context_is_and_the_cost() {
+        let line = |context: &Context| plain(&summary(0, Duration::from_secs(3), Some(context)));
+
+        assert_eq!(
+            line(&filled(24_300, 1_000_000, Some(0.351))),
+            "✓ 3s · 24k of 1M (2%) · $0.35"
+        );
+        // Codex: no cost.
+        assert_eq!(
+            line(&filled(15_368, 258_400, None)),
+            "✓ 3s · 15k of 258k (6%)"
+        );
+    }
+
+    #[test]
+    fn tokens_and_money_are_short() {
+        let short: Vec<String> = [0, 950, 1_000, 5_061, 27_822, 999_499, 999_500, 1_250_000]
+            .into_iter()
+            .map(tokens)
+            .collect();
+        assert_eq!(short, ["0", "950", "1k", "5k", "28k", "999k", "1M", "1.2M"]);
+        assert_eq!(money(4.309, "USD"), "$4.31");
+        assert_eq!(money(4.309, "EUR"), "4.31 EUR");
+    }
+
+    #[test]
+    fn a_compaction_says_the_sizes_when_they_are_known() {
+        let took = Duration::from_millis(6807);
+        let with = Compacted {
+            before: Some(28_067),
+            after: Some(5_061),
+            took,
+        };
+        assert_eq!(compacted(&with), "Compacted: 28k → 5k tokens (6.8s)");
+        let without = Compacted {
+            before: None,
+            after: None,
+            took,
+        };
+        assert_eq!(compacted(&without), "Compacted (6.8s)");
+    }
+
+    #[test]
+    fn the_context_is_on_the_right_of_the_prompt_only_when_it_fills_up() {
+        let at = |percent| Activity {
+            context: Some(filled(percent, 100, None)),
+            ..Activity::default()
+        };
+
+        assert_eq!(context_warning(&Activity::default(), true), None);
+        assert_eq!(context_warning(&at(74), true), None);
+        assert_eq!(context_warning(&at(75), false).as_deref(), Some("ctx 75%"));
+        let yellow = context_warning(&at(82), true).unwrap();
+        assert_eq!(
+            (plain(&yellow).as_str(), yellow.contains(YELLOW)),
+            ("ctx 82%", true)
+        );
+        let red = context_warning(&at(95), true).unwrap();
+        assert_eq!((plain(&red).as_str(), red.contains(RED)), ("ctx 95%", true));
+    }
+
     #[test]
     fn summary_counts_tool_calls() {
-        assert_eq!(plain(&summary(0, Duration::from_secs(2))), "✓ 2s");
+        assert_eq!(plain(&summary(0, Duration::from_secs(2), None)), "✓ 2s");
         assert_eq!(
-            plain(&summary(1, Duration::from_secs(5))),
+            plain(&summary(1, Duration::from_secs(5), None)),
             "✓ 1 tool call · 5s"
         );
         assert_eq!(
-            plain(&summary(3, Duration::from_secs(18))),
+            plain(&summary(3, Duration::from_secs(18), None)),
             "✓ 3 tool calls · 18s"
         );
     }

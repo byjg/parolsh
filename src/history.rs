@@ -62,7 +62,7 @@ pub struct SessionStart {
 }
 
 /// A session, as `#sessions` lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub id: i64,
     /// Local time, `YYYY-MM-DD HH:MM`.
@@ -77,6 +77,30 @@ pub struct Session {
     /// Its first `!command`, to name a session without a message. Yours:
     /// not for the agent unless commands are shared.
     pub first_command: Option<String>,
+    pub usage: Usage,
+}
+
+/// What a session used: the sum of what the agent reported with each turn.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    /// Reasoning, for the agents that count it apart from the output.
+    pub thought: u64,
+    /// Read from the agent's cache: counted apart, they cost far less.
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Only from the agents that report one, in `currency`: their estimate.
+    pub cost: Option<f64>,
+    pub currency: Option<String>,
+    /// How many times the conversation was compacted.
+    pub compactions: usize,
+}
+
+impl Usage {
+    pub fn tokens(&self) -> u64 {
+        self.input + self.output + self.thought + self.cache_read + self.cache_write
+    }
 }
 
 /// An entry found by `search`.
@@ -420,12 +444,30 @@ impl History {
                     (SELECT count(*) FROM entries WHERE session_id = s.id AND kind = 'message'),
                     (SELECT text FROM entries
                      WHERE session_id = s.id AND kind IN ('command', 'capture')
-                     ORDER BY id LIMIT 1)
+                     ORDER BY id LIMIT 1),
+                    u.input, u.output, u.cache_read, u.cache_write, u.cost, u.currency,
+                    u.compactions, u.thought
              FROM sessions s JOIN projects p ON p.id = s.project_id
+             -- What each turn used is kept with its end, a compaction with
+             -- its own entry.
+             LEFT JOIN (SELECT session_id,
+                               sum(json_extract(meta, '$.usage.input')) AS input,
+                               sum(json_extract(meta, '$.usage.output')) AS output,
+                               sum(json_extract(meta, '$.usage.thought')) AS thought,
+                               sum(json_extract(meta, '$.usage.cache_read')) AS cache_read,
+                               sum(json_extract(meta, '$.usage.cache_write')) AS cache_write,
+                               sum(json_extract(meta, '$.usage.cost')) AS cost,
+                               max(json_extract(meta, '$.usage.currency')) AS currency,
+                               count(json_extract(meta, '$.compaction')) AS compactions
+                        FROM entries WHERE kind = 'event' GROUP BY session_id) u
+                    ON u.session_id = s.id
              WHERE p.root = ?1
              ORDER BY s.updated_at DESC, s.id DESC",
         )?;
         let rows = statement.query_map([project], |row| {
+            let tokens = |column: usize| -> rusqlite::Result<u64> {
+                Ok(row.get::<_, Option<i64>>(column)?.unwrap_or(0).max(0) as u64)
+            };
             Ok(Session {
                 id: row.get(0)?,
                 started: row.get(1)?,
@@ -434,6 +476,16 @@ impl History {
                 entries: row.get::<_, i64>(4)? as usize,
                 messages: row.get::<_, i64>(5)? as usize,
                 first_command: row.get(6)?,
+                usage: Usage {
+                    input: tokens(7)?,
+                    output: tokens(8)?,
+                    thought: tokens(14)?,
+                    cache_read: tokens(9)?,
+                    cache_write: tokens(10)?,
+                    cost: row.get(11)?,
+                    currency: row.get(12)?,
+                    compactions: tokens(13)? as usize,
+                },
             })
         })?;
         rows.collect()
@@ -633,6 +685,56 @@ mod tests {
             history.sessions("/p").unwrap()[0].title.as_deref(),
             Some("why retry?")
         );
+    }
+
+    #[test]
+    fn a_session_adds_up_what_its_turns_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        let ended = |history: &mut History, usage: serde_json::Value| {
+            let meta = json!({ "usage": usage });
+            history.add("parolsh", "event", "turn ended · 2s", &meta)
+        };
+
+        history.begin(start("/p"));
+        history.add("user", "message", "hello", &json!({})).unwrap();
+        let first = json!({"input": 2, "output": 8, "thought": 7, "cache_read": 100, "cache_write": 50,
+                           "cost": 0.25, "currency": "USD", "context": 160});
+        ended(&mut history, first).unwrap();
+        let compaction = json!({"compaction": {"before": 160, "after": 40}});
+        history
+            .add("parolsh", "event", "conversation compacted", &compaction)
+            .unwrap();
+        // A turn of an agent that gives no cost, and one that reported nothing.
+        ended(
+            &mut history,
+            json!({"input": 1, "output": 4, "cache_read": 30}),
+        )
+        .unwrap();
+        history
+            .add("parolsh", "event", "turn ended · 1s", &json!({}))
+            .unwrap();
+        // Another session: no usage.
+        history.begin(start("/p"));
+        history.add("user", "!command", "ls", &json!({})).unwrap();
+
+        let sessions = history.sessions("/p").unwrap();
+        let used = &sessions[1].usage;
+        assert_eq!(
+            used,
+            &Usage {
+                input: 3,
+                output: 12,
+                thought: 7,
+                cache_read: 130,
+                cache_write: 50,
+                cost: Some(0.25),
+                currency: Some("USD".to_string()),
+                compactions: 1,
+            }
+        );
+        assert_eq!(used.tokens(), 202);
+        assert_eq!(sessions[0].usage, Usage::default());
     }
 
     #[test]

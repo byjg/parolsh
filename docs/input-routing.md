@@ -315,8 +315,8 @@ project.
 
 ```text
 [claude] ~/projects/wallet ✦ #sessions
-*   14  2026-10-02 15:27  claude     23 entries  Fix the crashing api
-    11  2026-09-30 10:02  claude     41 entries  Add retries to the client
+*   14  2026-10-02 15:27  claude     23 entries  412k tok    $1.84  Fix the crashing api
+    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  Add retries to the client
 [claude] ~/projects/wallet ✦ #audit 11
    0:00  USER     → claude: the client gives up too early
    0:09  AGENT    read: Read src/client.rs [src/client.rs] · completed
@@ -327,6 +327,14 @@ project.
 - A session is one conversation: it starts with Parolsh, `#new`, `#cd` or
   `#agent`, and is saved from its first entry. `#sessions` names it with the
   agent's title (Claude and Codex give one), or your first message.
+- `#sessions` also says what each session used, when the agent reports it
+  (Claude, Codex and Kilo Code do, Qwen Code does not):
+  the tokens of all its turns, and the cost for the agents that give one
+  (see [The context and what it costs](agents.md#the-context-and-what-it-costs)).
+  The total counts what was sent, received, reasoned, and read from and
+  written to the agent's cache; most of it is cache reads, which cost far less. The four
+  are kept apart with each turn, with the model that answered: see
+  [Usage in the database](#usage-in-the-database).
 - It keeps what `#audit` shows, with the full text instead of a short line,
   and also the agent's answers and reasoning, and the outputs shared with
   `!+`. `#audit <n>` shows answers as one line each; reasoning is not shown.
@@ -418,6 +426,33 @@ Continued session 7: it has only shell commands, so the agent starts a new conve
 
 What the commands had set up is not there again: the directory your commands
 were in, and what they exported, are not saved.
+
+### Usage in the database
+
+For a report, what each turn used is in `history.db`, in the `meta` of the
+entry that ends it (`kind = 'event'`, `turn ended …`), under `usage`:
+
+| Field | What |
+|---|---|
+| `input`, `output` | Tokens sent to the model and received from it |
+| `thought` | Reasoning tokens, for the agents that count them apart (Kilo Code) |
+| `cache_read`, `cache_write` | Tokens read from and written to the agent's cache |
+| `models` | The models that answered |
+| `cost`, `currency` | What the conversation cost since the turn before, when the agent says it |
+| `context`, `context_size` | The tokens in the context after the turn, and its size |
+
+```bash
+sqlite3 ~/.local/state/parolsh/history.db "
+  SELECT s.id, s.agent, sum(json_extract(e.meta, '\$.usage.input')) AS input,
+         sum(json_extract(e.meta, '\$.usage.output')) AS output,
+         round(sum(json_extract(e.meta, '\$.usage.cost')), 2) AS cost
+  FROM sessions s JOIN entries e ON e.session_id = s.id
+  WHERE e.kind = 'event' GROUP BY s.id"
+```
+
+A turn the agent starts by itself, after a background task, reports no
+tokens: its cost is counted with the next turn you send. A compaction is its
+own entry, with `compaction.before` and `compaction.after`.
 
 ### The agent can search the history
 

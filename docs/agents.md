@@ -535,8 +535,13 @@ line:
 ```text
 ✦ The container exits because DATABASE_URL is not set...
 
-✓ 3 tool calls · 18s
+✓ 3 tool calls · 18s · 24k of 1M (2%) · $0.35
 ```
+
+After the time comes what the agent reports of its context: the tokens in it,
+how many it holds, and how full that is. Then what the conversation cost so
+far, for the agents that say it. See
+[The context and what it costs](#the-context-and-what-it-costs).
 
 Without an ANSI terminal (output piped, or `TERM=dumb`), the answer is printed
 as the agent sends it: no mark, no indent and no wrapping. There is no status
@@ -621,6 +626,57 @@ while you type:
 
 Background tasks belong to the agent's process: switching agents (`#agent`)
 and leaving Parolsh stop the agent, and the tasks it started with it.
+
+## The context and what it costs
+
+An agent remembers the conversation in its context, which has a size. Claude,
+Codex, Qwen Code and Kilo Code report how full it is, and Parolsh shows it where it does
+not take room in the prompt:
+
+```text
+✓ 3 tool calls · 18s · 24k of 1M (2%) · $0.35
+[claude] ~/projects/wallet ✦                                          ctx 82%
+```
+
+- **With each turn's summary**: the tokens in the context, its size and the
+  percentage.
+- **On the right of the prompt**, only when it fills up: `ctx 82%` in yellow
+  from 75%, in red from 90%. Below that, nothing.
+- **The cost** is the agent's own estimate for the conversation so far, at
+  API prices: with a subscription it is not what you are billed. Claude and
+  Kilo Code report one, Codex and Qwen Code do not. Parolsh computes no price
+  itself.
+
+### Compacting
+
+When the context fills up, the conversation is compacted: the agent replaces
+it with a summary and goes on. Claude does it by itself when it gets close to
+full, and you can ask for it with the agent's own command, which Parolsh
+forwards as typed (see [`/command`](input-routing.md#command-1)): `/compact`
+for Claude, Codex and Kilo Code, `/compress` for Qwen Code. What follows the command is
+for the agent, as in `/compact keep the decisions about the retry logic`.
+
+```text
+[claude] ~/projects/wallet ✦ /compact
+Compacted: 28k → 5k tokens (6.8s)
+
+✓ 7s · 5k of 1M (1%) · $0.35
+```
+
+- Yours or the agent's, a compaction is said in one line, with the context
+  before and after. Qwen Code and Kilo Code say theirs in their answer
+  instead (Qwen: `Context compressed (21249 -> ~18491).`; Kilo prints the
+  summary it made). Qwen's context is updated with the next turn.
+- The context grows again with the next turn: the agent's own instructions
+  and tools are counted in it each time.
+- **The agent then remembers a summary; Parolsh still has everything.** The
+  [history](input-routing.md#the-history-of-sessions) is not compacted:
+  `#redraw`, `#audit <n>` and the agent's search of it show the conversation
+  as it happened, with a `conversation compacted` line where it was.
+- A compacted conversation is [resumed](input-routing.md#resuming-a-session)
+  like any other: the agent goes back to the summary and what came after it,
+  while the screen shows the exchanges in full. What you see above that line
+  the agent may only know in short.
 
 ### Background tasks and the terminal title
 
