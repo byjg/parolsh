@@ -7,6 +7,7 @@ mod form;
 mod hints;
 mod history;
 mod input;
+mod jobs;
 mod markdown;
 mod mcp;
 mod mention;
@@ -130,6 +131,9 @@ fn main() -> ExitCode {
 
     if let Err(e) = turn::install_interrupt_handler() {
         eprintln!("parolsh: cannot handle Ctrl+C: {e}");
+    }
+    if let Err(e) = turn::install_background_handler() {
+        eprintln!("parolsh: cannot handle Ctrl+Z: {e}");
     }
 
     let result = std::env::current_dir()

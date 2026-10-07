@@ -54,6 +54,8 @@ pub struct Prompt {
     /// The agent whose running background tasks are shown on the right, and
     /// whether to dim them.
     background: Option<(ActivityWatch, bool)>,
+    /// Turns sent to the background with Ctrl+Z, shown on the right.
+    jobs: usize,
 }
 
 /// What a prompt program may show: the last command's result and the agent.
@@ -96,6 +98,7 @@ impl Prompt {
             right: String::new(),
             indicator: format!(" {}", indicator(context, ansi)),
             background: None,
+            jobs: 0,
         }
     }
 
@@ -106,6 +109,7 @@ impl Prompt {
             right: String::new(),
             indicator: indicator(context, ansi),
             background: None,
+            jobs: 0,
         }
     }
 
@@ -159,6 +163,7 @@ impl Prompt {
             right: run(true)?.trim_end().to_string(),
             indicator: String::new(),
             background: None,
+            jobs: 0,
         })
     }
 }
@@ -173,6 +178,14 @@ impl Prompt {
     }
 }
 
+impl Prompt {
+    /// Shows on the right how many turns run in the background: `2 jobs`.
+    pub fn with_jobs(mut self, jobs: usize) -> Self {
+        self.jobs = jobs;
+        self
+    }
+}
+
 impl reedline::Prompt for Prompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.left)
@@ -180,18 +193,27 @@ impl reedline::Prompt for Prompt {
 
     /// Read on each repaint: the background tasks' time keeps running.
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        let Some((agent, ansi)) = &self.background else {
-            return Cow::Borrowed(&self.right);
+        let jobs = match self.jobs {
+            0 => None,
+            1 => Some("1 job".to_string()),
+            jobs => Some(format!("{jobs} jobs")),
         };
-        let activity = agent.get();
-        let tasks = background(&activity).map(|tasks| match ansi {
-            true => format!("{DIM}{tasks}{RESET}"),
-            false => tasks,
-        });
-        let parts: Vec<String> = [context_warning(&activity, *ansi), tasks]
-            .into_iter()
-            .flatten()
-            .collect();
+        let (activity, ansi) = match &self.background {
+            Some((agent, ansi)) => (agent.get(), *ansi),
+            None => (Activity::default(), is_ansi()),
+        };
+        let dim = |text: String| match ansi {
+            true => format!("{DIM}{text}{RESET}"),
+            false => text,
+        };
+        let parts: Vec<String> = [
+            context_warning(&activity, ansi),
+            jobs.map(dim),
+            background(&activity).map(dim),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if parts.is_empty() {
             return Cow::Borrowed(&self.right);
         }
@@ -233,7 +255,7 @@ pub fn background(activity: &Activity) -> Option<String> {
 }
 
 /// `0:42`, `12:03`, `1:02:03`.
-fn clock(elapsed: Duration) -> String {
+pub fn clock(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
     if hours > 0 {
@@ -480,6 +502,37 @@ fn scalar_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.replace('\n', " "),
         other => other.to_string(),
+    }
+}
+
+/// `job 2 is waiting for you`, `jobs 2 and 3 are waiting for you`: turns in
+/// the background that ask something. `None` without any.
+pub fn waiting(jobs: &[usize]) -> Option<String> {
+    let numbers: Vec<String> = jobs.iter().map(usize::to_string).collect();
+    match numbers.as_slice() {
+        [] => None,
+        [one] => Some(format!("job {one} is waiting for you")),
+        [first @ .., last] => Some(format!(
+            "jobs {} and {last} are waiting for you",
+            first.join(", ")
+        )),
+    }
+}
+
+/// A line that sets apart what belongs to a turn in the background:
+/// `── background turn 2: compare the code ──`.
+pub fn rule(text: &str) -> String {
+    match is_ansi() {
+        true => format!("{BLUE}── {text} ──{RESET}"),
+        false => format!("── {text} ──"),
+    }
+}
+
+/// `1 tool call`, `3 tool calls`.
+pub fn tool_calls(count: usize) -> String {
+    match count {
+        1 => "1 tool call".to_string(),
+        count => format!("{count} tool calls"),
     }
 }
 
@@ -1024,6 +1077,16 @@ mod tests {
         assert_eq!(
             line(&filled(15_368, 258_400, None)),
             "✓ 3s · 15k of 258k (6%)"
+        );
+    }
+
+    #[test]
+    fn the_jobs_that_wait_are_named() {
+        assert_eq!(waiting(&[]), None);
+        assert_eq!(waiting(&[2]).as_deref(), Some("job 2 is waiting for you"));
+        assert_eq!(
+            waiting(&[1, 2, 4]).as_deref(),
+            Some("jobs 1, 2 and 4 are waiting for you")
         );
     }
 

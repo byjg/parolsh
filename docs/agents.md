@@ -592,6 +592,9 @@ not ask questions in ACP mode.
 `Ctrl+C` cancels the turn: the status line shows `Cancelling…`, the agent
 stops, Parolsh prints `(cancelled)` and returns to the prompt.
 
+`Ctrl+Z` gives you the prompt back and leaves the agent working on the turn:
+see [Turns in the background](#turns-in-the-background).
+
 An agent blocked in a request may not confirm the cancel. After 5 seconds, or
 at once on a second `Ctrl+C`, Parolsh stops waiting and prints
 `(cancelled — the agent did not confirm)`. The agent keeps running, and what
@@ -626,6 +629,108 @@ while you type:
 
 Background tasks belong to the agent's process: switching agents (`#agent`)
 and leaving Parolsh stop the agent, and the tasks it started with it.
+
+## Turns in the background
+
+A turn can take minutes. `Ctrl+Z` sends it to the background: you get the
+prompt back at once, for your commands and for other questions to the agent,
+and the turn's answer comes when it is done.
+
+```text
+[claude] ~/projects/wallet ✦ compare the code with version 0.6.0
+⠹ Reading src/client.rs · 12s                                    (Ctrl+Z)
+[1] in the background: compare the code with version 0.6.0
+[claude] ~/projects/wallet ✦ what does the retry test check?       1 job
+✦ It checks that a timeout is retried three times, with a longer wait
+  each time.
+
+✓ 4s · 31k of 1M (3%) · $0.21
+[1] done: compare the code with version 0.6.0
+✦ Since 0.6.0, the client retries on timeouts, …
+
+✓ 14 tool calls · 185s
+[claude] ~/projects/wallet ✦
+```
+
+An agent works on one message at a time in a conversation, so the two are
+two conversations:
+
+- **The turn keeps the conversation it was in**, and the agent process it
+  runs in.
+- **You go on in a copy of it**, in a second agent process: everything said
+  before that turn's message is in it, the message is not. It takes a second
+  or two to start.
+- **When the turn ends**, Parolsh shows its answer (what the agent wrote
+  after its last tool call) and gives it to the agent you are talking to,
+  with your request, along with your next message. Until then that agent
+  does not know the request exists, and it never sees the work behind the
+  answer: the files read, the commands run.
+- What happens after the copy is not shared the other way either: the turn
+  in the background knows nothing of what you ask meanwhile.
+
+Several turns can run at once, each sent with `Ctrl+Z`:
+
+| | |
+|---|---|
+| `#jobs` | Lists them: the request, what the agent is doing, its tool calls and for how long |
+| `#fg [n]` | Waits for turn `n`, or the last one, saying the same: `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
+| The prompt | Says how many run, on its right: `2 jobs` |
+
+```text
+[claude] ~/projects/wallet ✦ #jobs
+[1] compare the code with version 0.6.0 · Running: cargo test (42s) · 10 tool calls · 5:51
+```
+
+- **A turn that asks for permission**, or asks you questions, does it at the
+  prompt, between two lines that say whose question it is:
+
+  ```text
+  ── background turn 1: compare the code with version 0.6.0 ──
+  Permission requested: cargo test
+    [1] Yes
+    [2] No
+  Choose: 1
+  ── end of background turn 1's question ──
+  ```
+
+  It does not interrupt a turn you are in: that turn's status line says
+  `job 1 is waiting for you`, and the question comes when it ends. The turn
+  in the background waits meanwhile. `#fg` asks it at once.
+- **What a cancelled or failed turn wrote** is shown, not given to the
+  agent.
+- **Leaving stops them.** `#exit` and `Ctrl+D` say what is still running the
+  first time, and leave the second time. The same when the agent has
+  [background tasks](#background-tasks-and-the-terminal-title) running.
+- **A new conversation** (`#new`, `#cd`, `#agent`, `#resume`) leaves them
+  running. Their answer is then shown, not given to the new conversation.
+- In the [history](input-routing.md#a-turn-in-the-background), the turn is a
+  session of its own while it runs, and goes to the end of the session it
+  left when it ends.
+
+### How the conversation is copied
+
+It depends on what the agent offers:
+
+| The agent | You go on in | |
+|---|---|---|
+| Copies a conversation up to a message | A copy that ends before the turn's message | Claude, Codex |
+| Copies a whole conversation | A copy that has the message: Parolsh tells the agent, with your next message, that it is being worked on elsewhere | |
+| Does not copy | A new conversation, which Parolsh says: `The conversation here is a new one.` | Qwen Code |
+
+The first message of a conversation has nothing before it to copy: you go on
+in a new conversation. Kilo Code announces that it copies conversations; it
+was not tried.
+
+:::note Not part of ACP
+Copying a conversation (`session/fork`) is still marked unstable in ACP, and
+copying up to a message is not in it: the adapters of Claude and Codex take
+it in a field named after JetBrains' AIR, whoever sends it. No JetBrains
+software is involved. If an adapter drops it, Parolsh falls back to the next
+row of the table.
+:::
+
+Not sent to the background: a `!command` (see
+[`!command`](input-routing.md#command)), and a turn being cancelled.
 
 ## The context and what it costs
 

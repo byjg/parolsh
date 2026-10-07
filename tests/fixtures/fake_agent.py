@@ -47,6 +47,11 @@ The prompt is the text of the last block; earlier blocks are context.
          then the context's new size. Replies nothing.
   /compact codex  like Codex: the same tool call without the sizes, the
          context's new size (4536) coming before its end
+  nap N  starts a tool call "Nap", sleeps N seconds and replies "napped N"
+  nap N perm  the same, then asks for permission to edit a file and replies
+         "chose:<option id>" too
+  fork   replies what the session is a copy of, as JSON: the session and the
+         message it was copied up to; null for a session that is no copy
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
 With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
@@ -58,6 +63,10 @@ it replays "replayed old answer" before answering. With --no-resume, neither.
 With --sessions-from N, new sessions are numbered from N (s<N>, ...).
 With --forgets, a conversation to resume or load is not found, as when the
 agent removed it.
+With --fork, `session/fork` copies a conversation, of any process: the copy
+is f1, f2, ..., titled "Fake work (fork)" with its first prompt. With --fork-upto, also up to a message, the way the adapters
+of Claude and Codex take it (`_meta.jetbrains.air.fork`), which is announced.
+Each answer is a message with an id: m1, m2, ...
 
   mcp    replies the MCP servers the session got, as JSON: name and args
 
@@ -75,6 +84,10 @@ kilo = "--kilo" in sys.argv
 load_only = "--load-only" in sys.argv
 no_resume = "--no-resume" in sys.argv
 forgets = "--forgets" in sys.argv
+can_fork = "--fork" in sys.argv or "--fork-upto" in sys.argv
+# The copies made by session/fork: what each is a copy of.
+forks = {}
+message_number = 0
 first_session = (int(sys.argv[sys.argv.index("--sessions-from") + 1])
                  if "--sessions-from" in sys.argv else 1)
 sessions = {}  # session id -> {"cwd": ..., "mode": ...}
@@ -112,7 +125,7 @@ def config_options(session):
 
 def say(session_id, text):
     send({"method": "session/update", "params": {"sessionId": session_id, "update": {
-        "sessionUpdate": "agent_message_chunk",
+        "sessionUpdate": "agent_message_chunk", "messageId": f"m{message_number}",
         "content": {"type": "text", "text": text}}}})
 
 
@@ -139,12 +152,18 @@ def ask_permission(session_id, tool_call):
 
 
 def prompt(request):
+    global message_number
+    message_number += 1
     params = request["params"]
     session_id = params["sessionId"]
     text = params["prompt"][-1]["text"]
     session = sessions[session_id]
     stop_reason = "end_turn"
     result = {}
+    if session_id in forks:
+        # Like Claude: a copy is titled as its original, "(fork)".
+        send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+            "sessionUpdate": "session_info_update", "title": "Fake work (fork)"}}})
 
     def update(fields):
         send({"method": "session/update", "params": {"sessionId": session_id,
@@ -215,6 +234,19 @@ def prompt(request):
     elif text == "die":
         print("boom", file=sys.stderr, flush=True)
         sys.exit(1)
+    elif text.startswith("nap "):
+        words = text.split()
+        update({"sessionUpdate": "tool_call", "toolCallId": "n1", "title": "Nap"})
+        time.sleep(float(words[1]))
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "n1",
+                "status": "completed"})
+        say(session_id, f"napped {words[1]}")
+        if words[2:] == ["perm"]:
+            tool_call = {"toolCallId": "n2", "title": "Writing to notes.txt",
+                         "kind": "edit", "content": []}
+            say(session_id, " chose:" + ask_permission(session_id, tool_call))
+    elif text == "fork":
+        say(session_id, json.dumps(forks.get(session_id)))
     elif text == "usage":
         context(24300)
         say(session_id, "counted")
@@ -334,6 +366,8 @@ def capabilities():
         return {}
     if load_only:
         return {"loadSession": True}
+    if can_fork:
+        return {"sessionCapabilities": {"resume": {}, "fork": {}}}
     return {"sessionCapabilities": {"resume": {}}}
 
 
@@ -350,8 +384,17 @@ def main():
         method = message.get("method")
         if method == "initialize":
             client_capabilities.update(message["params"].get("clientCapabilities", {}))
-            send({"id": message["id"], "result": {
-                "protocolVersion": 1, "agentCapabilities": capabilities(), "authMethods": []}})
+            result = {"protocolVersion": 1, "agentCapabilities": capabilities(),
+                      "authMethods": []}
+            if "--fork-upto" in sys.argv:
+                result["_meta"] = {"jetbrains": {"air": {"version": 1}}}
+            send({"id": message["id"], "result": result})
+        elif method == "session/fork" and can_fork:
+            params = message["params"]
+            point = params.get("_meta", {}).get("jetbrains", {}).get("air", {}).get("fork", {})
+            copy = f"f{len(forks) + 1}"
+            forks[copy] = {"of": params["sessionId"], "upTo": point.get("messageId")}
+            send({"id": message["id"], "result": {"sessionId": copy}})
         elif method in ("session/new", "session/resume", "session/load"):
             params = message["params"]
             if forgets and method != "session/new":

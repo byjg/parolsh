@@ -29,9 +29,9 @@ const SEPARATORS: &str = "|;&()<>";
 const SPECIAL: &str = " '\"\\()&;|<>$`!*?[]{}#";
 
 /// The `#` commands, as `#help` lists them.
-pub const CONTROL_COMMANDS: [&str; 14] = [
+pub const CONTROL_COMMANDS: [&str; 16] = [
     "help", "new", "cd", "agent", "config", "options", "project", "prompt", "audit", "sessions",
-    "forget", "resume", "redraw", "exit",
+    "forget", "resume", "redraw", "jobs", "fg", "exit",
 ];
 
 pub struct ShellCompleter {
