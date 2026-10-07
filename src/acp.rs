@@ -1,16 +1,18 @@
 //! ACP client. The agent process and the protocol run on a background thread;
 //! the input loop talks to it through two channels: commands in, events out.
 
+use agent_client_protocol::schema::v1::Meta;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationMode, ErrorCode, InitializeRequest, LoadSessionRequest,
     McpServer, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    PlanEntryStatus, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TextContent, ToolCallContent, ToolCallStatus,
+    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
+    ToolCallStatus,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{
@@ -74,6 +76,12 @@ pub enum Event {
         form: Form,
         reply: oneshot::Sender<Option<Answers>>,
     },
+    /// The agent started compacting the conversation.
+    Compacting,
+    /// It ended, with the context's tokens before and after when known.
+    Compacted(Compacted),
+    /// The tokens of the prompt that is about to end.
+    Usage(TurnUsage),
     /// The prompt finished.
     TurnEnd(TurnId, StopReason),
     /// The agent answered the prompt with an error, and keeps running.
@@ -84,6 +92,77 @@ pub enum Event {
     Error(String),
     /// A `resume` ended: the conversation goes on, or why it could not.
     Resumed(Result<(), String>),
+}
+
+/// How full the agent's context is, and what the conversation cost so far.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Context {
+    /// Tokens in the context.
+    pub used: u64,
+    /// Tokens it can hold.
+    pub size: u64,
+    /// Only from the agents that report one (Claude): its own estimate.
+    pub cost: Option<Cost>,
+}
+
+impl Context {
+    /// How full it is, from 0 to 100, to the nearest.
+    pub fn percent(&self) -> u64 {
+        match self.size {
+            0 => 0,
+            size => ((self.used.saturating_mul(100) + size / 2) / size).min(100),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cost {
+    pub amount: f64,
+    pub currency: String,
+}
+
+/// A compaction that ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compacted {
+    pub before: Option<u64>,
+    pub after: Option<u64>,
+    pub took: Duration,
+}
+
+/// What a prompt used, as the agent reports it with its end.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnUsage {
+    pub input: u64,
+    pub output: u64,
+    /// Reasoning, for the agents that count it apart from the output.
+    pub thought: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// The models that answered, when the agent names them.
+    pub models: Vec<String>,
+    /// What the conversation cost since the prompt before.
+    pub cost: Option<Cost>,
+}
+
+/// A compaction going on: agents report it as a tool call.
+#[derive(Debug)]
+struct Compaction {
+    tool: String,
+    started: Instant,
+    before: Option<u64>,
+    after: Option<u64>,
+    took: Option<Duration>,
+    finished: bool,
+}
+
+impl Compaction {
+    fn ended(&self) -> Compacted {
+        Compacted {
+            before: self.before,
+            after: self.after,
+            took: self.took.unwrap_or_else(|| self.started.elapsed()),
+        }
+    }
 }
 
 /// The session modes the agent offers, as it reports them.
@@ -155,12 +234,17 @@ struct SessionState {
     /// A `session/load` is replaying the conversation: its messages are
     /// not shown again.
     loading: bool,
+    /// The context and cost, once the agent reported them.
+    context: Option<Context>,
+    /// The cost already counted in a prompt's usage.
+    cost_counted: f64,
+    compaction: Option<Compaction>,
 }
 
 type Shared = Arc<Mutex<SessionState>>;
 
 /// What the agent is doing, for the terminal's title and the prompt.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Activity {
     /// A prompt is in flight.
     pub busy: bool,
@@ -172,6 +256,8 @@ pub struct Activity {
     pub title: Option<String>,
     /// The agent's id for the conversation, once it opened.
     pub session_id: Option<String>,
+    /// How full its context is, once the agent reported it.
+    pub context: Option<Context>,
 }
 
 /// Reads what an agent is doing, from any thread, for as long as it runs.
@@ -198,6 +284,7 @@ impl ActivityWatch {
             oldest: state.tasks.values().min().copied(),
             title: state.title.clone(),
             session_id: state.session_id.clone(),
+            context: state.context.clone(),
         }
     }
 }
@@ -814,7 +901,16 @@ async fn serve(
                                 .await;
                         set_prompting(&shared, false);
                         let event = match result {
-                            Ok(stop_reason) => Event::TurnEnd(turn, stop_reason),
+                            Ok(response) => {
+                                // A compaction whose sizes never came.
+                                if let Some(compacted) = take_compaction(&shared, true) {
+                                    let _ = events.send(Event::Compacted(compacted));
+                                }
+                                if let Some(usage) = turn_usage(&shared, &response) {
+                                    let _ = events.send(Event::Usage(usage));
+                                }
+                                Event::TurnEnd(turn, response.stop_reason)
+                            }
                             // The agent's output closed: it stopped, the
                             // turn did not fail.
                             Err(e) if is_incoming_transport_closed(&e) => return Err(e),
@@ -924,7 +1020,7 @@ async fn prompt(
     commands: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending: &mut VecDeque<Command>,
     events: &mpsc::Sender<Event>,
-) -> Result<StopReason, agent_client_protocol::Error> {
+) -> Result<PromptResponse, agent_client_protocol::Error> {
     let blocks = blocks.iter().map(Block::to_acp).collect();
     let turn = cx
         .send_request(PromptRequest::new(session.clone(), blocks))
@@ -933,7 +1029,7 @@ async fn prompt(
 
     loop {
         tokio::select! {
-            response = &mut turn => return Ok(response?.stop_reason),
+            response = &mut turn => return response,
             Some(command) = commands.recv() => match command {
                 Command::Cancel => {
                     pending.retain(|command| match command {
@@ -1119,6 +1215,68 @@ async fn set_option(
     }
 }
 
+/// What an agent attaches to the tool call that compacts the conversation,
+/// and to its updates (Claude: `preTokens`, `postTokens`, `durationMs`).
+fn compaction_meta(meta: Option<&Meta>) -> Option<&serde_json::Value> {
+    meta?.get("contextCompaction")
+}
+
+/// The compaction that ended, once: when its tool call finished and the
+/// context's size after it is known, or at the `end` of the prompt.
+fn take_compaction(shared: &Shared, end: bool) -> Option<Compacted> {
+    let mut state = shared.lock().ok()?;
+    let compaction = state.compaction.as_ref()?;
+    let ready = compaction.finished && compaction.after.is_some();
+    (ready || end).then(|| state.compaction.take().map(|compaction| compaction.ended()))?
+}
+
+/// What the prompt used, from its response; `None` when the agent says
+/// nothing of it.
+fn turn_usage(shared: &Shared, response: &PromptResponse) -> Option<TurnUsage> {
+    let models = response
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("quota")?.get("model_usage")?.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| model.get("model")?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    // The agent's cost is a running total: this prompt's share is what it
+    // grew by. A total that went down started again, with a new process.
+    let cost = shared.lock().ok().and_then(|mut state| {
+        let total = state.context.as_ref()?.cost.clone()?;
+        let counted = std::mem::replace(&mut state.cost_counted, total.amount);
+        Some(Cost {
+            amount: if total.amount >= counted {
+                total.amount - counted
+            } else {
+                total.amount
+            },
+            currency: total.currency,
+        })
+    });
+    let usage = response.usage.as_ref();
+    if usage.is_none() && cost.is_none() {
+        return None;
+    }
+    Some(TurnUsage {
+        input: usage.map_or(0, |usage| usage.input_tokens),
+        output: usage.map_or(0, |usage| usage.output_tokens),
+        thought: usage.and_then(|usage| usage.thought_tokens).unwrap_or(0),
+        cache_read: usage
+            .and_then(|usage| usage.cached_read_tokens)
+            .unwrap_or(0),
+        cache_write: usage
+            .and_then(|usage| usage.cached_write_tokens)
+            .unwrap_or(0),
+        models,
+        cost,
+    })
+}
+
 fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate) {
     let event = match update {
         SessionUpdate::CurrentModeUpdate(update) => {
@@ -1144,6 +1302,75 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
                 }
             }
             return;
+        }
+        SessionUpdate::UsageUpdate(update) => {
+            let Ok(mut state) = shared.lock() else { return };
+            // An update without a cost keeps the last one.
+            let cost = update
+                .cost
+                .map(|cost| Cost {
+                    amount: cost.amount,
+                    currency: cost.currency,
+                })
+                .or_else(|| state.context.take().and_then(|context| context.cost));
+            state.context = Some(Context {
+                used: update.used,
+                size: update.size,
+                cost,
+            });
+            // What the context holds once compacted, for the agents that do
+            // not say it with the compaction.
+            if let Some(compaction) = state.compaction.as_mut()
+                && compaction.after.is_none()
+            {
+                compaction.after = Some(update.used);
+            }
+            drop(state);
+            match take_compaction(shared, false) {
+                Some(compacted) => Event::Compacted(compacted),
+                None => Event::Activity,
+            }
+        }
+        SessionUpdate::ToolCall(call) if compaction_meta(call.meta.as_ref()).is_some() => {
+            if let Ok(mut state) = shared.lock() {
+                state.compaction = Some(Compaction {
+                    tool: call.tool_call_id.to_string(),
+                    started: Instant::now(),
+                    before: state.context.as_ref().map(|context| context.used),
+                    after: None,
+                    took: None,
+                    finished: false,
+                });
+            }
+            Event::Compacting
+        }
+        SessionUpdate::ToolCallUpdate(update)
+            if shared.lock().is_ok_and(|state| {
+                state
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.tool == update.tool_call_id.to_string())
+            }) =>
+        {
+            if let Ok(mut state) = shared.lock()
+                && let Some(compaction) = state.compaction.as_mut()
+            {
+                let meta = compaction_meta(update.meta.as_ref());
+                let tokens = |key: &str| meta.and_then(|meta| meta.get(key)?.as_u64());
+                compaction.before = tokens("preTokens").or(compaction.before);
+                compaction.after = tokens("postTokens").or(compaction.after);
+                compaction.took = tokens("durationMs")
+                    .map(Duration::from_millis)
+                    .or(compaction.took);
+                compaction.finished |= matches!(
+                    update.fields.status,
+                    Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
+                );
+            }
+            match take_compaction(shared, false) {
+                Some(compacted) => Event::Compacted(compacted),
+                None => Event::Activity,
+            }
         }
         SessionUpdate::AgentMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
@@ -1566,6 +1793,101 @@ mod tests {
         assert!(has("stderr", "fake warning"), "{text}");
         let mode = std::fs::metadata(&log).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The events of a prompt until its end, without the agent's text.
+    fn events_of(agent: &AgentHandle, text: &str) -> Vec<Event> {
+        assert!(agent.prompt(text.to_string()).is_some());
+        let mut events = Vec::new();
+        loop {
+            match next(agent) {
+                Event::TurnEnd(..) => return events,
+                Event::Text(_) | Event::Activity => {}
+                event => events.push(event),
+            }
+        }
+    }
+
+    #[test]
+    fn the_context_and_what_a_turn_used_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &["--cost"], dir.path());
+        assert_eq!(agent.activity().get().context, None);
+
+        let usd = |amount| Cost {
+            amount,
+            currency: "USD".to_string(),
+        };
+        let used = |cost| TurnUsage {
+            input: 2,
+            output: 8,
+            thought: 5,
+            cache_read: 11913,
+            cache_write: 11970,
+            models: vec!["fake-1".to_string()],
+            cost: Some(cost),
+        };
+        match &events_of(&agent, "usage")[..] {
+            [Event::Usage(usage)] => assert_eq!(usage, &used(usd(0.35))),
+            events => panic!("{events:?}"),
+        }
+        let context = agent.activity().get().context.unwrap();
+        assert_eq!((context.used, context.size), (24300, 1_000_000));
+        assert_eq!(context.percent(), 2);
+        assert_eq!(context.cost, Some(usd(0.35)));
+
+        // The agent's cost is a running total: a turn's is what it grew by.
+        match &events_of(&agent, "usage")[..] {
+            [Event::Usage(usage)] => {
+                let cost = usage.cost.as_ref().unwrap();
+                assert!((cost.amount - 0.35).abs() < 1e-9, "{cost:?}");
+            }
+            events => panic!("{events:?}"),
+        }
+        assert_eq!(agent.activity().get().context.unwrap().cost, Some(usd(0.7)));
+    }
+
+    #[test]
+    fn an_agent_that_reports_no_usage_gives_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+
+        let events = events_of(&agent, "hello");
+        let usage = events.iter().any(|event| matches!(event, Event::Usage(_)));
+        assert!(!usage, "{events:?}");
+        assert_eq!(agent.activity().get().context, None);
+    }
+
+    #[test]
+    fn a_compaction_is_reported_once_with_its_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        events_of(&agent, "usage");
+
+        // Like Claude: the sizes and the time come with the tool call.
+        match &events_of(&agent, "/compact")[..] {
+            [Event::Compacting, Event::Compacted(compacted)] => assert_eq!(
+                compacted,
+                &Compacted {
+                    before: Some(24300),
+                    after: Some(5061),
+                    took: Duration::from_millis(6807),
+                }
+            ),
+            events => panic!("{events:?}"),
+        }
+        assert_eq!(agent.activity().get().context.unwrap().used, 5061);
+
+        // Like Codex: they are the context's size before and after.
+        match &events_of(&agent, "/compact codex")[..] {
+            [Event::Compacting, Event::Compacted(compacted)] => {
+                assert_eq!(
+                    (compacted.before, compacted.after),
+                    (Some(5061), Some(4536))
+                );
+            }
+            events => panic!("{events:?}"),
+        }
     }
 
     #[test]

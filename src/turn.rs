@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Block, Detail, Event, TurnId};
+use crate::acp::{AgentHandle, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage};
 use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
@@ -77,6 +77,7 @@ pub fn run(
     out.show();
     let mut cancelled: Option<Instant> = None;
     let activity = agent.activity();
+    let mut usage: Option<TurnUsage> = None;
 
     loop {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
@@ -153,6 +154,16 @@ pub fn run(
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
             Event::Activity | Event::Resumed(_) => {}
+            Event::Compacting => {
+                said.flush(audit);
+                out.pin("Compacting…");
+            }
+            Event::Compacted(compacted) => {
+                out.unpin("Thinking");
+                out.line(&ui::compacted(&compacted));
+                audit.add(compaction_record(&compacted));
+            }
+            Event::Usage(used) => usage = Some(used),
             request @ (Event::Permission { .. } | Event::Form { .. }) => {
                 said.flush(audit);
                 out.hide();
@@ -170,21 +181,26 @@ pub fn run(
             }
             Event::TurnEnd(_, reason) => {
                 said.flush(audit);
-                out.finish();
+                let context = activity.get().context;
+                out.finish(context.as_ref());
                 let how = describe(reason);
                 if let Some(message) = how {
                     eprintln!("({message})");
                 }
-                audit.add(parolsh_event(format!(
+                let ended = parolsh_event(format!(
                     "turn ended{} · {}s",
                     how.map(|how| format!(" ({how})")).unwrap_or_default(),
                     started.elapsed().as_secs()
-                )));
+                ));
+                audit.add(match usage_meta(usage.as_ref(), context.as_ref()) {
+                    Some(meta) => ended.meta(meta),
+                    None => ended,
+                });
                 return Outcome::Finished;
             }
             Event::TurnFailed(_, message) => {
                 said.flush(audit);
-                out.finish();
+                out.finish(None);
                 eprintln!("parolsh: {message}");
                 audit.add(parolsh_event(format!(
                     "turn failed: {}",
@@ -199,7 +215,7 @@ pub fn run(
 /// Ends the turn without the agent's confirmation; the agent keeps running.
 fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audit) -> Outcome {
     agent.abandon(turn);
-    out.finish();
+    out.finish(None);
     eprintln!("(cancelled — the agent did not confirm)");
     audit.add(parolsh_event("cancelled, the agent did not confirm"));
     Outcome::Finished
@@ -207,6 +223,48 @@ fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audi
 
 fn parolsh_event(text: impl Into<String>) -> Record {
     Record::new(Actor::Parolsh, Kind::Event, text)
+}
+
+/// A compaction, in the record: `#redraw` and a resumed session show where
+/// the agent's memory of the conversation became a summary.
+fn compaction_record(compacted: &Compacted) -> Record {
+    let sizes = match (compacted.before, compacted.after) {
+        (Some(before), Some(after)) => {
+            format!(": {} → {} tokens", ui::tokens(before), ui::tokens(after))
+        }
+        _ => String::new(),
+    };
+    parolsh_event(format!("conversation compacted{sizes}")).meta(json!({
+        "compaction": {"before": compacted.before, "after": compacted.after}
+    }))
+}
+
+/// What a turn used, kept with its end: the history's totals are the sum of
+/// these. `None` when the agent reported nothing.
+fn usage_meta(usage: Option<&TurnUsage>, context: Option<&Context>) -> Option<serde_json::Value> {
+    if usage.is_none() && context.is_none() {
+        return None;
+    }
+    let mut meta = serde_json::Map::new();
+    if let Some(usage) = usage {
+        meta.insert("input".into(), json!(usage.input));
+        meta.insert("output".into(), json!(usage.output));
+        meta.insert("thought".into(), json!(usage.thought));
+        meta.insert("cache_read".into(), json!(usage.cache_read));
+        meta.insert("cache_write".into(), json!(usage.cache_write));
+        if !usage.models.is_empty() {
+            meta.insert("models".into(), json!(usage.models));
+        }
+        if let Some(cost) = &usage.cost {
+            meta.insert("cost".into(), json!(cost.amount));
+            meta.insert("currency".into(), json!(cost.currency));
+        }
+    }
+    if let Some(context) = context {
+        meta.insert("context".into(), json!(context.used));
+        meta.insert("context_size".into(), json!(context.size));
+    }
+    Some(json!({ "usage": meta }))
 }
 
 /// Asks the user the agent's permission request or form, and sends the
@@ -485,9 +543,19 @@ pub fn watch(
                 interrupt.store(true, Ordering::SeqCst);
                 break;
             }
+            Event::Compacted(compacted) => {
+                said.flush(audit);
+                lines.line(ui::compacted(&compacted));
+                audit.add(compaction_record(&compacted));
+            }
             // The status line is the prompt's now: reasoning and plans are
             // not shown between turns.
-            Event::Thought(_) | Event::Plan { .. } | Event::Activity | Event::Resumed(_) => {}
+            Event::Thought(_)
+            | Event::Plan { .. }
+            | Event::Activity
+            | Event::Resumed(_)
+            | Event::Compacting
+            | Event::Usage(_) => {}
         }
     }
     said.flush(audit);
@@ -1073,8 +1141,9 @@ impl Output {
         }
     }
 
-    /// Ends the turn: removes the status line and prints the summary.
-    fn finish(&mut self) {
+    /// Ends the turn: removes the status line and prints the summary, with
+    /// how full the agent's context is.
+    fn finish(&mut self, context: Option<&Context>) {
         self.hide();
         self.end_line();
         if let Some(status) = &self.status {
@@ -1082,7 +1151,10 @@ impl Output {
             if self.answered {
                 println!();
             }
-            println!("{}", ui::summary(status.tools, status.started.elapsed()));
+            println!(
+                "{}",
+                ui::summary(status.tools, status.started.elapsed(), context)
+            );
         }
     }
 }

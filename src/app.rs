@@ -16,7 +16,7 @@ use crate::acp::{AgentHandle, Block};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
-use crate::history::{History, SessionStart};
+use crate::history::{History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::title::Title;
 use crate::{
@@ -486,6 +486,20 @@ impl App {
             println!("No sessions saved in this project yet.");
         }
         let current = history.current();
+        // What each used, when an agent reported it: `1.2M tok  $4.31`.
+        let used = |session: &Session| {
+            let usage = &session.usage;
+            let cost = match (usage.cost, &usage.currency) {
+                (Some(cost), Some(currency)) => ui::money(cost, currency),
+                _ => String::new(),
+            };
+            match usage.tokens() {
+                0 => String::new(),
+                tokens => format!("{:>4} tok  {cost:>7}", ui::tokens(tokens)),
+            }
+        };
+        let column = sessions.iter().map(|s| used(s).len()).max().unwrap_or(0);
+        let column = if column > 0 { column + 2 } else { 0 };
         for session in sessions {
             // Without a message, the session is named by its first command.
             let title = match (&session.title, &session.first_command) {
@@ -496,7 +510,7 @@ impl App {
                 (None, None) => None,
             };
             let line = format!(
-                "{} {:>4}  {}  {:<8} {:>4} entries  {}",
+                "{} {:>4}  {}  {:<8} {:>4} entries  {:<column$}{}",
                 if current == Some(session.id) {
                     "*"
                 } else {
@@ -506,6 +520,7 @@ impl App {
                 session.started,
                 session.agent.as_deref().unwrap_or("-"),
                 session.entries,
+                used(&session),
                 title.unwrap_or_default(),
             );
             println!("{}", audit::excerpt(&line, ui::width()));

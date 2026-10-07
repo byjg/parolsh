@@ -35,6 +35,18 @@ The prompt is the text of the last block; earlier blocks are context.
          background task (only for clients that ask for them, with JetBrains'
          AIR extension), replies "started" and ends the turn. The task ends
          3 seconds later.
+  usage  like Claude and Codex: reports the context (24300 of 1000000
+         tokens), replies "counted" and ends with the turn's tokens (2 in,
+         8 out, 5 of reasoning, 11913 read from the cache, 11970 written to
+         it) and its
+         model, "fake-1". With --cost, also the session's cost so far, which
+         grows by 0.35 USD with each of these.
+  full N reports a context N% full and replies "full"
+  /compact  compacts like Claude: a tool call "Compact conversation" that
+         ends with the sizes (the context before, then 5061) and 6807 ms,
+         then the context's new size. Replies nothing.
+  /compact codex  like Codex: the same tool call without the sizes, the
+         context's new size (4536) coming before its end
   other  replies "[<session>|<mode>|<cwd>] <text>"
 
 With --no-auto the sessions do not offer the `auto` mode. With --kilo, like
@@ -132,6 +144,15 @@ def prompt(request):
     text = params["prompt"][-1]["text"]
     session = sessions[session_id]
     stop_reason = "end_turn"
+    result = {}
+
+    def update(fields):
+        send({"method": "session/update", "params": {"sessionId": session_id,
+                                                      "update": fields}})
+
+    def context(used, size=1000000, **more):
+        session["used"] = used
+        update({"sessionUpdate": "usage_update", "used": used, "size": size, **more})
 
     if text == "perm":
         tool_call = {"toolCallId": "t1", "title": "Writing to notes.txt", "kind": "edit",
@@ -194,10 +215,41 @@ def prompt(request):
     elif text == "die":
         print("boom", file=sys.stderr, flush=True)
         sys.exit(1)
+    elif text == "usage":
+        context(24300)
+        say(session_id, "counted")
+        if "--cost" in sys.argv:
+            session["cost"] = session.get("cost", 0) + 0.35
+            context(24300, cost={"amount": session["cost"], "currency": "USD"})
+        tokens = {"inputTokens": 2, "outputTokens": 8, "thoughtTokens": 5,
+                  "cachedReadTokens": 11913, "cachedWriteTokens": 11970,
+                  "totalTokens": 23898}
+        result = {"usage": tokens,
+                  "_meta": {"quota": {"model_usage": [{"model": "fake-1"}]}}}
+    elif text.startswith("full "):
+        context(int(text.split()[1]), 100)
+        say(session_id, "full")
+    elif text in ("/compact", "/compact codex"):
+        compaction = {"contextCompaction": {"version": 1}}
+        update({"sessionUpdate": "tool_call", "toolCallId": "c1", "kind": "think",
+                "title": "Compact conversation", "status": "in_progress",
+                "_meta": compaction})
+        before = session.get("used", 0)
+        if text == "/compact":
+            update({"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                    "status": "completed", "_meta": compaction})
+            sizes = {"trigger": "manual", "preTokens": before, "postTokens": 5061,
+                     "durationMs": 6807}
+            update({"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                    "rawOutput": sizes,
+                    "_meta": {"contextCompaction": {"version": 1, **sizes}}})
+            context(5061)
+        else:
+            context(4536)
+            update({"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                    "title": "Compact conversation", "status": "completed",
+                    "_meta": compaction})
     elif text == "tools":
-        def update(fields):
-            send({"method": "session/update", "params": {"sessionId": session_id,
-                                                          "update": fields}})
         update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a",
                 "kind": "read", "locations": [{"path": "/tmp/a"}]})
         update({"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read b"})
@@ -274,7 +326,7 @@ def prompt(request):
         say(session_id, f"[{session_id}|{session['mode']}|{session['cwd']}] ")
         say(session_id, text)
 
-    send({"id": request["id"], "result": {"stopReason": stop_reason}})
+    send({"id": request["id"], "result": {"stopReason": stop_reason, **result}})
 
 
 def capabilities():

@@ -1248,3 +1248,98 @@ fn a_conversation_the_agent_forgot_is_said_plainly() {
     assert!(!screen.contains("Resource not found"), "{screen}");
     assert!(!screen.contains("\"uri\""), "{screen}");
 }
+
+/// The line that ends a turn says how full the agent's context is and what
+/// the conversation cost so far, and `#sessions` what each session used: the
+/// sum of its turns, kept in the history.
+#[test]
+fn usage_is_shown_with_each_turn_and_added_up_per_session() {
+    let home = fake_agent_home_with(&["--cost"]);
+    let lines = ["usage", "usage", "#sessions"];
+    let screen = run_in(home.path(), "", &lines, "xterm-256color", false);
+
+    // The agent's cost is a running total.
+    let first = screen.find("s · 24k of 1M (2%) · $0.35").expect(&screen);
+    let second = screen.find("s · 24k of 1M (2%) · $0.70").expect(&screen);
+    assert!(first < second, "{screen}");
+    // Two turns of 2 + 8 + 5 + 11913 + 11970 tokens.
+    let listed = |screen: &str| {
+        let line = screen
+            .lines()
+            .find(|line| line.contains(" entries "))
+            .expect(screen);
+        assert!(line.contains(" 48k tok    $0.70  usage"), "{line}");
+    };
+    listed(&screen);
+    listed(&run_in(home.path(), "", &["#sessions"], "dumb", false));
+}
+
+/// An agent that reports no usage leaves the summary and `#sessions` as they
+/// were, and one that gives no cost has tokens only.
+#[test]
+fn usage_is_left_out_when_the_agent_does_not_report_it() {
+    let home = fake_agent_home_with(&[]);
+    let screen = run_in(
+        home.path(),
+        "",
+        &["hello", "#sessions"],
+        "xterm-256color",
+        false,
+    );
+    assert!(screen.contains("✓ 1 tool call · 0s\n"), "{screen}");
+    assert!(!screen.contains(" tok "), "{screen}");
+
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#new", "usage", "#sessions"],
+        "xterm-256color",
+        false,
+    );
+    assert!(screen.contains("s · 24k of 1M (2%)\n"), "{screen}");
+    let line = screen
+        .lines()
+        .find(|line| line.contains(" tok "))
+        .expect(&screen);
+    assert!(line.contains(" 24k tok ") && !line.contains('$'), "{line}");
+}
+
+/// A compaction is said in one line, with the context's size before and
+/// after, in place of the agent's tool call; and it is in the record, so
+/// that a later look at the session shows where it happened.
+#[test]
+fn a_compaction_is_said_and_kept_in_the_record() {
+    let home = fake_agent_home_with(&[]);
+    let lines = ["usage", "/compact", "/compact codex"];
+    let screen = run_in(home.path(), "", &lines, "xterm-256color", false);
+
+    // Claude gives the sizes and the time; for Codex they are the context's.
+    assert!(
+        screen.contains("Compacted: 24k → 5k tokens (6.8s)\n"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Compacted: 5k → 5k tokens (0.0s)\n"),
+        "{screen}"
+    );
+    assert!(!screen.contains("Compact conversation"), "{screen}");
+    // The context after it, on the turn's summary.
+    assert!(screen.contains("s · 5k of 1M (1%)\n"), "{screen}");
+
+    let audit = run_in(home.path(), "", &["#audit 1"], "dumb", false);
+    assert!(
+        audit.contains("conversation compacted: 24k → 5k tokens"),
+        "{audit}"
+    );
+}
+
+/// The prompt says how full the context is only when it fills up: on its
+/// right, from 75%.
+#[test]
+fn the_prompt_warns_when_the_context_fills_up() {
+    let output = raw_output(&["full 50", "full 82", "full 95"]);
+
+    assert!(!output.contains("ctx 50%"), "{output:?}");
+    assert!(output.contains("\x1b[33mctx 82%"), "{output:?}");
+    assert!(output.contains("\x1b[31mctx 95%"), "{output:?}");
+}
