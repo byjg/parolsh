@@ -37,8 +37,6 @@ pub const CONTROL_COMMANDS: [&str; 16] = [
 pub struct ShellCompleter {
     /// Where shell commands run.
     pub cwd: Arc<Mutex<PathBuf>>,
-    /// The agent's directory, for `@path` in text for the agent.
-    pub agent_cwd: Arc<Mutex<PathBuf>>,
     /// Bash's aliases, functions and builtins, read in the background when
     /// Parolsh starts; not set until then.
     pub names: Arc<OnceLock<Vec<String>>>,
@@ -50,11 +48,10 @@ pub struct ShellCompleter {
 impl Completer for ShellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let cwd = self.cwd.lock().expect("cwd lock").clone();
-        let agent_cwd = self.agent_cwd.lock().expect("cwd lock").clone();
         let names = self.names.get().map(Vec::as_slice).unwrap_or_default();
         let search_path = std::env::var("PATH").ok();
         let mode = self.mode.get();
-        let found = completions(line, pos, mode, &cwd, &agent_cwd, || {
+        let found = completions(line, pos, mode, &cwd, || {
             suggestions(
                 line,
                 pos,
@@ -77,14 +74,13 @@ fn completions(
     pos: usize,
     mode: Mode,
     cwd: &Path,
-    agent_cwd: &Path,
     shell: impl FnOnce() -> Vec<Suggestion>,
 ) -> Vec<Suggestion> {
     if let Some(found) = control(line, pos, cwd) {
         return found;
     }
     if let Input::Agent(_) = route(line, mode) {
-        return mention(line, pos, agent_cwd);
+        return mention(line, pos, cwd);
     }
     shell()
 }
@@ -154,14 +150,16 @@ fn control(line: &str, pos: usize, cwd: &Path) -> Option<Vec<Suggestion>> {
     Some(found)
 }
 
-/// The files and directories an `@path` word at `pos` may name, from the
-/// agent's directory. Other words of the agent's text complete nothing.
-fn mention(line: &str, pos: usize, agent_cwd: &Path) -> Vec<Suggestion> {
+/// The files and directories an `@path` word at `pos` may name, from where
+/// your commands run: the directory the prompt shows, which a `cd` may have
+/// taken away from the agent's. Other words of the agent's text complete
+/// nothing.
+fn mention(line: &str, pos: usize, cwd: &Path) -> Vec<Suggestion> {
     let start = word_start(&line[..pos]);
     let Some(path) = line[start..pos].strip_prefix('@') else {
         return Vec::new();
     };
-    let mut found = files(&unescape(path), agent_cwd, false);
+    let mut found = files(&unescape(path), cwd, false);
     for suggestion in &mut found {
         suggestion.value.insert(0, '@');
         suggestion.span = Span::new(start, pos);
@@ -359,7 +357,7 @@ fn suggestion(value: String, append_whitespace: bool) -> Suggestion {
     }
 }
 
-fn escape(name: &str) -> String {
+pub fn escape(name: &str) -> String {
     let mut escaped = String::with_capacity(name.len());
     for c in name.chars() {
         if SPECIAL.contains(c) {
@@ -415,7 +413,7 @@ mod tests {
     ) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
         let shell = || suggestions(line, line.len(), mode, cwd, search_path, &names, None);
-        completions(line, line.len(), mode, cwd, cwd, shell)
+        completions(line, line.len(), mode, cwd, shell)
             .into_iter()
             .map(|s| {
                 let space = if s.append_whitespace { " " } else { "" };
@@ -528,27 +526,19 @@ mod tests {
     }
 
     #[test]
-    fn at_in_text_for_the_agent_completes_paths_from_its_directory() {
-        let dir = fixture();
-        let agent_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(agent_dir.path().join("src")).unwrap();
-        std::fs::write(agent_dir.path().join("src/app.rs"), "").unwrap();
-        std::fs::write(agent_dir.path().join("My Notes.md"), "").unwrap();
+    fn at_in_text_for_the_agent_completes_paths_from_where_commands_run() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/app.rs"), "").unwrap();
+        std::fs::write(dir.path().join("My Notes.md"), "").unwrap();
         let complete = |mode, line: &str| -> Vec<String> {
-            completions(
-                line,
-                line.len(),
-                mode,
-                dir.path(),
-                agent_dir.path(),
-                Vec::new,
-            )
-            .into_iter()
-            .map(|s| {
-                let space = if s.append_whitespace { " " } else { "" };
-                format!("{}{}{space}", &line[..s.span.start], s.value)
-            })
-            .collect()
+            completions(line, line.len(), mode, dir.path(), Vec::new)
+                .into_iter()
+                .map(|s| {
+                    let space = if s.append_whitespace { " " } else { "" };
+                    format!("{}{}{space}", &line[..s.span.start], s.value)
+                })
+                .collect()
         };
 
         assert_eq!(complete(Mode::Agent, "hi @s"), ["hi @src/"]);

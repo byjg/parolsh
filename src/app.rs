@@ -71,8 +71,6 @@ pub struct App {
     shell_changes: shell::Changes,
     /// `shell_cwd`, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
-    /// `cwd`, shared with the Tab completion of `@path`.
-    agent_cwd: Arc<Mutex<PathBuf>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
     project_root: Option<PathBuf>,
@@ -175,7 +173,6 @@ impl App {
         }
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
-            agent_cwd: Arc::new(Mutex::new(cwd.clone())),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
             shell_changes: shell::Changes::default(),
@@ -888,7 +885,6 @@ impl App {
         }
         let completer = ShellCompleter {
             cwd: self.completion_cwd.clone(),
-            agent_cwd: self.agent_cwd.clone(),
             names,
             mode: self.mode.clone(),
             bash: is_bash.then_some(shell),
@@ -944,7 +940,6 @@ impl App {
         self.config = config;
         self.audit.set_limit(self.config.audit_entries);
         self.cwd = target.clone();
-        *self.agent_cwd.lock().expect("cwd lock") = target.clone();
         self.move_shell(Some(target));
         self.project_root = project_root;
 
@@ -1040,7 +1035,15 @@ impl App {
                 })),
             );
         }
-        let files = mention::mentioned(&text, &self.cwd, home().as_deref());
+        // `@path` starts where your commands run, the directory the prompt
+        // shows. The agent reads the word too, from its own directory: when
+        // a `cd` took the two apart, it gets the path in full.
+        let home = home();
+        let files = mention::mentioned(&text, &self.shell_cwd, home.as_deref());
+        let sent = match self.shell_cwd == self.cwd {
+            true => text.clone(),
+            false => mention::in_full(&text, &self.shell_cwd, home.as_deref()),
+        };
         let message = self.audit.add(
             Record::new(Actor::User, Kind::Message, text.clone())
                 .meta(json!({"agent": name, "files": files.len()})),
@@ -1050,7 +1053,7 @@ impl App {
         let mut blocks: Vec<Block> = told.iter().cloned().map(Block::Text).collect();
         blocks.extend(shared.into_iter().map(Block::Text));
         blocks.extend(files.into_iter().map(Block::File));
-        blocks.push(Block::Text(text.clone()));
+        blocks.push(Block::Text(sent));
         let display = self.display();
         match turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs) {
             turn::Outcome::Background(turn) => {

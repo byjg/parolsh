@@ -1584,3 +1584,37 @@ fn a_background_question_waits_for_the_turn_in_the_foreground() {
     assert!(waiting < answered && answered < asked, "{screen}");
     assert!(screen[asked..].contains("napped 5 chose:"), "{screen}");
 }
+
+/// `@path` starts where your commands run, the directory the prompt shows,
+/// not at the agent's: after a `cd` took them apart, the file linked is the
+/// one there, and the agent gets its path in full in the text too.
+#[test]
+fn a_mention_starts_where_the_commands_run() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/inner.txt"), "").unwrap();
+    std::fs::write(root.join("top.txt"), "").unwrap();
+    let cd = format!("#cd {}", root.display());
+    let home = fake_agent_home_with(&[]);
+
+    // Together: the text goes as typed.
+    let lines = [cd.as_str(), "see @top.txt", "blocks @top.txt"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(screen.contains("] see @top.txt\n"), "{screen}");
+    let link = format!(r#"["top.txt file://{}/top.txt"]"#, root.display());
+    assert!(screen.contains(&link), "{screen}");
+
+    // Apart: `inner.txt` is in the commands' directory only.
+    let lines = [
+        cd.as_str(),
+        "!cd sub",
+        "?see @inner.txt",
+        "?blocks @inner.txt",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    let sent = format!("] see @{}/sub/inner.txt\n", root.display());
+    assert!(screen.contains(&sent), "{screen}");
+    let link = format!(r#"["inner.txt file://{}/sub/inner.txt"]"#, root.display());
+    assert!(screen.contains(&link), "{screen}");
+}

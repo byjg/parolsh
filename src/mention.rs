@@ -1,10 +1,11 @@
 //! `@path` in a message to the agent: the files and directories it names go
-//! with the message as ACP resource links, resolved from the agent's
-//! directory, so the agent cannot read them from the wrong place.
+//! with the message as ACP resource links, resolved from where your commands
+//! run, the directory the prompt shows. The link is the absolute path, so
+//! the agent cannot read them from the wrong place.
 
 use std::path::{Path, PathBuf};
 
-use crate::complete::unescape;
+use crate::complete::{escape, unescape};
 
 /// Characters that may end a sentence after a mention: `see @notes.txt.`
 const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '"', '\''];
@@ -31,8 +32,48 @@ pub fn mentioned(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     found
 }
 
+/// `text` with each relative `@path` that names something written in full
+/// (`@/home/you/project/src/app.rs`), for an agent whose directory is not
+/// `cwd`: it reads the word itself, from its own directory. `~/` and absolute
+/// paths, and words that name nothing, stay as typed.
+pub fn in_full(text: &str, cwd: &Path, home: Option<&Path>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut end = 0;
+    for span in spans(text) {
+        let word = &text[span.clone()];
+        let Some(typed) = word.strip_prefix('@') else {
+            continue;
+        };
+        let path = unescape(typed);
+        if path.is_empty() || path.starts_with(['/', '~']) {
+            continue;
+        }
+        // The punctuation after a path (`@notes.txt.`) stays after it.
+        let trimmed = path.trim_end_matches(TRAILING);
+        let (resolved, after) = match resolve(&path, cwd, home) {
+            Some(resolved) => (resolved, ""),
+            None => match resolve(trimmed, cwd, home) {
+                Some(resolved) => (resolved, &path[trimmed.len()..]),
+                None => continue,
+            },
+        };
+        out.push_str(&text[end..span.start]);
+        out.push('@');
+        out.push_str(&escape(&resolved.display().to_string()));
+        out.push_str(after);
+        end = span.end;
+    }
+    out.push_str(&text[end..]);
+    out
+}
+
 /// The words of `text`, split on whitespace a backslash does not escape.
 fn words(text: &str) -> Vec<&str> {
+    spans(text).into_iter().map(|span| &text[span]).collect()
+}
+
+/// Where each word of `text` is.
+fn spans(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut words = Vec::new();
     let mut start = None;
     let mut escaped = false;
@@ -44,14 +85,14 @@ fn words(text: &str) -> Vec<&str> {
             start.get_or_insert(i);
         } else if c.is_whitespace() {
             if let Some(start) = start.take() {
-                words.push(&text[start..i]);
+                words.push(start..i);
             }
         } else {
             start.get_or_insert(i);
         }
     }
     if let Some(start) = start {
-        words.push(&text[start..]);
+        words.push(start..text.len());
     }
     words
 }
@@ -104,6 +145,27 @@ mod tests {
             .iter()
             .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
             .collect()
+    }
+
+    #[test]
+    fn relative_mentions_are_written_in_full_for_an_agent_elsewhere() {
+        let dir = fixture();
+        let root = dir.path().canonicalize().unwrap();
+        let root = root.display();
+        let home = Some(dir.path());
+
+        assert_eq!(
+            in_full("compare @src/app.rs with @notes.txt.", dir.path(), home),
+            format!("compare @{root}/src/app.rs with @{root}/notes.txt.")
+        );
+        // A space stays escaped, as Tab writes it.
+        assert_eq!(
+            in_full(r"read @My\ Files.md now", dir.path(), home),
+            format!(r"read @{root}/My\ Files.md now")
+        );
+        // What is not a relative path that exists is as typed.
+        let typed = "ask @team about @~/notes.txt and @/etc/hostname, not @missing.rs";
+        assert_eq!(in_full(typed, dir.path(), home), typed);
     }
 
     #[test]
