@@ -1062,12 +1062,8 @@ fn ask_form(form: &Form) -> Option<Answers> {
             if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
                 return None;
             }
-            match form::parse(&field.kind, &input) {
-                Ok(Some(answer)) => {
-                    answers.insert(field.key.clone(), answer);
-                    break;
-                }
-                Ok(None) => break,
+            match form::answer(field, &input, &mut answers) {
+                Ok(()) => break,
                 Err(message) => println!("  ({message})"),
             }
         }
@@ -1084,6 +1080,11 @@ fn hint(kind: &FieldKind) -> &'static str {
         FieldKind::Text => "Answer",
         FieldKind::Number { .. } => "Number",
         FieldKind::Boolean => "y/n",
+        FieldKind::Choice {
+            multiple: true,
+            other: true,
+            ..
+        } => "Choose numbers, separated by commas, or type your own answer",
         FieldKind::Choice { multiple: true, .. } => "Choose numbers, separated by commas",
         FieldKind::Choice { other: true, .. } => "Choose a number, or type your own answer",
         FieldKind::Choice { .. } => "Choose a number",

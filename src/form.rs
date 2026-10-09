@@ -26,6 +26,9 @@ pub struct Field {
     pub description: Option<String>,
     pub kind: FieldKind,
     pub required: bool,
+    /// Where an answer typed instead of chosen goes, when the agent has
+    /// another field for it than `key`: Claude's and Codex's "Other".
+    pub own: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,13 +71,31 @@ impl Form {
     /// The form of a standard `elicitation/create` request.
     pub fn from_elicitation(message: String, schema: &ElicitationSchema) -> Self {
         let required = schema.required.clone().unwrap_or_default();
-        let fields = schema
+        let mut fields: Vec<Field> = schema
             .properties
             .iter()
             .filter_map(|(key, property)| {
                 field_from_property(key, property, required.contains(key))
             })
             .collect();
+        // A question's free-text companion is not a question of its own: it
+        // is where a typed answer to that question goes.
+        for (own, property) in &schema.properties {
+            let Some(question) = own_answer_of(property) else {
+                continue;
+            };
+            let asked = fields.iter_mut().find(|field| field.key == question);
+            if let Some(Field {
+                kind: FieldKind::Choice { other, .. },
+                own: typed,
+                ..
+            }) = asked
+            {
+                *other = true;
+                *typed = Some(own.clone());
+                fields.retain(|field| &field.key != own);
+            }
+        }
         Self { message, fields }
     }
 
@@ -124,6 +145,7 @@ impl Form {
                         other: true,
                     },
                     required: false,
+                    own: None,
                 }
             })
             .collect();
@@ -141,6 +163,18 @@ impl Form {
     }
 }
 
+/// The question a text field is the free-text answer of, for the agents
+/// that send one after each question (`_meta._askUserQuestionCustomAnswer`,
+/// a marker the adapters of Claude and Codex share).
+fn own_answer_of(property: &ElicitationPropertySchema) -> Option<String> {
+    let ElicitationPropertySchema::String(string) = property else {
+        return None;
+    };
+    let marker = string.meta.as_ref()?.get("_askUserQuestionCustomAnswer")?;
+    marker.get("isCustomAnswer")?.as_bool()?.then_some(())?;
+    Some(marker.get("questionId")?.as_str()?.to_string())
+}
+
 fn field_from_property(
     key: &str,
     property: &ElicitationPropertySchema,
@@ -152,6 +186,7 @@ fn field_from_property(
         description: description.clone(),
         kind,
         required,
+        own: None,
     };
     Some(match property {
         ElicitationPropertySchema::String(string) => {
@@ -222,6 +257,64 @@ fn plain_choice(value: &str) -> Choice {
         label: value.to_string(),
         description: None,
     }
+}
+
+/// Reads what was typed for `field` into `answers`. Empty input skips it.
+///
+/// A question with a field of its own for a typed answer takes numbers, a
+/// typed answer, or both: the numbers first, then the text after a comma
+/// (`1, but keep the old tests`), which goes to that field.
+pub fn answer(field: &Field, input: &str, answers: &mut Answers) -> Result<(), String> {
+    let (
+        FieldKind::Choice {
+            options, multiple, ..
+        },
+        Some(own),
+    ) = (&field.kind, &field.own)
+    else {
+        if let Some(answer) = parse(&field.kind, input)? {
+            answers.insert(field.key.clone(), answer);
+        }
+        return Ok(());
+    };
+    let pick = |part: &str| {
+        let chosen = part.trim().parse::<usize>().ok()?.checked_sub(1)?;
+        options.get(chosen).map(|option| option.value.clone())
+    };
+    // The numbers that start the line, then the rest as typed.
+    let mut picked = Vec::new();
+    let mut rest = input.trim();
+    while !rest.is_empty() {
+        let (part, after) = rest.split_once(',').unwrap_or((rest, ""));
+        let Some(value) = pick(part) else { break };
+        picked.push(value);
+        rest = after.trim_start();
+    }
+    // A number alone that is no option is a slip, not an answer.
+    if rest
+        .split(',')
+        .next()
+        .is_some_and(|part| part.trim().parse::<usize>().is_ok())
+    {
+        return Err(format!(
+            "type a number from 1 to {}, or your own answer",
+            options.len()
+        ));
+    }
+    match (picked.len(), multiple) {
+        (0, _) => {}
+        (_, true) => {
+            answers.insert(field.key.clone(), Answer::Many(picked));
+        }
+        (1, false) => {
+            answers.insert(field.key.clone(), Answer::Text(picked.remove(0)));
+        }
+        (_, false) => return Err("choose one number".to_string()),
+    }
+    if !rest.is_empty() {
+        answers.insert(own.clone(), Answer::Text(rest.to_string()));
+    }
+    Ok(())
 }
 
 /// Reads one typed answer. Empty input skips the field (`Ok(None)`).
@@ -441,6 +534,7 @@ mod tests {
                     other: true,
                 },
                 required: false,
+                own: None,
             }]
         );
     }
@@ -519,6 +613,109 @@ mod tests {
         );
     }
 
+    /// The form Claude and Codex send for their questions: each one followed
+    /// by a text field marked as its free-text answer.
+    fn questions_with_their_own_answers() -> Form {
+        let own = |question: &str| {
+            json!({
+                "type": "string", "title": "Other",
+                "description": "Type your own answer (optional).",
+                "_meta": {"_askUserQuestionCustomAnswer": {
+                    "questionId": question, "isCustomAnswer": true}}
+            })
+        };
+        let schema: ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "question_0": {
+                    "type": "string", "title": "Italian fix",
+                    "oneOf": [{"const": "Proper", "title": "Proper"},
+                              {"const": "Minimal", "title": "Minimal"}]
+                },
+                "question_0_custom": own("question_0"),
+                "question_1": {
+                    "type": "array", "title": "Languages",
+                    "items": {"anyOf": [{"const": "EN", "title": "EN"},
+                                        {"const": "PT", "title": "PT"}]}
+                },
+                "question_1_custom": own("question_1"),
+                "note": {"type": "string", "title": "Note"}
+            }
+        }))
+        .unwrap();
+        Form::from_elicitation("Please answer.".to_string(), &schema)
+    }
+
+    #[test]
+    fn a_free_text_companion_is_part_of_its_question() {
+        let form = questions_with_their_own_answers();
+
+        // No question of its own for "Other".
+        let asked: Vec<(&str, Option<&str>)> = form
+            .fields
+            .iter()
+            .map(|field| (field.key.as_str(), field.own.as_deref()))
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                ("note", None),
+                ("question_0", Some("question_0_custom")),
+                ("question_1", Some("question_1_custom")),
+            ]
+        );
+        for field in &form.fields[1..] {
+            assert!(matches!(field.kind, FieldKind::Choice { other: true, .. }));
+        }
+    }
+
+    #[test]
+    fn a_number_chooses_and_text_goes_to_the_questions_own_field() {
+        let form = questions_with_their_own_answers();
+        let (one, many) = (&form.fields[1], &form.fields[2]);
+        let answered = |field: &Field, input: &str| {
+            let mut answers = Answers::new();
+            answer(field, input, &mut answers).map(|()| answers)
+        };
+        let text = |text: &str| Answer::Text(text.to_string());
+        let key = |key: &str| key.to_string();
+
+        // The number is the choice, and nothing is typed for "Other".
+        assert_eq!(
+            answered(one, "1"),
+            Ok(Answers::from([(key("question_0"), text("Proper"))]))
+        );
+        assert_eq!(
+            answered(one, "do both, Italian first"),
+            Ok(Answers::from([(
+                key("question_0_custom"),
+                text("do both, Italian first")
+            )]))
+        );
+        // Both: the choice, then a note after a comma.
+        assert_eq!(
+            answered(one, "2, keep the tests, please"),
+            Ok(Answers::from([
+                (key("question_0"), text("Minimal")),
+                (key("question_0_custom"), text("keep the tests, please")),
+            ]))
+        );
+        assert_eq!(answered(one, "1, 2"), Err("choose one number".to_string()));
+        assert_eq!(answered(one, "  "), Ok(Answers::new()));
+        // A number that is no option is a slip, not an answer of your own.
+        let slip = Err("type a number from 1 to 2, or your own answer".to_string());
+        assert_eq!(answered(one, "9"), slip);
+        assert_eq!(answered(many, "1, 7"), slip);
+
+        assert_eq!(
+            answered(many, "1, 2, and Spanish"),
+            Ok(Answers::from([
+                (key("question_1"), Answer::Many(vec![key("EN"), key("PT")])),
+                (key("question_1_custom"), text("and Spanish")),
+            ]))
+        );
+    }
+
     #[test]
     fn a_skipped_required_field_is_missing() {
         let form = Form {
@@ -529,6 +726,7 @@ mod tests {
                 description: None,
                 kind: FieldKind::Text,
                 required: true,
+                own: None,
             }],
         };
 

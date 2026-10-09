@@ -8,6 +8,9 @@ Prompts:
   think  sends reasoning, then the answer "done"
   caps   replies the client's elicitation capability, as JSON
   form   sends an elicitation/create form and replies the result, as JSON
+  questions  like Claude and Codex ask: a form with two questions to choose
+         from, each followed by its free-text "Other" field, marked as such.
+         Replies the result, as JSON
   qwen   asks a question the way Qwen Code does and replies the raw result
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
@@ -192,6 +195,26 @@ def prompt(request):
                 "color": {"type": "string", "title": "Color",
                           "oneOf": [{"const": "red", "title": "Red"},
                                     {"const": "blue", "title": "Blue"}]}}}})
+        say(session_id, json.dumps(result, sort_keys=True))
+    elif text == "questions":
+        def own(question):
+            return {"type": "string", "title": "Other",
+                    "description": "Type your own answer (optional).",
+                    "_meta": {"_askUserQuestionCustomAnswer": {
+                        "questionId": question, "isCustomAnswer": True}}}
+        result = ask_client("elicitation/create", {
+            "sessionId": session_id, "mode": "form",
+            "message": "Please answer the following questions.",
+            "requestedSchema": {"type": "object", "properties": {
+                "question_0": {"type": "string", "title": "Italian fix",
+                               "description": "How far should the fix go?",
+                               "oneOf": [{"const": "Proper", "title": "Proper"},
+                                         {"const": "Minimal", "title": "Minimal"}]},
+                "question_0_custom": own("question_0"),
+                "question_1": {"type": "string", "title": "EN / PT",
+                               "oneOf": [{"const": "Italian only", "title": "Italian only"},
+                                         {"const": "All three", "title": "All three"}]},
+                "question_1_custom": own("question_1")}}})
         say(session_id, json.dumps(result, sort_keys=True))
     elif text == "qwen":
         questions = [{"question": "Which color?", "header": "Color",

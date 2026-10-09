@@ -1619,6 +1619,21 @@ fn a_mention_starts_where_the_commands_run() {
     assert!(screen.contains(&link), "{screen}");
 }
 
+/// Claude and Codex send a free-text "Other" field after each of their
+/// questions. It is not asked as a question of its own: a number chooses, and
+/// what is typed instead, or after the number, goes to that field.
+#[test]
+fn a_questions_other_field_is_not_asked_on_its_own() {
+    let screen = with_fake_agent_args(&[], &["questions", "1", "2, keep the tests"]);
+
+    // Two questions, two prompts.
+    assert_eq!(screen.matches("Choose a number").count(), 2, "{screen}");
+    assert!(!screen.contains("\n  Other\n"), "{screen}");
+    assert!(!screen.contains("Answer:"), "{screen}");
+    let content = r#""content": {"question_0": "Proper", "question_1": "All three", "question_1_custom": "keep the tests"}"#;
+    assert!(screen.contains(content), "{screen}");
+}
+
 /// A configuration whose `clipboard` writes what is copied to a file, and
 /// that file.
 fn home_with_clipboard() -> (tempfile::TempDir, std::path::PathBuf) {
