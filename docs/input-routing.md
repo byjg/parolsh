@@ -110,7 +110,7 @@ in. `#cd` takes the path as typed, so names with spaces are not escaped there
 (`#cd My Projects/`). Other `#` commands have no arguments to complete.
 
 In text for the agent (`?text` in shell mode), `Tab` completes `@path` with a
-file or directory name from the agent's directory, escaped like on a shell
+file or directory name from where your commands run, escaped like on a shell
 line (`@My\ Notes.md`); see [Mentioning files](#mentioning-files). Other
 words of the text have no completion.
 
@@ -231,11 +231,23 @@ cancels the turn.
 
 The text goes as typed, and each `@path` that exists goes with it as a link
 (an ACP `resource_link` with the absolute `file://` path), which the agent
-reads itself. Paths start at the agent's directory, even after a `cd` moved
-your commands elsewhere; `~/` and absolute paths work. `@words` that name
-nothing (`@team`, an email address) are only text, and punctuation right after
-a path (`@notes.txt.`) is not part of it. `#audit` shows how many files a
-message linked.
+reads itself. Paths start where your commands run, the directory the prompt
+shows; `~/` and absolute paths work.
+
+After a `cd` took your commands away from the agent's directory, that is
+still where `@` starts and what Tab completes:
+
+```text
+[claude ~/projects/wallet] ~/projects/wallet/infra ✦ why does @deploy.yaml fail?
+```
+
+The link is `infra/deploy.yaml`. The agent would read the word `@deploy.yaml`
+from its own directory, so it gets it in full, `@/home/you/projects/wallet/infra/deploy.yaml`,
+while the history keeps what you typed.
+
+`@words` that name nothing (`@team`, an email address) are only text, and
+punctuation right after a path (`@notes.txt.`) is not part of it. `#audit`
+shows how many files a message linked.
 
 Not on `!` lines: there, `@` is the shell's.
 
