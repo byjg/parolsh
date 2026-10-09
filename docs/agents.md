@@ -582,6 +582,10 @@ The agent asks (press Enter to skip a question):
 
 - Type the number of a choice, several numbers separated by commas when more
   than one is allowed, or your own answer when the agent accepts free text.
+- With Claude and Codex you can do both: the number, then a note after a
+  comma, as in `2, keep the tests`. They send a free-text "Other" field with
+  each question; it is where what you type goes, not a question of its own.
+- A number that is no choice is asked again, not taken as your answer.
 - Enter skips a question. If you skip a question the agent marked as
   required, it gets no answers at all.
 
