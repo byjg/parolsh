@@ -23,6 +23,14 @@
 # shell = ["bash", "-ic"]
 
 
+# --- Clipboard --------------------------------------------------------------
+
+# The command `#copy` (Alt+C) gives the answer to, on its standard input.
+# Without one, Parolsh uses wl-copy on Wayland, xclip or xsel on X11, pbcopy
+# on macOS, and otherwise asks the terminal (OSC 52).
+# clipboard = ["xclip", "-selection", "clipboard"]
+
+
 # --- Shell environment ------------------------------------------------------
 
 # When to import the environment your shell sets up (~/.profile, ~/.bashrc:

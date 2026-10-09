@@ -15,6 +15,7 @@ Prompts:
   opts   replies the session's config option values, as JSON
   bump   changes `effort` to "high" itself and notifies the client
   md     replies markdown, with the markers cut across chunks
+  code   replies a sentence and a `bash` code block: `cargo test`
   blocks replies the blocks sent before it, as JSON: their text, or a
          resource link's "<name> <uri>". Words after "blocks" are ignored.
 
@@ -237,6 +238,9 @@ def prompt(request):
     elif text == "md":
         for chunk in ["- **bo", "ld** and `co", "de`\n", "## Ti", "tle\n"]:
             say(session_id, chunk)
+    elif text == "code":
+        say(session_id, "Run the tests, with a long explanation of why they matter here:\n\n")
+        say(session_id, "```bash\ncargo test\n```\n")
     elif text == "bump":
         session["options"]["effort"] = "high"
         send({"method": "session/update", "params": {"sessionId": session_id, "update": {

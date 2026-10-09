@@ -77,13 +77,16 @@ pub struct Turn {
     id: TurnId,
     started: Instant,
     tools: ToolAudit,
-    said: Said,
+    spoken: Said,
     usage: Option<TurnUsage>,
     /// Where it is recorded: this run and the current session, or only the
     /// session of the history it was moved to.
     session: Option<i64>,
     /// The agent's text since its last tool call: its answer, once ended.
     answer: String,
+    /// All it wrote, as it wrote it, with a blank line where it did
+    /// something else in between.
+    said: String,
     tool_calls: usize,
     /// What the agent is doing, to say it while the turn is not shown.
     doing: Status,
@@ -113,10 +116,11 @@ impl Turn {
             id,
             started: Instant::now(),
             tools: ToolAudit::default(),
-            said: Said::default(),
+            spoken: Said::default(),
             usage: None,
             session: None,
             answer: String::new(),
+            said: String::new(),
             tool_calls: 0,
             doing: Status::new(),
         }
@@ -129,6 +133,11 @@ impl Turn {
     /// The agent's text since its last tool call.
     pub fn answer(&self) -> &str {
         &self.answer
+    }
+
+    /// All the agent wrote in the turn, as it wrote it.
+    pub fn said(&self) -> &str {
+        &self.said
     }
 
     pub fn tool_calls(&self) -> usize {
@@ -152,18 +161,19 @@ impl Turn {
     }
 
     fn text(&mut self, text: &str, audit: &mut Audit) {
-        self.said.answer(text, audit, self.session);
+        self.spoken.answer(text, audit, self.session);
         self.answer.push_str(text);
+        self.said.push_str(text);
         self.doing.set_activity("Writing".to_string());
     }
 
     fn thought(&mut self, text: &str, audit: &mut Audit) {
-        self.said.thought(text, audit, self.session);
+        self.spoken.thought(text, audit, self.session);
         self.doing.set_activity("Thinking".to_string());
     }
 
     fn flush(&mut self, audit: &mut Audit) {
-        self.said.flush(audit, self.session);
+        self.spoken.flush(audit, self.session);
     }
 
     fn tool(
@@ -179,6 +189,14 @@ impl Turn {
         self.tools
             .start(audit, self.session, id, title, kind, files);
         self.answer.clear();
+        if !self.said.is_empty() && !self.said.ends_with("\n\n") {
+            let gap = if self.said.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            self.said.push_str(gap);
+        }
         self.tool_calls += 1;
     }
 
@@ -290,19 +308,35 @@ impl Turn {
 /// background.
 ///
 /// What the agent does and what you answer go to `audit`. The turns already
-/// in the background (`jobs`) are followed meanwhile: what they ask is asked
-/// here.
+/// in the background (`jobs`) are followed meanwhile.
+///
+/// With how it ended comes what the agent wrote, as it wrote it: `#copy`.
 pub fn run(
     agent: &AgentHandle,
     blocks: Vec<Block>,
     display: Display,
     audit: &mut Audit,
     jobs: &mut [Job],
-) -> Outcome {
+) -> (Outcome, String) {
     let Some(id) = agent.prompt_blocks(blocks) else {
-        return Outcome::AgentStopped;
+        return (Outcome::AgentStopped, String::new());
     };
     let mut turn = Turn::new(id);
+    match follow(agent, &mut turn, display, audit, jobs) {
+        Some(outcome) => (outcome, turn.said),
+        None => (Outcome::Background(Box::new(turn)), String::new()),
+    }
+}
+
+/// Shows `turn` until it ends, or `None` when Ctrl+Z left it running.
+fn follow(
+    agent: &AgentHandle,
+    turn: &mut Turn,
+    display: Display,
+    audit: &mut Audit,
+    jobs: &mut [Job],
+) -> Option<Outcome> {
+    let id = turn.id;
     INTERRUPTED.store(false, Ordering::SeqCst);
     BACKGROUND.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
@@ -321,7 +355,7 @@ pub fn run(
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
             if cancelled.is_some() {
                 turn.flush(audit);
-                return give_up(agent, id, &mut out, audit);
+                return Some(give_up(agent, id, &mut out, audit));
             }
             agent.cancel();
             cancelled = Some(Instant::now());
@@ -329,7 +363,7 @@ pub fn run(
         }
         if cancelled.is_some_and(|at| at.elapsed() >= CANCEL_GRACE) {
             turn.flush(audit);
-            return give_up(agent, id, &mut out, audit);
+            return Some(give_up(agent, id, &mut out, audit));
         }
         // A turn being cancelled, or waiting for one, stays here.
         if BACKGROUND.swap(false, Ordering::SeqCst)
@@ -339,7 +373,7 @@ pub fn run(
             turn.flush(audit);
             out.hide();
             out.end_line();
-            return Outcome::Background(Box::new(turn));
+            return None;
         }
         // What a turn in the background asks waits for this one to end: it
         // is asked at the prompt, not in the middle of this answer.
@@ -371,7 +405,7 @@ pub fn run(
                 turn.flush(audit);
                 out.hide();
                 out.end_line();
-                return Outcome::AgentStopped;
+                return Some(Outcome::AgentStopped);
             }
         };
 
@@ -442,7 +476,7 @@ pub fn run(
                 turn.flush(audit);
                 out.line(&format!("parolsh: {message}"));
                 out.hide();
-                return Outcome::AgentStopped;
+                return Some(Outcome::AgentStopped);
             }
             Event::TurnEnd(_, reason) => {
                 let context = activity.get().context;
@@ -452,13 +486,13 @@ pub fn run(
                     eprintln!("({message})");
                 }
                 turn.end(audit, how, context.as_ref());
-                return Outcome::Finished;
+                return Some(Outcome::Finished);
             }
             Event::TurnFailed(_, message) => {
                 out.finish(None);
                 eprintln!("parolsh: {message}");
                 turn.fail(audit, &message);
-                return Outcome::Failed;
+                return Some(Outcome::Failed);
             }
         }
     }

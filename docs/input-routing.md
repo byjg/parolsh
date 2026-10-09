@@ -281,9 +281,43 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
+| `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
+| `#copy code` | Copy the last code block of the last answer |
+| `#raw [n]` | Print the last answer, or an earlier one, without the layout of the screen |
 | `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](agents.md#turns-in-the-background) |
 | `#fg [n]` | Wait for background turn `n`, or the last one. `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works). While a turn or a task of the agent runs in the background, the first one says so and stays: leaving stops them |
+
+## Copying an answer
+
+On screen an answer is laid out for reading: a mark, an indent, lines broken
+at the terminal's width. A selection with the mouse takes all of that with
+it. `#copy`, or `Alt+C`, puts the last answer on the clipboard as the agent
+wrote it, its markdown and nothing else:
+
+```text
+[claude] ~/projects/wallet ✦ #copy
+The last answer is on the clipboard (12 lines, with xclip).
+[claude] ~/projects/wallet ✦ #copy code
+The last code block of the last answer is on the clipboard (3 lines, with xclip).
+```
+
+- `#copy 2` is the answer before the last, and so on, for the last 20 of
+  this run. An answer is all the agent wrote in a turn; a turn that ended in
+  the background counts when it is reported.
+- `#copy code` takes the last fenced block of the last answer, without its
+  fence: the command to run, the file to save.
+- `#raw [n]` prints the same text instead, to select it with the mouse.
+
+Parolsh gives the text to the program of your desktop: `wl-copy` on Wayland,
+`xclip` or `xsel` on X11, `pbcopy` on macOS. Without one, as over SSH, it asks
+the terminal to take it (an OSC 52 request): kitty, WezTerm, Alacritty, foot,
+iTerm2, Windows Terminal and tmux do; GNOME Terminal and other VTE terminals
+do not, and say nothing. `clipboard` in the
+[global configuration](configuration.md#keys) sets another command.
+
+The answers are kept in memory, not read back from the history: after
+Parolsh restarts, `#copy` has the answers of the new run only.
 
 ## `#audit`
 
