@@ -1,6 +1,7 @@
 mod acp;
 mod app;
 mod audit;
+mod clipboard;
 mod complete;
 mod config;
 mod form;

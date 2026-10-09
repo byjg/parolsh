@@ -21,7 +21,7 @@ A project file comes with the directory, often from a repository you cloned,
 so it can change how Parolsh looks and which configured agent it uses, but
 never what is executed. These keys are **global only**:
 
-- `shell`
+- `shell` and `clipboard`
 - `agents.<name>.command`, `agents.<name>.args` and `agents.<name>.env`
 - `history_days` and `commands`: what is kept about your sessions is
   yours to choose, not a repository's
@@ -101,6 +101,7 @@ launched as `claude-agent-acp`.
 | Key | Default | Meaning |
 |---|---|---|
 | `shell` | `["bash", "-ic"]` | Command line for `!command`; the command is added as the last argument. Must not be empty. |
+| `clipboard` | the desktop's | Command `#copy` gives the text to, on its standard input. Without one: `wl-copy` on Wayland, `xclip` or `xsel` on X11, `pbcopy` on macOS, else the terminal (OSC 52). See [Copying an answer](input-routing.md#copying-an-answer). |
 | `prompt` | `"parolsh"` | Prompt style: `parolsh`, `starship` or `minimal`. See [Prompt](#prompt). |
 | `input` | `"agent"` | Where plain text goes when Parolsh starts: `agent` or `shell`. `parolsh --input=agent\|shell` overrides it. See [Shell mode](input-routing.md#shell-mode). |
 | `default_agent` | none | Agent used when Parolsh starts. Must name a configured agent. `#agent <name>` switches until you leave Parolsh. |

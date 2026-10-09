@@ -1618,3 +1618,88 @@ fn a_mention_starts_where_the_commands_run() {
     let link = format!(r#"["inner.txt file://{}/sub/inner.txt"]"#, root.display());
     assert!(screen.contains(&link), "{screen}");
 }
+
+/// A configuration whose `clipboard` writes what is copied to a file, and
+/// that file.
+fn home_with_clipboard() -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = tempfile::tempdir().unwrap();
+    let clip = home.path().join("clip");
+    std::fs::create_dir(home.path().join("parolsh")).unwrap();
+    let config = format!(
+        "clipboard = [\"sh\", \"-c\", \"cat > '{}'\"]\ndefault_agent = \"fake\"\n\
+         [agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n",
+        clip.display()
+    );
+    std::fs::write(home.path().join("parolsh/config.toml"), config).unwrap();
+    (home, clip)
+}
+
+/// `#copy` puts the last answer on the clipboard as the agent wrote it: its
+/// markdown, without the mark, the indent and the wrapping of the screen.
+/// `#copy code` only its last code block, `#copy 2` the answer before.
+#[test]
+fn copy_gives_the_answer_as_the_agent_wrote_it() {
+    let (home, clip) = home_with_clipboard();
+    let copied = |lines: &[&str]| {
+        let screen = run_in(home.path(), "", lines, "xterm-256color", false);
+        (screen, std::fs::read_to_string(&clip).unwrap_or_default())
+    };
+
+    let (screen, text) = copied(&["md", "code", "#copy"]);
+    // On screen it is laid out, in 80 columns here.
+    assert!(
+        screen.contains("✦ Run the tests, with a long explanation"),
+        "{screen}"
+    );
+    assert_eq!(
+        text,
+        "Run the tests, with a long explanation of why they matter here:\n\n```bash\ncargo test\n```"
+    );
+    assert!(
+        screen.contains("The last answer is on the clipboard (5 lines, with sh)."),
+        "{screen}"
+    );
+
+    let (screen, text) = copied(&["md", "code", "#copy code"]);
+    assert_eq!(text, "cargo test\n");
+    assert!(
+        screen.contains("The last code block of the last answer is on the clipboard (1 line"),
+        "{screen}"
+    );
+
+    let (_, text) = copied(&["md", "code", "#copy 2"]);
+    assert_eq!(text, "- **bold** and `code`\n## Title");
+
+    // Alt+C is `#copy`.
+    let (screen, text) = copied(&["md", "key:\\x1bc"]);
+    assert_eq!(text, "- **bold** and `code`\n## Title");
+    assert!(
+        screen.contains("The last answer is on the clipboard"),
+        "{screen}"
+    );
+}
+
+/// `#raw` prints the answer without the layout, to select it; and both say
+/// when there is nothing to give.
+#[test]
+fn raw_prints_the_answer_without_the_layout() {
+    let (home, clip) = home_with_clipboard();
+    let lines = ["#copy", "md", "#raw", "#copy code", "#raw 5"];
+    let screen = run_in(home.path(), "", &lines, "xterm-256color", false);
+
+    assert!(
+        screen.contains("parolsh: the agent has not answered yet in this run"),
+        "{screen}"
+    );
+    let raw = &screen[screen.find("#raw").expect(&screen)..];
+    assert!(raw.contains("\n- **bold** and `code`\n## Title\n"), "{raw}");
+    assert!(
+        screen.contains("parolsh: the last answer has no code block"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: there is only one answer in this run"),
+        "{screen}"
+    );
+    assert!(!clip.exists(), "nothing was copied");
+}

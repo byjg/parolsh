@@ -152,6 +152,9 @@ pub struct Config {
     pub history_days: u32,
     /// Whether `!command` lines are saved in the history, and for whom.
     pub commands: Commands,
+    /// The command `#copy` gives the text to, on its standard input.
+    /// Without one, the desktop's program or the terminal.
+    pub clipboard: Option<Vec<String>>,
 }
 
 /// One config file as written on disk: every field is optional so a project
@@ -160,6 +163,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     shell: Option<Vec<String>>,
+    clipboard: Option<Vec<String>>,
     prompt: Option<PromptStyle>,
     input: Option<Mode>,
     thinking: Option<ThinkingDisplay>,
@@ -208,6 +212,7 @@ impl ConfigFile {
         // repository's: it could give your commands to the agent.
         for (key, set) in [
             ("shell", self.shell.is_some()),
+            ("clipboard", self.clipboard.is_some()),
             ("history_days", self.history_days.is_some()),
             ("commands", self.commands.is_some()),
             ("save_commands", self.save_commands.is_some()),
@@ -281,6 +286,9 @@ impl Config {
         if shell.is_empty() {
             bail!("`shell` cannot be empty");
         }
+        if file.clipboard.as_ref().is_some_and(Vec::is_empty) {
+            bail!("`clipboard` cannot be empty");
+        }
 
         let mut agents = BTreeMap::new();
         for (name, agent) in file.agents {
@@ -325,6 +333,7 @@ impl Config {
                     false => Commands::Off,
                 }))
                 .unwrap_or_default(),
+            clipboard: file.clipboard,
         })
     }
 }
@@ -443,6 +452,7 @@ mod tests {
         );
         let cases = [
             ("shell = [\"./evil\"]\n", "`shell`"),
+            ("clipboard = [\"./evil\"]\n", "`clipboard`"),
             ("[agents.claude]\ncommand = \"./evil\"\n", "agent `claude`"),
             ("[agents.claude]\nargs = [\"--evil\"]\n", "agent `claude`"),
             (
@@ -623,6 +633,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cases = [
             "shell = []\n",
+            "clipboard = []\n",
             "unknown_key = 1\n",
             "prompt = \"ps1\"\n",
             "thinking = \"loud\"\n",

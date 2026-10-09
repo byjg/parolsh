@@ -7,6 +7,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use serde_json::json;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,7 +23,8 @@ use crate::jobs::{self, Job};
 use crate::title::Title;
 use crate::turn::Ended;
 use crate::{
-    config, hints, mcp, mention, project, replay, setup, shell, shellenv, turn, ui, version,
+    clipboard, config, hints, mcp, mention, project, replay, setup, shell, shellenv, turn, ui,
+    version,
 };
 use agent_client_protocol::schema::v1::McpServer;
 
@@ -55,6 +57,9 @@ Control commands:
   #forget [n]     remove a session from the history; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex)
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
+  #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
+  #copy code      copy the last code block of the last answer
+  #raw [n]        print it without the layout, to select it with the mouse
   #jobs           the turns sent to the background (Ctrl+Z during a turn)
   #fg [n]         wait for background turn n, or the last one (Ctrl+C cancels it)
   #exit           leave Parolsh";
@@ -115,7 +120,13 @@ pub struct App {
     handover: Vec<String>,
     /// Leaving was refused once, because something is still running.
     leaving: bool,
+    /// What the agent wrote in the last turns, as it wrote it and newest
+    /// last: `#copy` and `#raw`. In memory only.
+    answers: VecDeque<String>,
 }
+
+/// How many answers `#copy <n>` can go back to.
+const ANSWERS_KEPT: usize = 20;
 
 /// The session to go back to at start: `--resume <n>`, or `--continue`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +209,7 @@ impl App {
             private: false,
             handover: Vec::new(),
             leaving: false,
+            answers: VecDeque::new(),
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -266,8 +278,19 @@ impl App {
             self.attend_jobs();
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
-                // A key bound to a command (Ctrl+L) is a line like any other.
-                Signal::Success(line) | Signal::HostCommand(line) => {
+                // A key bound to a command (Ctrl+L, Alt+C) is a line like any
+                // other, but no Enter ended the prompt's line: what the
+                // command says takes its place, and what was typed comes back
+                // with the next prompt.
+                signal @ (Signal::Success(_) | Signal::HostCommand(_)) => {
+                    let line = match signal {
+                        Signal::HostCommand(line) => {
+                            print!("{}", if ui::is_ansi() { ui::CLEAR_LINE } else { "\n" });
+                            line
+                        }
+                        Signal::Success(line) => line,
+                        _ => continue,
+                    };
                     match self.handle(route(&line, self.mode.get())) {
                         Flow::Exit if self.may_leave() => return Ok(()),
                         Flow::Exit => {}
@@ -828,8 +851,10 @@ impl App {
             "config" => self.config_command(args),
             "options" => self.options_command(args),
             // Not recorded: looking changes nothing.
-            "audit" | "sessions" | "redraw" | "jobs" | "fg" => {
+            "audit" | "sessions" | "redraw" | "jobs" | "fg" | "copy" | "raw" => {
                 let result = match name {
+                    "copy" => self.copy_command(args),
+                    "raw" => self.raw_command(args),
                     "audit" => self.audit_command(args),
                     "sessions" => self.sessions_command(),
                     "jobs" => {
@@ -909,6 +934,11 @@ impl App {
             KeyModifiers::CONTROL,
             KeyCode::Char('l'),
             ReedlineEvent::ExecuteHostCommand("#redraw".to_string()),
+        );
+        keybindings.add_binding(
+            KeyModifiers::ALT,
+            KeyCode::Char('c'),
+            ReedlineEvent::ExecuteHostCommand("#copy".to_string()),
         );
         let menu = ColumnarMenu::default().with_name("completion_menu");
         editor
@@ -1055,7 +1085,13 @@ impl App {
         blocks.extend(files.into_iter().map(Block::File));
         blocks.push(Block::Text(sent));
         let display = self.display();
-        match turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs) {
+        let (outcome, said) = turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs);
+        self.remember(said);
+        // Borrowed again: `remember` needed the whole of `self`.
+        let Some(agent) = &self.agent else {
+            return 1;
+        };
+        match outcome {
             turn::Outcome::Background(turn) => {
                 // The copy the conversation goes on in was not told either.
                 self.handover = told;
@@ -1167,6 +1203,7 @@ impl App {
         if let Ended::Failed(why) | Ended::AgentStopped(why) = &ended {
             eprintln!("parolsh: {why}");
         }
+        self.remember(job.turn().said().to_string());
         let turn = job.turn();
         let answer = turn.answer().trim();
         if !answer.is_empty() {
@@ -1196,6 +1233,87 @@ impl App {
         if here && !answer.is_empty() && ended == Ended::Finished(None) {
             self.handover.push(handover(&job.request, answer));
         }
+    }
+
+    /// Keeps what the agent wrote in a turn, for `#copy` and `#raw`.
+    fn remember(&mut self, said: String) {
+        if said.trim().is_empty() {
+            return;
+        }
+        self.answers.push_back(said);
+        while self.answers.len() > ANSWERS_KEPT {
+            self.answers.pop_front();
+        }
+    }
+
+    /// Answer `n` counting from the last one (1, also without `n`), as the
+    /// agent wrote it, and how to call it.
+    fn answer(&self, n: &str) -> Result<(&str, String)> {
+        let back: usize =
+            match n {
+                "" => 1,
+                n => n.parse().ok().filter(|&n| n > 0).with_context(|| {
+                    format!("`{n}`: the last answer is 1, the one before 2, ...")
+                })?,
+            };
+        let answer = self
+            .answers
+            .len()
+            .checked_sub(back)
+            .and_then(|i| self.answers.get(i));
+        let name = match back {
+            1 => "the last answer".to_string(),
+            back => format!("answer {back} from the last"),
+        };
+        match (answer, self.answers.len()) {
+            (Some(answer), _) => Ok((answer.trim_end(), name)),
+            (None, 0) => anyhow::bail!("the agent has not answered yet in this run"),
+            (None, 1) => anyhow::bail!("there is only one answer in this run"),
+            (None, kept) => anyhow::bail!("there are only {kept} answers in this run"),
+        }
+    }
+
+    /// `#copy [n]`, `#copy code`: puts an answer on the clipboard as the
+    /// agent wrote it, without the layout of the screen; or only its last
+    /// code block.
+    fn copy_command(&mut self, args: &str) -> Result<()> {
+        let (text, what) = match args {
+            "code" => {
+                let (answer, name) = self.answer("")?;
+                let code = clipboard::last_code_block(answer)
+                    .with_context(|| format!("{name} has no code block"))?;
+                (code, format!("the last code block of {name}"))
+            }
+            n => {
+                let (answer, name) = self.answer(n)?;
+                (answer.to_string(), name)
+            }
+        };
+        let how = clipboard::copy(&text, self.config.clipboard.as_deref(), ui::is_ansi())
+            .map_err(anyhow::Error::msg)?;
+        let size = match text.lines().count() {
+            1 => "1 line".to_string(),
+            lines => format!("{lines} lines"),
+        };
+        let what = format!("{}{}", what[..1].to_uppercase(), &what[1..]);
+        match how {
+            clipboard::How::Program(program) => {
+                println!("{what} is on the clipboard ({size}, with {program}).")
+            }
+            clipboard::How::Terminal => println!(
+                "{what} was given to the terminal for its clipboard ({size}). A terminal \
+                 that does not take it says nothing: #raw prints it to select."
+            ),
+        }
+        Ok(())
+    }
+
+    /// `#raw [n]`: prints an answer as the agent wrote it, without the
+    /// mark, the indent and the wrapping, to select it with the mouse.
+    fn raw_command(&mut self, args: &str) -> Result<()> {
+        let (answer, _) = self.answer(args)?;
+        println!("{answer}");
+        Ok(())
     }
 
     /// `#jobs`: the turns in the background.
