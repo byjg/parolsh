@@ -39,6 +39,22 @@ Agent changed to codex. Started a new conversation.
 conversation. It lasts until you leave Parolsh; `default_agent` does not
 change. `#agent` prints the agent in use.
 
+To start with another one, `parolsh --agent codex`: that agent is started in
+place of the default one, the project's included, for that run. It is how a
+terminal profile or an alias gets its own agent.
+
+```bash
+parolsh --agent codex
+parolsh --agent claudelocal --input=shell
+```
+
+- The name is one of the configured agents: another is an error before
+  anything starts, with the names that are.
+- `#cd` to another project keeps it, as it keeps an agent chosen with
+  `#agent`.
+- Not with `--resume` or `--continue`, where the session's own agent is
+  used, nor with `-c`, which runs without one.
+
 `#agent list` shows every configured agent and its `mode`; `*` marks the one
 in use. For that one, it also shows the modes the agent offers, with `*` on
 the current mode:
