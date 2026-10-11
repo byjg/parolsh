@@ -78,11 +78,13 @@ fn feed(command: &[String], text: &str) -> Result<(), String> {
         None => Ok(()),
     };
     let status = child.wait().map_err(|e| format!("`{name}`: {e}"))?;
-    written.map_err(|e| format!("`{name}` did not read the text: {e}"))?;
-    match status.success() {
-        true => Ok(()),
-        false => Err(format!("`{name}` failed ({status})")),
+    // How it ended says more than a pipe it closed: a program that fails
+    // may be gone before it is written to, or after, and both are that it
+    // failed.
+    if !status.success() {
+        return Err(format!("`{name}` failed ({status})"));
     }
+    written.map_err(|e| format!("`{name}` did not read the text: {e}"))
 }
 
 /// The last fenced code block of `markdown`, without its fence.
@@ -142,6 +144,12 @@ mod tests {
         let fails = vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()];
         let error = copy("x", Some(&fails), false).unwrap_err();
         assert!(error.starts_with("`sh` failed"), "{error}");
+
+        // One that ends well without reading: the text is not on the
+        // clipboard. Large enough not to fit in the pipe it leaves behind.
+        let deaf = vec!["true".to_string()];
+        let error = copy(&"x".repeat(1 << 20), Some(&deaf), false).unwrap_err();
+        assert!(error.starts_with("`true` did not read the text"), "{error}");
 
         let missing = vec!["no-such-clipboard-program".to_string()];
         let error = copy("x", Some(&missing), false).unwrap_err();
