@@ -3,16 +3,16 @@
 
 use agent_client_protocol::schema::v1::Meta;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
-    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
-    ElicitationFormCapabilities, ElicitationMode, ErrorCode, ForkSessionRequest, InitializeRequest,
-    LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption, PermissionOptionId,
-    PermissionOptionKind, PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
-    ToolCallStatus,
+    AvailableCommandInput, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
+    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationCapabilities, ElicitationFormCapabilities, ElicitationMode,
+    ErrorCode, ForkSessionRequest, InitializeRequest, LoadSessionRequest, McpServer,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus,
+    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, StopReason, TextContent, ToolCallContent, ToolCallStatus,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{
@@ -168,6 +168,15 @@ impl Compaction {
 /// What Claude adds to the title of a conversation it copied.
 const COPY_TITLE: &str = " (fork)";
 
+/// One of the agent's own commands, typed as `/name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+    /// What it takes after its name, when the agent says.
+    pub hint: Option<String>,
+}
+
 /// How an agent copies a conversation (`session/fork`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Forks {
@@ -271,6 +280,8 @@ struct SessionState {
     loading: bool,
     /// The context and cost, once the agent reported them.
     context: Option<Context>,
+    /// The agent's own `/commands`, as it last listed them.
+    commands: Vec<AgentCommand>,
     /// How the agent copies a conversation. Kept across conversations.
     forks: Forks,
     /// The conversation is a copy Parolsh asked for: Claude titles it as
@@ -322,6 +333,16 @@ impl PartialEq for ActivityWatch {
 impl Eq for ActivityWatch {}
 
 impl ActivityWatch {
+    /// The agent's own `/commands`, for the Tab completion: read when Tab
+    /// is pressed, since the agent lists them after the conversation opens
+    /// and again when they change.
+    pub fn commands(&self) -> Vec<AgentCommand> {
+        self.0
+            .lock()
+            .map(|state| state.commands.clone())
+            .unwrap_or_default()
+    }
+
     pub fn get(&self) -> Activity {
         let Ok(state) = self.0.lock() else {
             return Activity::default();
@@ -1234,6 +1255,11 @@ async fn open_session(
     events: &mpsc::Sender<Event>,
     shared: &Shared,
 ) -> Result<SessionId, agent_client_protocol::Error> {
+    // The commands are the conversation's: the agent lists the new ones
+    // around its answer, sometimes before Parolsh has read it.
+    if let Ok(mut state) = shared.lock() {
+        state.commands.clear();
+    }
     let (session, response_modes, config_options) = match opening {
         Opening::New => {
             let response = cx
@@ -1306,6 +1332,7 @@ async fn open_session(
             options,
             session_id: Some(session.to_string()),
             forks: state.forks,
+            commands: std::mem::take(&mut state.commands),
             ..Default::default()
         };
     }
@@ -1452,6 +1479,23 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
         SessionUpdate::ConfigOptionUpdate(update) => {
             if let Ok(mut state) = shared.lock() {
                 state.options = AgentOption::list(&update.config_options);
+            }
+            return;
+        }
+        SessionUpdate::AvailableCommandsUpdate(update) => {
+            if let Ok(mut state) = shared.lock() {
+                state.commands = update
+                    .available_commands
+                    .into_iter()
+                    .map(|command| AgentCommand {
+                        name: command.name,
+                        description: command.description,
+                        hint: command.input.and_then(|input| match input {
+                            AvailableCommandInput::Unstructured(input) => Some(input.hint),
+                            _ => None,
+                        }),
+                    })
+                    .collect();
             }
             return;
         }
@@ -2165,6 +2209,28 @@ mod tests {
         assert_eq!(of, "null");
         assert_eq!(agent.activity().get().forks, Forks::No);
         assert_eq!(agent.activity().get().session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn the_agents_own_commands_are_kept_for_each_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &[], dir.path());
+        // Listed around the conversation's opening: there once it answers.
+        turn(&agent, "warn");
+        let names = |agent: &AgentHandle| -> Vec<String> {
+            let commands = agent.activity().commands();
+            commands.into_iter().map(|command| command.name).collect()
+        };
+        assert_eq!(names(&agent), ["compact", "cost", "review"]);
+        let compact = &agent.activity().commands()[0];
+        assert_eq!(compact.description, "Compact the conversation");
+        assert_eq!(compact.hint.as_deref(), Some("[instructions]"));
+        assert_eq!(agent.activity().commands()[1].hint, None);
+
+        // A new conversation has the commands the agent lists for it.
+        assert!(agent.new_session(dir.path().to_path_buf(), Vec::new()));
+        turn(&agent, "warn");
+        assert_eq!(names(&agent), ["compact", "cost", "review", "second"]);
     }
 
     /// Where a copy without the prompt in flight ends: the agent's last
