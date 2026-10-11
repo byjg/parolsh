@@ -9,12 +9,13 @@ pub const SAMPLE: &str = include_str!("../config.sample.toml");
 
 /// Agents from the sample that can be enabled without the user's data, in
 /// order of preference for `default_agent`, with the command to look for.
-const KNOWN_AGENTS: [(&str, &str); 6] = [
+const KNOWN_AGENTS: [(&str, &str); 7] = [
     ("claude", "claude-agent-acp"),
     ("codex", "codex-acp"),
     ("gemini", "gemini"),
     ("qwen", "qwen"),
     ("kilo", "kilo"),
+    ("opencode", "opencode"),
     ("goose", "goose"),
 ];
 

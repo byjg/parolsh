@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "claude", "codex", "gemini", "goose", "kilo", "openai", "qwen"
+                "claude", "codex", "gemini", "goose", "kilo", "openai", "opencode", "qwen"
             ]
         );
         assert_eq!(config.default_agent.as_deref(), Some("claude"));

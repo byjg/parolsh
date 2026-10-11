@@ -206,10 +206,28 @@
 # mode = "code"
 
 
+# OpenCode
+#   curl -fsSL https://opencode.ai/install | bash
+#   Login: opencode auth login, or OpenCode's free models.
+#   Modes (a config option): build (default), plan (read-only).
+#   build acts without asking unless ~/.config/opencode/opencode.json has
+#   "permission": { "edit": "ask", "bash": "ask" }.
+#
+#   Options: model, effort (only for models that have it)
+#
+# [agents.opencode]
+# command = "opencode"
+# args = ["acp"]
+# mode = "build"
+# options = { model = "opencode/big-pickle" }
+
+
 # Goose
 #   curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash
 #   Login: its provider (goose configure, ~/.config/goose/config.yaml) or env.
 #   Modes: approve (asks), smart_approve, chat (no tools), auto (default)
+#   With the desktop app, `goose` is the app: use the CLI it ships, on Linux
+#   command = "/usr/lib/goose/resources/bin/goose".
 #
 # [agents.goose]
 # command = "goose"

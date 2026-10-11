@@ -279,7 +279,7 @@ and forwards the line as typed, so the agent's own slash commands work.
 | `#audit <n>` | What happened in session `n` of this project, from the [history](#the-history-of-sessions) |
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
 | `#forget [n]` | Remove session `n` from the history; the current one without `n` |
-| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude and Codex can; other agents say they cannot |
+| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
 | `#copy code` | Copy the last code block of the last answer |
@@ -377,7 +377,7 @@ project.
   `#agent`, and is saved from its first entry. `#sessions` names it with the
   agent's title (Claude and Codex give one), or your first message.
 - `#sessions` also says what each session used, when the agent reports it
-  (Claude, Codex and Kilo Code do, Qwen Code does not):
+  (Claude, Codex, Kilo Code and OpenCode do, Qwen Code does not):
   the tokens of all its turns, and the cost for the agents that give one
   (see [The context and what it costs](agents.md#the-context-and-what-it-costs)).
   The total counts what was sent, received, reasoned, and read from and
@@ -553,8 +553,10 @@ Session #2 was about the billing rewrite, codename Falcon-9 …
 - The search matches words, not meanings. For something exact, give the words:
   `search the history for Falcon-9`.
 - If the agent answers without looking, name the tools: `use the
-  parolsh-history tools to find …`. This was tried with Claude; other agents
-  get the same tools, and may need to be told.
+  parolsh-history tools to find …`. Claude, Codex, Kilo Code and OpenCode
+  used the tools when asked to search the history; Qwen Code and Goose
+  searched the files instead, and used them once they were named. Kilo and
+  Qwen ask before each call, like for any tool.
 
 The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
 the history without changing it, and its tools only return this project's

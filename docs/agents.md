@@ -108,6 +108,7 @@ option or setting:
 | Codex | `reasoning_effort` | `low` |
 | Qwen Code | `"reasoning": false` in `~/.qwen/settings.json`, see [Qwen Code](#qwen-code) | off |
 | Kilo Code | `effort` | the lowest value `#options` lists |
+| OpenCode | `effort`, only for models that have it | the lowest value `#options` lists |
 | Gemini CLI, Goose | none through ACP | their own settings |
 
 How Parolsh *displays* the reasoning is separate: `thinking` in the
@@ -136,15 +137,17 @@ names and switches. `env` is only read from the global file, see
 | [Gemini CLI](#gemini-cli) | `gemini --acp` | `GEMINI_API_KEY`, Vertex AI | **`default`**, `autoEdit`, `yolo`, `plan` |
 | [Qwen Code](#qwen-code) | `qwen --acp` | `~/.qwen/settings.json`, OpenAI-compatible key | `plan`, `default`, `auto-edit`, `auto`, `yolo` |
 | [Kilo Code](#kilo-code) | `kilo acp` | `kilo auth login` | none (set in Kilo) |
+| [OpenCode](#opencode) | `opencode acp` | `opencode auth login`, free models | none (`mode` option: **`build`**, `plan`) |
 | [Any OpenAI-compatible API](#any-openai-compatible-api) | `qwen --acp` | `OPENAI_API_KEY` | Qwen Code's |
 | [Goose](#goose) | `goose acp` | provider key | `approve`, `smart_approve`, `chat`, **`auto`** |
 
 :::note Tested
 Claude (`claude-agent-acp` 0.81), Codex (`codex-acp` 1.13) and Qwen Code
-(0.24) are tested with Parolsh; their modes are the ones they reported. Kilo
-Code was checked with an ACP handshake. Gemini CLI and Goose come from their
-documentation and source code as of September 2026. Agents change their
-modes between versions: `#agent list` shows what the running one offers.
+(0.24) are tested with Parolsh; their modes are the ones they reported. So
+are Kilo Code (7.8), OpenCode (2.0.26) and Goose (1.54). Gemini CLI comes
+from its documentation and source code as of September 2026. Agents change
+their modes between versions: `#agent list` shows what the running one
+offers.
 :::
 
 ## Claude
@@ -351,6 +354,54 @@ configuration: set `"permission": "allow"` in `~/.config/kilo/kilo.json` to
 let it act without asking, or use its `/auto-approve` setting.
 :::
 
+## OpenCode
+
+OpenCode's CLI, a native binary.
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+opencode auth login
+```
+
+OpenCode uses the providers you log in to with `opencode auth login`. Without
+one, it offers its own free models; its default may be one that was retired
+(*Model ... has been deprecated*), so name one with the `model` option.
+`#options` lists the models it offers.
+
+```toml
+[agents.opencode]
+command = "opencode"
+args = ["acp"]
+mode = "build"
+options = { model = "opencode/big-pickle" }
+```
+
+Like Kilo, OpenCode has no ACP session modes, but a `mode` option with its
+agents: `build` (its default) and `plan` (read-only). `mode = "plan"` sets it
+through that option. `effort` is only there for models that have it.
+
+:::warning `build` acts without asking
+With OpenCode's default configuration, `build` edits files and runs commands
+without asking. To be asked first, set it in `~/.config/opencode/opencode.json`
+(or the project's `opencode.json`):
+
+```json
+{
+  "permission": { "edit": "ask", "bash": "ask" }
+}
+```
+
+Parolsh then shows each request, like any agent's.
+:::
+
+The [history tools](input-routing.md#the-agent-can-search-the-history) work
+with OpenCode, which shows them as `parolsh-history.search_history` and so on.
+
+OpenCode reports its [context, cost and tokens](#the-context-and-what-it-costs),
+compacts with `/compact`, keeps its conversations for
+[`#resume`](input-routing.md#resuming-a-session), and copies one for a
+[turn sent to the background](#turns-in-the-background).
+
 ## Any OpenAI-compatible API
 
 To use an API token directly, with OpenAI, OpenRouter, Azure, a local vLLM or
@@ -410,6 +461,19 @@ mode = "approve"
 | `chat` | Chat only: no tools at all |
 | `auto` | Acts without asking (Goose's default) |
 
+:::note The desktop app is not the CLI
+The Goose desktop package puts the app itself on `PATH` as `goose`: with it,
+`command = "goose"` opens a window instead of starting the agent. Point
+`command` to the CLI it ships, on Linux
+`/usr/lib/goose/resources/bin/goose`. It reads the same
+`~/.config/goose/config.yaml` as the app.
+:::
+
+Goose calls the [history tools](input-routing.md#the-agent-can-search-the-history)
+from code it runs, so Parolsh shows them as `execute typescript`, not by
+their names. Its permission choices arrive as their ids (`allow_once`,
+`reject_always`, ...).
+
 ## More agents
 
 Other agents that speak ACP. Configure them the same way; `#agent list` shows
@@ -417,7 +481,6 @@ the modes they offer once running.
 
 | Agent | ACP command |
 |---|---|
-| OpenCode | `opencode acp` |
 | GitHub Copilot CLI | `copilot --acp` |
 | Cursor CLI | `cursor-agent acp` |
 | Augment (Auggie) | `auggie --acp` |
@@ -718,7 +781,7 @@ It depends on what the agent offers:
 | The agent | You go on in | |
 |---|---|---|
 | Copies a conversation up to a message | A copy that ends before the turn's message | Claude, Codex |
-| Copies a whole conversation | A copy that has the message: Parolsh tells the agent, with your next message, that it is being worked on elsewhere | |
+| Copies a whole conversation | A copy: Parolsh tells the agent, with your next message, that your last request is being worked on elsewhere | OpenCode |
 | Does not copy | A new conversation, which Parolsh says: `The conversation here is a new one.` | Qwen Code |
 
 The first message of a conversation has nothing before it to copy: you go on
@@ -739,8 +802,8 @@ Not sent to the background: a `!command` (see
 ## The context and what it costs
 
 An agent remembers the conversation in its context, which has a size. Claude,
-Codex, Qwen Code and Kilo Code report how full it is, and Parolsh shows it where it does
-not take room in the prompt:
+Codex, Qwen Code, Kilo Code and OpenCode report how full it is, and Parolsh
+shows it where it does not take room in the prompt:
 
 ```text
 ✓ 3 tool calls · 18s · 24k of 1M (2%) · $0.35
@@ -752,9 +815,9 @@ not take room in the prompt:
 - **On the right of the prompt**, only when it fills up: `ctx 82%` in yellow
   from 75%, in red from 90%. Below that, nothing.
 - **The cost** is the agent's own estimate for the conversation so far, at
-  API prices: with a subscription it is not what you are billed. Claude and
-  Kilo Code report one, Codex and Qwen Code do not. Parolsh computes no price
-  itself.
+  API prices: with a subscription it is not what you are billed. Claude,
+  Kilo Code and OpenCode report one, Codex and Qwen Code do not. Parolsh
+  computes no price itself.
 
 ### Compacting
 
@@ -762,8 +825,8 @@ When the context fills up, the conversation is compacted: the agent replaces
 it with a summary and goes on. Claude does it by itself when it gets close to
 full, and you can ask for it with the agent's own command, which Parolsh
 forwards as typed (see [`/command`](input-routing.md#command-1)): `/compact`
-for Claude, Codex and Kilo Code, `/compress` for Qwen Code. What follows the command is
-for the agent, as in `/compact keep the decisions about the retry logic`.
+for Claude, Codex, Kilo Code and OpenCode, `/compress` for Qwen Code. What
+follows the command is for the agent, as in `/compact keep the decisions about the retry logic`.
 
 ```text
 [claude] ~/projects/wallet ✦ /compact
@@ -773,7 +836,8 @@ Compacted: 28k → 5k tokens (6.8s)
 ```
 
 - Yours or the agent's, a compaction is said in one line, with the context
-  before and after. Qwen Code and Kilo Code say theirs in their answer
+  before and after. OpenCode says that it compacted, not the sizes: the line
+  is `Compacted (1.2s)`. Qwen Code and Kilo Code say theirs in their answer
   instead (Qwen: `Context compressed (21249 -> ~18491).`; Kilo prints the
   summary it made). Qwen's context is updated with the next turn.
 - The context grows again with the next turn: the agent's own instructions

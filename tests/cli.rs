@@ -1310,9 +1310,11 @@ fn usage_is_left_out_when_the_agent_does_not_report_it() {
 #[test]
 fn a_compaction_is_said_and_kept_in_the_record() {
     let home = fake_agent_home_with(&[]);
-    let lines = ["usage", "/compact", "/compact codex"];
+    let lines = ["usage", "/compact", "/compact codex", "/compact opencode"];
     let screen = run_in(home.path(), "", &lines, "xterm-256color", false);
 
+    // OpenCode says neither the sizes nor the time.
+    assert!(screen.contains("Compacted (0.0s)\n"), "{screen}");
     // Claude gives the sizes and the time; for Codex they are the context's.
     assert!(
         screen.contains("Compacted: 24k → 5k tokens (6.8s)\n"),
