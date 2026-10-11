@@ -106,10 +106,14 @@ return your `!command` lines, unless you set `commands = "shared"`, which the
 banner then says. A `#new private` conversation does not get
 the server; `history_days = 0` turns both the history and the server off.
 
-The server's tools only return this project's sessions. That keeps an agent
-from wandering into other projects by accident; it is not a barrier. Parolsh
-is not a sandbox: an agent that can run commands or read files does so as
-you, and can read `history.db`, like any other file of yours.
+The server's tools only return this project's sessions, and the sessions of
+other projects that you gave this conversation with `#share <n>` (see
+[Sharing a session of another project](input-routing.md#sharing-a-session-of-another-project)):
+the agent gets one of those because you named it, for that conversation
+only. That keeps an agent from wandering into other projects by accident; it
+is not a barrier. Parolsh is not a sandbox: an agent that can run commands or
+read files does so as you, and can read `history.db`, like any other file of
+yours.
 
 ## The ACP log
 

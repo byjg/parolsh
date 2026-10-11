@@ -79,6 +79,9 @@ enum Tool {
         /// Also return the plain `!command` lines (`commands = "shared"`)
         #[arg(long)]
         commands: bool,
+        /// The conversation's token: also the sessions shared under it
+        #[arg(long)]
+        shares: Option<String>,
     },
 }
 
@@ -89,11 +92,13 @@ fn main() -> ExitCode {
         db,
         project,
         commands,
+        shares,
     }) = cli.tool
     {
         let scope = mcp::Scope {
             project: &project,
             commands,
+            shares: shares.as_deref(),
         };
         return match mcp::serve(&db, scope) {
             Ok(()) => ExitCode::SUCCESS,

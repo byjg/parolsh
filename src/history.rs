@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS entries (
     meta       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id, id);
+-- A session of another project that you gave the agent of one conversation
+-- (`#share`): its history server finds it by the conversation's token.
+CREATE TABLE IF NOT EXISTS shares (
+    token      TEXT NOT NULL,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (token, session_id)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
     text, content='entries', content_rowid='id'
 );
@@ -223,6 +231,7 @@ impl History {
     /// phrase"`, `prefix*`), best first; plain `!command` lines only with
     /// `commands`. A query FTS5 cannot read is
     /// searched as plain words, any of them.
+    #[cfg(test)]
     pub fn search(
         &self,
         project: &str,
@@ -230,7 +239,22 @@ impl History {
         limit: usize,
         commands: bool,
     ) -> rusqlite::Result<Vec<Hit>> {
-        match self.search_fts(project, query, limit, commands) {
+        self.search_with(project, &[], query, limit, commands)
+    }
+
+    /// `search`, also in the sessions `also`, of whatever project: the ones
+    /// shared with the conversation.
+    pub fn search_with(
+        &self,
+        project: &str,
+        also: &[i64],
+        query: &str,
+        limit: usize,
+        commands: bool,
+    ) -> rusqlite::Result<Vec<Hit>> {
+        let also = serde_json::json!(also).to_string();
+        let also = also.as_str();
+        match self.search_fts(project, also, query, limit, commands) {
             Err(rusqlite::Error::SqliteFailure(..)) => {
                 let words: Vec<String> = query
                     .split_whitespace()
@@ -239,7 +263,7 @@ impl History {
                 if words.is_empty() {
                     return Ok(Vec::new());
                 }
-                self.search_fts(project, &words.join(" OR "), limit, commands)
+                self.search_fts(project, also, &words.join(" OR "), limit, commands)
             }
             found => found,
         }
@@ -248,6 +272,7 @@ impl History {
     fn search_fts(
         &self,
         project: &str,
+        also: &str,
         query: &str,
         limit: usize,
         commands: bool,
@@ -262,11 +287,14 @@ impl History {
              JOIN entries e ON e.id = entries_fts.rowid
              JOIN sessions s ON s.id = e.session_id
              JOIN projects p ON p.id = s.project_id
-             WHERE entries_fts MATCH ?1 AND p.root = ?2 AND (?4 OR e.kind != 'command')
+             WHERE entries_fts MATCH ?1
+               AND (p.root = ?2 OR e.session_id IN (SELECT value FROM json_each(?5)))
+               AND (?4 OR e.kind != 'command')
              ORDER BY rank
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![query, project, limit as i64, commands], |row| {
+        let found = params![query, project, limit as i64, commands, also];
+        let rows = statement.query_map(found, |row| {
             Ok(Hit {
                 session: row.get(0)?,
                 position: row.get::<_, i64>(1)? as usize,
@@ -760,7 +788,36 @@ impl History {
             "DELETE FROM projects WHERE id NOT IN (SELECT project_id FROM sessions)",
             [],
         )?;
+        // A share is for one conversation: none is of use for long.
+        let month = now() - 30 * 24 * 60 * 60 * 1000;
+        self.conn
+            .execute("DELETE FROM shares WHERE at < ?1", [month])?;
         Ok(())
+    }
+
+    /// Gives session `id` to the conversation whose history server has
+    /// `token`: `#share`.
+    pub fn share(&mut self, token: &str, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO shares (token, session_id, at) VALUES (?1, ?2, ?3)",
+            params![token, id, now()],
+        )?;
+        Ok(())
+    }
+
+    /// The sessions given to the conversation of `token`, newest first. None
+    /// in a database from before there were any.
+    pub fn shared(&self, token: &str) -> rusqlite::Result<Vec<i64>> {
+        let ids = self.conn.prepare(
+            "SELECT session_id FROM shares WHERE token = ?1 ORDER BY at DESC, session_id DESC",
+        );
+        let mut ids = match ids {
+            Ok(ids) => ids,
+            Err(rusqlite::Error::SqliteFailure(..)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let rows = ids.query_map([token], |row| row.get(0))?;
+        rows.collect()
     }
 }
 
@@ -1089,6 +1146,34 @@ mod tests {
         assert!(!history.forget("/billing", wallet).unwrap());
         assert!(history.forget("/wallet", wallet).unwrap());
         assert_eq!(history.session_of(wallet).unwrap(), None);
+    }
+
+    #[test]
+    fn a_session_is_shared_with_one_conversation_and_goes_with_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        let (wallet, billing) = two_projects(&mut history);
+
+        assert_eq!(history.shared("token").unwrap(), [] as [i64; 0]);
+        history.share("token", wallet).unwrap();
+        history.share("token", wallet).unwrap();
+        history.share("token", billing).unwrap();
+        let mut shared = history.shared("token").unwrap();
+        shared.sort();
+        assert_eq!(shared, [wallet, billing]);
+        assert_eq!(history.shared("another").unwrap(), [] as [i64; 0]);
+
+        // A search of a project also looks in what is shared with it.
+        let sessions = |also: &[i64]| -> Vec<i64> {
+            let hits = history.search_with("/billing", also, "retry", 10, false);
+            hits.unwrap().iter().map(|hit| hit.session).collect()
+        };
+        assert_eq!(sessions(&[]), [] as [i64; 0]);
+        assert_eq!(sessions(&[wallet]), [wallet]);
+
+        // A forgotten session is no longer shared.
+        assert!(history.forget("/wallet", wallet).unwrap());
+        assert_eq!(history.shared("token").unwrap(), [billing]);
     }
 
     #[test]
