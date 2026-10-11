@@ -55,7 +55,7 @@ Control commands:
   #audit [n]      what ran here, what the agent got, and what it did; n: an earlier session
   #sessions       the earlier sessions of this project, from the history
   #forget [n]     remove a session from the history; the current one without n
-  #resume <n>     go back to session n with the agent, when it can (Claude, Codex)
+  #resume <n>     go back to session n with the agent, when it can (Claude, Codex, OpenCode)
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
   #copy code      copy the last code block of the last answer

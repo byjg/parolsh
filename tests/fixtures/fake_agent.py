@@ -51,6 +51,8 @@ The prompt is the text of the last block; earlier blocks are context.
          then the context's new size. Replies nothing.
   /compact codex  like Codex: the same tool call without the sizes, the
          context's new size (4536) coming before its end
+  /compact opencode  like OpenCode: no tool call, the session's information
+         says it started and completed (`_meta["opencode/compaction"]`)
   nap N  starts a tool call "Nap", sleeps N seconds and replies "napped N"
   nap N perm  the same, then asks for permission to edit a file and replies
          "chose:<option id>" too
@@ -308,6 +310,11 @@ def prompt(request):
             update({"sessionUpdate": "tool_call_update", "toolCallId": "c1",
                     "title": "Compact conversation", "status": "completed",
                     "_meta": compaction})
+    elif text == "/compact opencode":
+        for status in ("started", "completed"):
+            update({"sessionUpdate": "session_info_update", "_meta": {
+                "opencode/compaction": {"status": status, "messageId": "msg_1",
+                                        "reason": "manual"}}})
     elif text == "tools":
         update({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a",
                 "kind": "read", "locations": [{"path": "/tmp/a"}]})

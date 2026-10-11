@@ -1463,7 +1463,32 @@ fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate)
                     MaybeUndefined::Undefined => {}
                 }
             }
-            return;
+            // OpenCode says a compaction here, when it starts and when it
+            // ends, without the context's sizes.
+            let status = update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("opencode/compaction")?.get("status")?.as_str());
+            match status {
+                Some("started") => {
+                    if let Ok(mut state) = shared.lock() {
+                        state.compaction = Some(Compaction {
+                            tool: String::new(),
+                            started: Instant::now(),
+                            before: None,
+                            after: None,
+                            took: None,
+                            finished: false,
+                        });
+                    }
+                    Event::Compacting
+                }
+                Some("completed") => match take_compaction(shared, true) {
+                    Some(compacted) => Event::Compacted(compacted),
+                    None => return,
+                },
+                _ => return,
+            }
         }
         SessionUpdate::UsageUpdate(update) => {
             let Ok(mut state) = shared.lock() else { return };
@@ -2056,6 +2081,14 @@ mod tests {
                     (compacted.before, compacted.after),
                     (Some(5061), Some(4536))
                 );
+            }
+            events => panic!("{events:?}"),
+        }
+
+        // Like OpenCode: said with the session's information, without sizes.
+        match &events_of(&agent, "/compact opencode")[..] {
+            [Event::Compacting, Event::Compacted(compacted)] => {
+                assert_eq!((compacted.before, compacted.after), (None, None));
             }
             events => panic!("{events:?}"),
         }
