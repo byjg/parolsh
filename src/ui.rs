@@ -35,6 +35,27 @@ pub fn is_ansi() -> bool {
     std::io::stdout().is_terminal() && std::env::var("TERM").is_ok_and(|term| term != "dumb")
 }
 
+/// Tells the terminal which directory the shell is in (OSC 7), as bash does
+/// on VTE terminals: a new tab or split then opens there. Only on an ANSI
+/// terminal.
+pub fn report_dir(dir: &Path) {
+    use std::io::Write;
+
+    if !is_ansi() {
+        return;
+    }
+    let host = nix::unistd::gethostname().unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(dir_report(&host.to_string_lossy(), dir).as_bytes());
+    let _ = out.flush();
+}
+
+/// The OSC 7 sequence: the directory as a `file://` URI with the machine's
+/// name, which tells the terminal the directory is a local one.
+fn dir_report(host: &str, dir: &Path) -> String {
+    format!("\x1b]7;{}\x1b\\", crate::mention::uri_on(host, dir))
+}
+
 /// Terminal width in columns, 80 when unknown. A terminal can report 0
 /// columns (a pseudo-terminal nobody sized yet), which also means unknown.
 pub fn width() -> usize {
@@ -928,6 +949,19 @@ mod tests {
         let prompt = Prompt::parolsh(&context(Path::new("/tmp"), 0, None), None, false);
 
         assert_eq!(prompt.left, "[no agent] /tmp");
+    }
+
+    #[test]
+    fn the_directory_is_reported_as_a_file_uri_on_this_machine() {
+        assert_eq!(
+            dir_report("laptop", Path::new("/home/me/My notes")),
+            "\x1b]7;file://laptop/home/me/My%20notes\x1b\\"
+        );
+        // A name that could end the sequence early is percent-encoded.
+        assert_eq!(
+            dir_report("laptop", Path::new("/tmp/a\x07b\x1bc")),
+            "\x1b]7;file://laptop/tmp/a%07b%1Bc\x1b\\"
+        );
     }
 
     #[test]

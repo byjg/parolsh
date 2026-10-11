@@ -113,9 +113,14 @@ fn resolve(path: &str, cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// The `file://` URI of an absolute path, with the bytes a URI cannot carry
 /// percent-encoded.
 pub fn uri(path: &Path) -> String {
+    uri_on("", path)
+}
+
+/// The same, naming the machine the path is on: `file://<host><path>`.
+pub fn uri_on(host: &str, path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
 
-    let mut uri = String::from("file://");
+    let mut uri = format!("file://{host}");
     for &byte in path.as_os_str().as_bytes() {
         if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
             uri.push(byte as char);
@@ -233,5 +238,9 @@ mod tests {
             "file:///tmp/My%20notes%231.md"
         );
         assert_eq!(uri(Path::new("/a/ação")), "file:///a/a%C3%A7%C3%A3o");
+        assert_eq!(
+            uri_on("laptop", Path::new("/tmp/My notes")),
+            "file://laptop/tmp/My%20notes"
+        );
     }
 }
