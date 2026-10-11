@@ -246,6 +246,9 @@ impl App {
             keep_private(&path)?;
             editor = editor.with_history(Box::new(FileBackedHistory::with_file(1000, path)?));
         }
+        // Before anything is printed: Tilix warns about a shell that shows
+        // text without having said where it is.
+        ui::report_dir(&self.shell_cwd);
         if ui::is_ansi() {
             self.print_banner();
         }
@@ -260,6 +263,9 @@ impl App {
         }
 
         loop {
+            // On every prompt: a command may have moved the shell, or told
+            // the terminal about a directory of its own.
+            ui::report_dir(&self.shell_cwd);
             if let Some(title) = &self.title {
                 title.set_place(self.place());
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));

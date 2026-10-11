@@ -21,7 +21,7 @@ crossterm = "0.29"
 ctrlc = "3.5.2"
 signal-hook = "0.3"
 libc = "0.2"
-nix = { version = "0.31", features = ["process", "signal", "term"] }
+nix = { version = "0.31", features = ["hostname", "process", "signal", "term"] }
 nu-ansi-term = "0.50"
 reedline = { version = "0.51.0", features = ["external_printer"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

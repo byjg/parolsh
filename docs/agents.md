@@ -881,6 +881,13 @@ parolsh · Fix the batch script             the conversation's title, from the a
   terminals with a title stack (xterm, GNOME Terminal and other VTE terminals,
   kitty, WezTerm, tmux). Elsewhere the last title stays after Parolsh ends.
 
+Parolsh also tells the terminal which directory the shell is in (OSC 7), on
+start and before every prompt, as bash does on VTE terminals. Terminals that
+use it (GNOME Terminal, Tilix, Ptyxis, WezTerm, kitty, foot, iTerm2) open a new
+tab or split in that directory, and Tilix no longer warns about a
+"configuration issue" on a profile that runs Parolsh. It is the shell's
+directory, the one in the prompt, which `!cd` moves.
+
 Only Claude reports background tasks, through the ACP extension of JetBrains'
 AIR (`asyncTasks`), which Parolsh asks for. Other agents show no count; their
 turns still spin in the title.
