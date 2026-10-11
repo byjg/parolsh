@@ -78,6 +78,10 @@ Each answer is a message with an id: m1, m2, ...
 
 Sessions offer config options `effort` (low/high), `fast` (boolean) and
 `model` (one/two).
+
+Each session lists the agent's own commands right after it opens: compact
+(with a hint for its argument), cost and review, and `second` from the second
+session on.
 """
 import json
 import os
@@ -450,6 +454,18 @@ def main():
                 result["modes"] = {"currentModeId": "default",
                                    "availableModes": [{"id": m, "name": m} for m in modes]}
             send({"id": message["id"], "result": result})
+            # Like Claude: the agent's own commands, right after the answer.
+            commands = [
+                {"name": "compact", "description": "Compact the conversation",
+                 "input": {"hint": "[instructions]"}},
+                {"name": "cost", "description": "Show what the session cost"},
+                {"name": "review", "description": "Review a pull request",
+                 "input": {"hint": ""}}]
+            if len(sessions) > 1:
+                commands.append({"name": "second", "description": "Only in later sessions"})
+            send({"method": "session/update", "params": {"sessionId": session_id, "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": commands}}})
         elif method == "session/set_config_option":
             params = message["params"]
             session = sessions[params["sessionId"]]

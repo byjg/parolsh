@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
+use crate::acp::{ActivityWatch, AgentCommand};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::shellenv::{self, is_executable};
 
@@ -43,6 +44,8 @@ pub struct ShellCompleter {
     pub mode: SharedMode,
     /// The bash that completes arguments, when `shell` is bash.
     pub bash: Option<String>,
+    /// The running agent, for its own `/commands`.
+    pub agent: Arc<Mutex<Option<ActivityWatch>>>,
 }
 
 impl Completer for ShellCompleter {
@@ -51,6 +54,11 @@ impl Completer for ShellCompleter {
         let names = self.names.get().map(Vec::as_slice).unwrap_or_default();
         let search_path = std::env::var("PATH").ok();
         let mode = self.mode.get();
+        if let Some(typed) = slash_command(line, pos) {
+            let agent = self.agent.lock().expect("agent lock").clone();
+            let commands = agent.map(|agent| agent.commands()).unwrap_or_default();
+            return CompletionResult::fresh(agent_commands(&commands, typed, pos));
+        }
         let found = completions(line, pos, mode, &cwd, || {
             suggestions(
                 line,
@@ -64,6 +72,38 @@ impl Completer for ShellCompleter {
         });
         CompletionResult::fresh(found)
     }
+}
+
+/// What is typed of one of the agent's own commands, without its `/`, when
+/// the cursor at `pos` is in it: `/name` starts the text for the agent (the
+/// line, or what follows `?`), and Parolsh forwards such lines as typed.
+/// `None` once a space follows the name, and on any other line.
+fn slash_command(line: &str, pos: usize) -> Option<&str> {
+    let text = line.trim_start();
+    let text = text.strip_prefix('?').map_or(text, str::trim_start);
+    let start = line.len() - text.len();
+    let typed = line.get(start..pos)?.strip_prefix('/')?;
+    (!typed.contains(char::is_whitespace)).then_some(typed)
+}
+
+/// The agent's commands that start with `typed`, to replace `/typed` before
+/// `pos`, each with what the agent says of it.
+fn agent_commands(commands: &[AgentCommand], typed: &str, pos: usize) -> Vec<Suggestion> {
+    commands
+        .iter()
+        .filter(|command| command.name.starts_with(typed))
+        .map(|command| {
+            let description = match &command.hint {
+                Some(hint) if !hint.is_empty() => format!("{} ({hint})", command.description),
+                _ => command.description.clone(),
+            };
+            Suggestion {
+                span: Span::new(pos - typed.len() - 1, pos),
+                description: Some(description).filter(|text| !text.is_empty()),
+                ..suggestion(format!("/{}", command.name), true)
+            }
+        })
+        .collect()
 }
 
 /// What Tab completes at `pos`: a `#` line's command name or `#cd`
@@ -523,6 +563,78 @@ mod tests {
         assert_eq!(shell("cat no"), ["cat notes.txt "]);
         assert_eq!(shell("!too"), ["!tool "]);
         assert!(shell("?to").is_empty());
+    }
+
+    fn command(name: &str, description: &str, hint: Option<&str>) -> AgentCommand {
+        AgentCommand {
+            name: name.to_string(),
+            description: description.to_string(),
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_slash_that_starts_the_agents_text_is_one_of_its_commands() {
+        fn typed(line: &str) -> Option<&str> {
+            slash_command(line, line.len())
+        }
+
+        assert_eq!(typed("/"), Some(""));
+        assert_eq!(typed("/comp"), Some("comp"));
+        assert_eq!(typed("  /comp"), Some("comp"));
+        // In shell mode, text for the agent follows `?`.
+        assert_eq!(typed("?/comp"), Some("comp"));
+        assert_eq!(typed("? /comp"), Some("comp"));
+        // After its name, the rest is the command's.
+        assert_eq!(typed("/compact keep"), None);
+        assert_eq!(typed("/compact "), None);
+        // Not a command: a path in a sentence, a shell line, a `#` line.
+        assert_eq!(typed("look at /etc"), None);
+        assert_eq!(typed("!/usr/bin/ls"), None);
+        assert_eq!(typed("#cd /tm"), None);
+        assert_eq!(typed("hello"), None);
+        // The cursor decides: back in the name, it is completed again.
+        assert_eq!(slash_command("/compact keep", 4), Some("com"));
+    }
+
+    #[test]
+    fn the_agents_commands_complete_with_what_the_agent_says_of_them() {
+        let commands = [
+            command(
+                "compact",
+                "Compact the conversation",
+                Some("[instructions]"),
+            ),
+            command("cost", "Show what the session cost", None),
+            command("review", "", Some("")),
+        ];
+        let found = |typed: &str| -> Vec<(String, Option<String>)> {
+            agent_commands(&commands, typed, typed.len() + 1)
+                .into_iter()
+                .map(|s| (s.value, s.description))
+                .collect()
+        };
+        let said = |text: &str| Some(text.to_string());
+
+        assert_eq!(
+            found("co"),
+            [
+                (
+                    "/compact".to_string(),
+                    said("Compact the conversation ([instructions])")
+                ),
+                ("/cost".to_string(), said("Show what the session cost")),
+            ]
+        );
+        assert_eq!(found("").len(), 3);
+        assert_eq!(found("r"), [("/review".to_string(), None)]);
+        assert!(found("x").is_empty());
+
+        // It replaces what was typed, the slash included, and a space follows.
+        let line = "?/co";
+        let suggestion = &agent_commands(&commands, "co", line.len())[0];
+        assert_eq!((suggestion.span.start, suggestion.span.end), (1, 4));
+        assert!(suggestion.append_whitespace);
     }
 
     #[test]

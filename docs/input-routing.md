@@ -111,8 +111,9 @@ in. `#cd` takes the path as typed, so names with spaces are not escaped there
 
 In text for the agent (`?text` in shell mode), `Tab` completes `@path` with a
 file or directory name from where your commands run, escaped like on a shell
-line (`@My\ Notes.md`); see [Mentioning files](#mentioning-files). Other
-words of the text have no completion.
+line (`@My\ Notes.md`); see [Mentioning files](#mentioning-files). A `/` that
+starts the text completes one of the agent's own commands, see
+[`/command`](#command-1). Other words of the text have no completion.
 
 ## `!command`
 
@@ -255,6 +256,26 @@ Not on `!` lines: there, `@` is the shell's.
 
 Lines starting with `/` belong to the agent. Parolsh reserves no `/` commands
 and forwards the line as typed, so the agent's own slash commands work.
+
+`Tab` completes them, from the list the agent itself sends when a
+conversation opens, and again when it changes:
+
+```text
+[claude] ~/projects/wallet ✦ /co<Tab>
+/compact  Compact the conversation ([instructions])
+/cost     Show what the session cost
+```
+
+- One match goes into the line; several show in a menu, each with what the
+  agent says of it and, in parentheses, what it takes after its name.
+- They are the running agent's, and they differ: `/compact` for Claude,
+  Codex, OpenCode and Goose, `/compress` for Qwen Code. Those five and Kilo
+  Code send their list, with their skills in it; an agent that sends none has
+  nothing to complete. A command the agent takes without listing it (Kilo's
+  `/compact`) still works when typed.
+- Only the command's name, where it starts the text for the agent (after `?`
+  in shell mode). What follows it is not completed, and `/` elsewhere in a
+  sentence is a path like any other word.
 
 ## `#command`
 

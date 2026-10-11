@@ -1720,3 +1720,33 @@ fn raw_prints_the_answer_without_the_layout() {
     );
     assert!(!clip.exists(), "nothing was copied");
 }
+
+/// Tab after `/` completes the agent's own commands, from the list the agent
+/// sends: at once when one matches, in a menu with what the agent says of
+/// each otherwise. In shell mode, after `?`.
+#[test]
+fn tab_completes_the_agents_own_commands() {
+    let lines = [
+        "key:/rev\\t",
+        "key:\\r",
+        "key:/co\\t",
+        "key:\\x03",
+        "!",
+        "key:?/cos\\t",
+        "key:\\r",
+    ];
+    let screen = with_fake_agent_on("", &lines, "xterm-256color");
+
+    // One match: completed, and sent as typed.
+    assert!(screen.contains("] /review\n"), "{screen}");
+    // Several: each with its description, and the hint for its argument.
+    assert!(
+        screen.contains("/compact  Compact the conversation ([instructions])"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("/cost     Show what the session cost"),
+        "{screen}"
+    );
+    assert!(screen.contains("] /cost\n"), "{screen}");
+}

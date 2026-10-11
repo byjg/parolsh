@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Block, ForkOf, Forks, Start};
+use crate::acp::{ActivityWatch, AgentHandle, Block, ForkOf, Forks, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
@@ -76,6 +76,8 @@ pub struct App {
     shell_changes: shell::Changes,
     /// `shell_cwd`, shared with the Tab completion.
     completion_cwd: Arc<Mutex<PathBuf>>,
+    /// The running agent, shared with the Tab completion of its commands.
+    completion_agent: Arc<Mutex<Option<ActivityWatch>>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
     project_root: Option<PathBuf>,
@@ -184,6 +186,7 @@ impl App {
         }
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
+            completion_agent: Arc::default(),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
             shell_changes: shell::Changes::default(),
@@ -270,6 +273,9 @@ impl App {
                 title.set_place(self.place());
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
             }
+            // The agent may have changed: Tab completes its own commands.
+            *self.completion_agent.lock().expect("agent lock") =
+                self.agent.as_ref().map(AgentHandle::activity);
             if let (Some(agent), Some(history)) = (&self.agent, self.audit.history_mut()) {
                 // Until the agent says, keep what the history has: a resumed
                 // session keeps its title.
@@ -919,6 +925,7 @@ impl App {
             names,
             mode: self.mode.clone(),
             bash: is_bash.then_some(shell),
+            agent: self.completion_agent.clone(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
