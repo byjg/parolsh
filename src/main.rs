@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long, value_enum, conflicts_with = "command")]
     input: Option<input::Mode>,
 
-    /// Go back to session N of this project, like `#resume N` (see `#sessions`)
+    /// Go back to session N, like `#resume N` (see `#sessions`); of another project, after asking
     #[arg(
         long,
         value_name = "N",

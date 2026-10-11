@@ -772,12 +772,37 @@ fn the_history_keeps_sessions_across_runs() {
     // The command's line is kept, not what it printed.
     assert!(!audit.iter().any(|line| line == "local"), "{audit:#?}");
 
-    let screen = run_in(home.path(), "", &["#forget 1", "#audit 1"], "dumb", false);
+    // It asks first, saying which session: anything but `y` keeps it.
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#forget 1", "", "#audit 1"],
+        "dumb",
+        false,
+    );
+    assert!(screen.contains("Session 1: \"perm\", "), "{screen}");
+    assert!(
+        screen.contains("Remove it from the history? [y/N]"),
+        "{screen}"
+    );
+    assert!(screen.contains("Session 1 is kept."), "{screen}");
+    assert!(screen.contains("USER     → fake: perm"), "{screen}");
+
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#forget 1", "y", "#audit 1"],
+        "dumb",
+        false,
+    );
     assert!(
         screen.contains("Session 1 removed from the history."),
         "{screen}"
     );
-    assert!(screen.contains("no session 1 in this project"), "{screen}");
+    assert!(
+        screen.contains("parolsh: no session 1, see #sessions all"),
+        "{screen}"
+    );
 }
 
 /// A search of the history as the agent's tools do it: `parolsh mcp`, with
@@ -1064,7 +1089,7 @@ fn the_resume_and_continue_flags_go_back_at_start() {
 
     let screen = run_in(home.path(), "--resume 9", &[], "dumb", false);
     assert!(
-        screen.contains("parolsh: no session 9 in this project"),
+        screen.contains("parolsh: no session 9, see #sessions all"),
         "{screen}"
     );
     let empty = fake_agent_home_with(&[]);
@@ -1749,4 +1774,218 @@ fn tab_completes_the_agents_own_commands() {
         "{screen}"
     );
     assert!(screen.contains("] /cost\n"), "{screen}");
+}
+
+/// A project directory with a session in it: `message` was sent there, in
+/// the history of `home`.
+fn session_in(home: &std::path::Path, message: &str) -> tempfile::TempDir {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".parolsh")).unwrap();
+    let cd = format!("#cd {}", project.path().display());
+    run_in(home, "", &[cd.as_str(), message], "dumb", false);
+    project
+}
+
+/// `#sessions <text>` finds the sessions of this project where the text was
+/// said; `#sessions all` lists those of every project, with their directory,
+/// and `#sessions all <text>` searches them.
+#[test]
+fn sessions_are_found_by_their_text_here_or_in_every_project() {
+    let home = fake_agent_home_with(&[]);
+    let billing = session_in(home.path(), "the billing rewrite is called falcon");
+    let wallet = session_in(home.path(), "why does the wallet retry twice");
+    let here = format!("#cd {}", wallet.path().display());
+    let lines = [
+        here.as_str(),
+        "!echo falcon is not said to the agent",
+        "#sessions retry",
+        "#sessions falcon",
+        "#sessions all",
+        "#sessions all falcon",
+        "#sessions nothing-has-this",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    let after = |command: &str| {
+        let from = screen.rfind(&format!("✦ {command}\n")).expect(&screen);
+        let rest = &screen[from + command.len() + 5..];
+        rest[..rest.find("[fake").unwrap_or(rest.len())].to_string()
+    };
+
+    // In this project: the session, and the line the text is in.
+    let found = after("#sessions retry");
+    assert_eq!(sessions_listed(&found), 1, "{found}");
+    assert!(
+        found.contains("you: why does the wallet [retry] twice"),
+        "{found}"
+    );
+    // Your commands are searched too, and said to be commands.
+    let found = after("#sessions falcon");
+    assert_eq!(sessions_listed(&found), 1, "{found}");
+    assert!(
+        found.contains("command: echo [falcon] is not said"),
+        "{found}"
+    );
+
+    // Every project: both, each with its directory.
+    let all = after("#sessions all");
+    assert_eq!(sessions_listed(&all), 3, "{all}");
+    let name = |dir: &tempfile::TempDir| {
+        dir.path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        all.contains(&name(&billing)) && all.contains(&name(&wallet)),
+        "{all}"
+    );
+    let found = after("#sessions all falcon");
+    assert_eq!(sessions_listed(&found), 2, "{found}");
+    assert!(
+        found.contains("you: the billing rewrite is called [falcon]"),
+        "{found}"
+    );
+
+    assert!(
+        after("#sessions nothing-has-this").contains(
+            "No session of this project has `nothing-has-this`. \
+             #sessions all nothing-has-this looks in every project."
+        ),
+        "{screen}"
+    );
+}
+
+/// `#resume <n>` for a session of another project says what it is and asks
+/// before going there; `#audit <n>` only looks, and `#forget <n>` stays kept
+/// to this project.
+#[test]
+fn a_session_of_another_project_is_resumed_after_asking() {
+    let home = fake_agent_home_with(&[]);
+    let billing = session_in(home.path(), "the billing rewrite");
+    let wallet = session_in(home.path(), "the wallet retries");
+    let here = format!("#cd {}", wallet.path().display());
+    let there = billing.path().canonicalize().unwrap();
+
+    // Not `y`: nothing moves.
+    let lines = [
+        here.as_str(),
+        "#audit 1",
+        "#forget 1",
+        "#resume 1",
+        "n",
+        "who",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        screen.contains("USER     → fake: the billing rewrite"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: no session 1 in this project, see #sessions"),
+        "{screen}"
+    );
+    let asked = screen
+        .find("Session 1: \"the billing rewrite\", ")
+        .expect(&screen);
+    assert!(screen[asked..].contains("Go there? [y/N]"), "{screen}");
+    assert!(screen.contains("Staying here."), "{screen}");
+    assert!(!screen.contains("Resumed session 1"), "{screen}");
+    assert!(
+        !screen.contains(&format!("|{}] who", there.display())),
+        "{screen}"
+    );
+
+    // `y`: there, with that project's conversation.
+    let lines = [here.as_str(), "#resume 1", "y", "who"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+    assert!(
+        screen.contains(&format!("|{}] who", there.display())),
+        "{screen}"
+    );
+
+    // From the command line, in any directory, asking too.
+    let screen = run_in(home.path(), "--resume 1", &["y", "who"], "dumb", false);
+    assert!(screen.contains("Go there? [y/N]"), "{screen}");
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+}
+
+/// `#resume <text>` opens the one session that has the text, and lists them
+/// when several do. A session whose directory is gone is not resumed.
+#[test]
+fn a_session_is_resumed_by_its_text() {
+    let home = fake_agent_home_with(&[]);
+    let project = session_in(home.path(), "the retry logic of the client");
+    let here = format!("#cd {}", project.path().display());
+    run_in(
+        home.path(),
+        "",
+        &[here.as_str(), "the timeout of the client"],
+        "dumb",
+        false,
+    );
+
+    let lines = [
+        here.as_str(),
+        "#resume retry",
+        "#resume client",
+        "#resume nothing-has-this",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+    assert!(
+        screen.contains("Several sessions have `client`: #resume <n> for the one you want."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: no session of this project has `nothing-has-this`"),
+        "{screen}"
+    );
+
+    // From elsewhere: `all`, and the question.
+    let lines = ["#resume retry", "#resume all retry", "y"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        screen.contains("#resume all retry looks in every project"),
+        "{screen}"
+    );
+    assert!(screen.contains("Go there? [y/N]"), "{screen}");
+    assert!(screen.contains("Resumed session 1"), "{screen}");
+
+    let gone = project.path().to_path_buf();
+    drop(project);
+    let screen = run_in(home.path(), "", &["#resume 1", "#audit 1"], "dumb", false);
+    assert!(
+        screen.contains(&format!(
+            "parolsh: the directory of session 1 no longer exists ({}): #audit 1 shows it",
+            gone.canonicalize().unwrap_or(gone).display()
+        )),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("USER     → fake: the retry logic"),
+        "{screen}"
+    );
+}
+
+/// Tab after `#resume`, `#audit` and `#forget` lists this project's sessions
+/// with their titles, to pick one instead of typing its number.
+#[test]
+fn tab_lists_the_sessions_to_pick_one() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["the retry logic"], "dumb", false);
+    run_in(home.path(), "", &["the timeout"], "dumb", false);
+
+    let lines = ["key:#resume \\t", "key:\\x03", "key:#audit 1\\t", "key:\\r"];
+    let screen = run_in(home.path(), "", &lines, "xterm-256color", false);
+
+    assert!(screen.contains("  fake  the timeout"), "{screen}");
+    assert!(screen.contains("  fake  the retry logic"), "{screen}");
+    // One match goes into the line.
+    assert!(
+        screen.contains("USER     → fake: the retry logic"),
+        "{screen}"
+    );
 }

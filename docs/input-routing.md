@@ -107,7 +107,10 @@ have in common, and the next `Tab` shows them in a menu (`Tab` and
 On `#` lines, `Tab` completes the command's name (`#a` gives `#agent` and
 `#audit`), and after `#cd` a directory, from the directory your commands run
 in. `#cd` takes the path as typed, so names with spaces are not escaped there
-(`#cd My Projects/`). Other `#` commands have no arguments to complete.
+(`#cd My Projects/`). After `#resume`, `#audit` and `#forget`, it lists this
+project's sessions to pick one, see
+[Resuming a session](#resuming-a-session). Other `#` commands have no
+arguments to complete.
 
 In text for the agent (`?text` in shell mode), `Tab` completes `@path` with a
 file or directory name from where your commands run, escaped like on a shell
@@ -297,10 +300,13 @@ conversation opens, and again when it changes:
 | `#project` | Show the project root |
 | `#project init` | Create `.parolsh/` in the current directory |
 | `#audit` | What happened since Parolsh started, see [`#audit`](#audit) |
-| `#audit <n>` | What happened in session `n` of this project, from the [history](#the-history-of-sessions) |
+| `#audit <n>` | What happened in session `n`, of any project, from the [history](#the-history-of-sessions) |
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
-| `#forget [n]` | Remove session `n` from the history; the current one without `n` |
-| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so |
+| `#sessions <text>` | The ones where the text was said, or that it titles, see [Finding a session](#finding-a-session) |
+| `#sessions all [text]` | The same over every project |
+| `#forget [n]` | Remove session `n` of this project from the history, after asking; the current one without `n` |
+| `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so. A session of another project is resumed after asking |
+| `#resume <text>` | Go back to the one session of this project that has the text; `#resume all <text>` looks in every project |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
 | `#copy code` | Copy the last code block of the last answer |
@@ -416,13 +422,51 @@ project.
   so), and `commands = "off"` does not save them. A `!+` command is always
   saved and returned to the agent: its output was sent to it.
 - Sessions belong to the project (its root, or the agent's directory without
-  one): `#sessions`, `#audit <n>` and `#forget` only see this project's.
+  one): `#sessions` lists this project's, and `#forget` only removes one of
+  them. Their numbers are the same everywhere, never given twice: see
+  [Finding a session](#finding-a-session) for the other projects'.
 - A session idle for more than 90 days is removed when Parolsh starts;
   `history_days` changes that, and `0` saves nothing. `#forget` removes one
   now, and `#new private` starts a conversation that is not saved.
 
 `history_days` and `commands` can only be set in the global
 [configuration](configuration.md#keys).
+
+### Finding a session
+
+`#sessions` takes the text to look for, and `all` for every project:
+
+| | |
+|---|---|
+| `#sessions` | This project's sessions |
+| `#sessions <text>` | Those where the text was said, or that it titles |
+| `#sessions all` | The sessions of every project |
+| `#sessions all <text>` | The same search over every project |
+
+```text
+[claude] ~/projects/wallet ✦ #sessions retry
+    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  Add retries to the client
+        agent: It [retries] once, with no backoff. …
+[claude] ~/projects/wallet ✦ #sessions all falcon
+    27  2026-10-02 09:14  codex      18 entries                     billing  Billing rewrite
+        you: the rewrite is called [falcon]
+    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  wallet   Add retries to the client
+        command: cargo test [falcon]
+```
+
+- Under each session, the line the text is in, and whose it is: yours, the
+  agent's, or one of your `!command` lines, which are searched too. This
+  search is yours, at the prompt: the agent's own
+  [search](#the-agent-can-search-the-history) stays in this project and
+  leaves your commands out.
+- It matches words, not meanings, and all of them: `retry client` finds the
+  entries that have both.
+- Newest first, 20 at most; a line says how many more there are.
+- With `all`, each session's project, by the name of its directory.
+  `#resume` says the whole path before going there.
+- `#audit <n>` shows a session of any project: it only looks.
+- Parolsh reads its history itself: no agent is asked, and it works without
+  one.
 
 ### Resuming a session
 
@@ -441,6 +485,35 @@ Resumed session 11: the agent remembers that conversation.
 From the command line, `parolsh --resume 11` starts in that session, and
 `parolsh --continue` in the last one of the project. Either way, Parolsh first
 shows the session's last exchanges, so you see where it was.
+
+`#resume <text>` goes back to the one session of this project that has the
+text, as `#sessions <text>` finds it; when several have it, it lists them.
+`#resume all <text>` looks in every project.
+
+**A session of another project** is said, and asked about, before anything
+moves: going there is what `#cd` does (that project's configuration, maybe
+another agent), and it ends the conversation you are in.
+
+```text
+[claude] ~/projects/wallet ✦ #resume 27
+Session 27: "Billing rewrite", ~/projects/billing, 2026-10-02 09:14.
+Go there? [y/N] y
+Now in ~/projects/billing (project).
+Resumed session 27: the agent remembers that conversation.
+```
+
+Anything but `y` stays where you are. `parolsh --resume 27` from another
+directory asks the same.
+
+A number is easily mistyped, and the one next to it is a session too:
+
+- `Tab` after `#resume`, `#audit` or `#forget` lists this project's sessions
+  with their date, agent and title, to pick one instead.
+- `#forget` says which session it is and asks before removing it: that one
+  cannot be undone.
+- A session whose directory no longer exists, or whose agent is not
+  configured any more, is not resumed, and Parolsh says which; `#audit <n>`
+  still shows it.
 
 ### Showing the conversation again
 

@@ -17,7 +17,7 @@ use crate::acp::{ActivityWatch, AgentHandle, Block, ForkOf, Forks, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
-use crate::history::{History, Session, SessionStart};
+use crate::history::{Found, History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::jobs::{self, Job};
 use crate::title::Title;
@@ -54,8 +54,11 @@ Control commands:
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
   #audit [n]      what ran here, what the agent got, and what it did; n: an earlier session
   #sessions       the earlier sessions of this project, from the history
-  #forget [n]     remove a session from the history; the current one without n
+  #sessions <text>  the ones where the text was said
+  #sessions all [text]  the same over every project
+  #forget [n]     remove a session from the history, after asking; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex, OpenCode)
+  #resume <text>  go back to the one session that has the text (all <text>: in any project)
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
   #copy code      copy the last code block of the last answer
@@ -78,6 +81,9 @@ pub struct App {
     completion_cwd: Arc<Mutex<PathBuf>>,
     /// The running agent, shared with the Tab completion of its commands.
     completion_agent: Arc<Mutex<Option<ActivityWatch>>>,
+    /// The history and the project, shared with the Tab completion of the
+    /// sessions' numbers.
+    completion_sessions: Arc<Mutex<Option<(PathBuf, String)>>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
     project_root: Option<PathBuf>,
@@ -187,6 +193,7 @@ impl App {
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             completion_agent: Arc::default(),
+            completion_sessions: Arc::default(),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
             shell_changes: shell::Changes::default(),
@@ -276,6 +283,9 @@ impl App {
             // The agent may have changed: Tab completes its own commands.
             *self.completion_agent.lock().expect("agent lock") =
                 self.agent.as_ref().map(AgentHandle::activity);
+            // And the project: Tab lists its sessions after `#resume`.
+            *self.completion_sessions.lock().expect("sessions lock") =
+                self.history_db.clone().map(|db| (db, self.project_key()));
             if let (Some(agent), Some(history)) = (&self.agent, self.audit.history_mut()) {
                 // Until the agent says, keep what the history has: a resumed
                 // session keeps its title.
@@ -535,10 +545,11 @@ impl App {
             lines
         } else {
             let id = session_number(args)?;
+            // Of any project: looking changes nothing.
             let entries = self
                 .history()?
-                .entries(&self.project_key(), id)?
-                .with_context(|| format!("no session {id} in this project, see #sessions"))?;
+                .entries_of(id)?
+                .with_context(|| format!("no session {id}, see #sessions all"))?;
             audit::stored_lines(&entries, ui::width())
         };
         for line in lines {
@@ -547,15 +558,37 @@ impl App {
         Ok(())
     }
 
-    /// `#sessions`: the sessions of this project in the history, newest
-    /// first; `*` marks the current one.
-    fn sessions_command(&self) -> Result<()> {
+    /// `#sessions [all] [text]`: the sessions in the history, newest first,
+    /// of this project or of `all`, and with `text` only those where it was
+    /// said or that it titles. `*` marks the current one.
+    fn sessions_command(&self, args: &str) -> Result<()> {
+        let (everywhere, text) = scope_and_text(args);
         let history = self.history()?;
-        let sessions = history.sessions(&self.project_key())?;
-        if sessions.is_empty() {
-            println!("No sessions saved in this project yet.");
+        let project = self.project_key();
+        let scope = (!everywhere).then_some(project.as_str());
+        let found: Vec<Found> = match (text.is_empty(), scope) {
+            (false, _) => history.find(scope, text)?,
+            (true, Some(project)) => unplaced(history.sessions(project)?),
+            (true, None) => unplaced(history.all_sessions()?),
+        };
+        match (found.is_empty(), text.is_empty(), everywhere) {
+            (false, ..) => self.print_sessions(&found, everywhere),
+            (true, true, false) => println!("No sessions saved in this project yet."),
+            (true, true, true) => println!("No sessions saved yet."),
+            (true, false, false) => println!(
+                "No session of this project has `{text}`. #sessions all {text} looks in every project."
+            ),
+            (true, false, true) => println!("No session has `{text}`."),
         }
-        let current = history.current();
+        Ok(())
+    }
+
+    /// The lines of `#sessions`: at most `SESSIONS_SHOWN`, each with where
+    /// the text was found, and with its directory when they are of `all`
+    /// projects.
+    fn print_sessions(&self, found: &[Found], everywhere: bool) {
+        let current = self.audit.history().and_then(History::current);
+        let home = home();
         // What each used, when an agent reported it: `1.2M tok  $4.31`.
         let used = |session: &Session| {
             let usage = &session.usage;
@@ -568,19 +601,24 @@ impl App {
                 tokens => format!("{:>4} tok  {cost:>7}", ui::tokens(tokens)),
             }
         };
-        let column = sessions.iter().map(|s| used(s).len()).max().unwrap_or(0);
-        let column = if column > 0 { column + 2 } else { 0 };
-        for session in sessions {
-            // Without a message, the session is named by its first command.
-            let title = match (&session.title, &session.first_command) {
-                (Some(title), _) => Some(audit::excerpt(title, 60)),
-                (None, Some(command)) => {
-                    Some(format!("(commands only) !{}", audit::excerpt(command, 44)))
-                }
-                (None, None) => None,
-            };
+        // Of every project: which one, by its directory's name. `#resume`
+        // says the whole path before going there.
+        let place = |session: &Session| match everywhere {
+            true => project_name(&session.project, home.as_deref()),
+            false => String::new(),
+        };
+        let agent = |session: &Session| session.agent.clone().unwrap_or_else(|| "-".to_string());
+        let shown = &found[..found.len().min(SESSIONS_SHOWN)];
+        let width = |text: &dyn Fn(&Session) -> String| {
+            let widest = shown.iter().map(|f| text(&f.session).chars().count()).max();
+            widest
+                .filter(|&width| width > 0)
+                .map_or(0, |width| width + 2)
+        };
+        let (column, places, agents) = (width(&used), width(&place), width(&agent));
+        for Found { session, place: at } in shown {
             let line = format!(
-                "{} {:>4}  {}  {:<8} {:>4} entries  {:<column$}{}",
+                "{} {:>4}  {}  {:<agents$}{:>4} entries  {:<column$}{:<places$}{}",
                 if current == Some(session.id) {
                     "*"
                 } else {
@@ -588,14 +626,27 @@ impl App {
                 },
                 session.id,
                 session.started,
-                session.agent.as_deref().unwrap_or("-"),
+                agent(session),
                 session.entries,
-                used(&session),
-                title.unwrap_or_default(),
+                used(session),
+                place(session),
+                session_title(session, 60),
             );
-            println!("{}", audit::excerpt(&line, ui::width()));
+            // Cut, not trimmed: the numbers stay in their column.
+            println!("{}", audit::cut(&line, ui::width()));
+            if let Some((kind, snippet)) = at {
+                let who = match kind.as_str() {
+                    "message" | "reply" => "you",
+                    "command" | "capture" => "command",
+                    _ => "agent",
+                };
+                let line = format!("        {who}: {}", audit::excerpt(snippet, 200));
+                println!("{}", ui::dim(&audit::cut(&line, ui::width())));
+            }
         }
-        Ok(())
+        if found.len() > shown.len() {
+            println!("… and {} more.", found.len() - shown.len());
+        }
     }
 
     /// `#forget [n]`: removes session `n`, or the current one, from the
@@ -612,6 +663,17 @@ impl App {
                 .context("nothing of this conversation is saved yet")?,
             n => session_number(n)?,
         };
+        // Kept to this project: a wrong number does not remove a session of
+        // one you are not looking at. And asked first: it cannot be undone.
+        let session = history
+            .session_of(id)?
+            .filter(|session| session.project == project)
+            .with_context(|| format!("no session {id} in this project, see #sessions"))?;
+        println!("{}", describe(&session));
+        if !confirm("Remove it from the history?") {
+            println!("Session {id} is kept.");
+            return Ok(());
+        }
         anyhow::ensure!(
             history.forget(&project, id)?,
             "no session {id} in this project, see #sessions"
@@ -623,7 +685,30 @@ impl App {
     /// `#resume <n>`: goes back to session `n` of this project with its
     /// agent, in its directory, and goes on saving to it.
     fn resume_command(&mut self, args: &str) -> Result<()> {
-        self.resume_session(session_number(args)?)
+        if let Ok(id) = args.parse::<i64>() {
+            return self.resume_session(session_number(&id.to_string())?);
+        }
+        // By what it is about: the one session that matches.
+        let (everywhere, text) = scope_and_text(args);
+        anyhow::ensure!(
+            !text.is_empty(),
+            "#resume <n>, or #resume <text> for the session that has it, see #sessions"
+        );
+        let project = self.project_key();
+        let scope = (!everywhere).then_some(project.as_str());
+        let found = self.history()?.find(scope, text)?;
+        match found.as_slice() {
+            [] if everywhere => anyhow::bail!("no session has `{text}`"),
+            [] => anyhow::bail!(
+                "no session of this project has `{text}`: #resume all {text} looks in every project"
+            ),
+            [one] => self.resume_session(one.session.id),
+            _ => {
+                self.print_sessions(&found, everywhere);
+                println!("Several sessions have `{text}`: #resume <n> for the one you want.");
+                Ok(())
+            }
+        }
     }
 
     /// `--resume <n>` or `--continue`. The agent is still starting: the
@@ -644,14 +729,41 @@ impl App {
     }
 
     fn resume_session(&mut self, id: i64) -> Result<()> {
-        let session = self
-            .history()?
-            .resumable(&self.project_key(), id)?
-            .with_context(|| format!("no session {id} in this project, see #sessions"))?;
+        let history = self.history()?;
+        let found = history
+            .session_of(id)?
+            .with_context(|| format!("no session {id}, see #sessions all"))?;
+        let session = history
+            .resumable(id)?
+            .with_context(|| format!("no session {id}, see #sessions all"))?;
         // A session of shell commands only: the agent has no conversation
         // to go back to (it keeps one from its first message), so it goes on
         // with the one it has, and the session with what follows.
         let conversation = session.messages > 0;
+        // What cannot be resumed as it was is said before going anywhere.
+        // Agents are the global configuration's: the same in every project.
+        anyhow::ensure!(
+            Path::new(&session.cwd).is_dir(),
+            "the directory of session {id} no longer exists ({}): #audit {id} shows it",
+            session.cwd
+        );
+        if let (true, Some(name)) = (conversation, &session.agent) {
+            anyhow::ensure!(
+                self.config.agents.contains_key(name),
+                "session {id} was with `{name}`, which is not configured any more: \
+                 #audit {id} shows it"
+            );
+        }
+        // Another project is another configuration, maybe another agent, and
+        // the end of the conversation here: asked first, a number is easily
+        // mistyped.
+        if found.project != self.project_key() {
+            println!("{}", describe(&found));
+            if !confirm("Go there?") {
+                println!("Staying here.");
+                return Ok(());
+            }
+        }
         if Path::new(&session.cwd) != self.cwd {
             self.change_dir(&session.cwd)?;
         }
@@ -868,7 +980,7 @@ impl App {
                     "copy" => self.copy_command(args),
                     "raw" => self.raw_command(args),
                     "audit" => self.audit_command(args),
-                    "sessions" => self.sessions_command(),
+                    "sessions" => self.sessions_command(args),
                     "jobs" => {
                         self.jobs_command();
                         Ok(())
@@ -926,6 +1038,7 @@ impl App {
             mode: self.mode.clone(),
             bash: is_bash.then_some(shell),
             agent: self.completion_agent.clone(),
+            sessions: self.completion_sessions.clone(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
@@ -1732,6 +1845,75 @@ fn state_dir() -> Option<PathBuf> {
 }
 
 /// A session number, as `#sessions` lists them.
+/// `all` and what follows it, or the text alone: `#sessions all retry`.
+fn scope_and_text(args: &str) -> (bool, &str) {
+    match args.split_once(char::is_whitespace) {
+        Some(("all", text)) => (true, text.trim()),
+        None if args == "all" => (true, ""),
+        _ => (false, args),
+    }
+}
+
+/// A project as `#sessions all` names it: its directory's name, `~` for
+/// the home directory, cut to a column's width.
+fn project_name(root: &str, home: Option<&Path>) -> String {
+    let root = Path::new(root);
+    let name = match (Some(root) == home, root.file_name()) {
+        (true, _) => "~".to_string(),
+        (false, Some(name)) => name.to_string_lossy().into_owned(),
+        (false, None) => root.display().to_string(),
+    };
+    audit::cut(&name, 20)
+}
+
+/// How many sessions `#sessions` shows.
+const SESSIONS_SHOWN: usize = 20;
+
+/// Sessions listed, not found by a text.
+fn unplaced(sessions: Vec<Session>) -> Vec<Found> {
+    let found = |session| Found {
+        session,
+        place: None,
+    };
+    sessions.into_iter().map(found).collect()
+}
+
+/// What a session is called: the agent's title or the first message, or,
+/// without a message, its first command.
+fn session_title(session: &Session, width: usize) -> String {
+    match (&session.title, &session.first_command) {
+        (Some(title), _) => audit::excerpt(title, width),
+        (None, Some(command)) => {
+            format!(
+                "(commands only) !{}",
+                audit::excerpt(command, width.saturating_sub(16))
+            )
+        }
+        (None, None) => String::new(),
+    }
+}
+
+/// `Session 27: "Billing rewrite", ~/projects/billing, 2026-10-02 09:14.`:
+/// what a number stands for, said before acting on it.
+fn describe(session: &Session) -> String {
+    format!(
+        "Session {}: \"{}\", {}, {}.",
+        session.id,
+        session_title(session, 60),
+        ui::short_path(Path::new(&session.cwd), home().as_deref()),
+        session.started
+    )
+}
+
+/// Asks a question to answer with `y`; anything else, and no input, is no.
+fn confirm(question: &str) -> bool {
+    print!("{question} [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 fn session_number(text: &str) -> Result<i64> {
     text.parse()
         .ok()
@@ -1742,6 +1924,31 @@ fn session_number(text: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_is_a_scope_and_the_rest_is_the_text() {
+        assert_eq!(scope_and_text(""), (false, ""));
+        assert_eq!(scope_and_text("retry logic"), (false, "retry logic"));
+        assert_eq!(scope_and_text("all"), (true, ""));
+        assert_eq!(scope_and_text("all retry logic"), (true, "retry logic"));
+        // Only as a word of its own.
+        assert_eq!(scope_and_text("allocator"), (false, "allocator"));
+    }
+
+    #[test]
+    fn a_project_is_named_by_its_directory() {
+        let home = Path::new("/home/you");
+        assert_eq!(
+            project_name("/home/you/projects/wallet", Some(home)),
+            "wallet"
+        );
+        assert_eq!(project_name("/home/you", Some(home)), "~");
+        assert_eq!(project_name("/", Some(home)), "/");
+        assert_eq!(
+            project_name("/srv/a-directory-with-a-very-long-name", None),
+            "a-directory-with-a-…"
+        );
+    }
 
     #[test]
     fn a_background_answer_is_handed_over_with_its_request_and_cut_at_the_limit() {
