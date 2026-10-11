@@ -876,7 +876,7 @@ fn commands_can_be_shared_with_the_agent_or_not_saved() {
             screen.contains("the agent can read your !commands in the history"),
             "{setting}: {screen}"
         );
-        assert!(screen.contains(r#""--commands"]"#), "{setting}: {screen}");
+        assert!(screen.contains(r#""--commands", "#), "{setting}: {screen}");
     }
 
     let home = fake_agent_home("commands = \"off\"");
@@ -1022,8 +1022,9 @@ fn the_agent_gets_the_history_as_an_mcp_server() {
         false,
     );
     let db = home.path().join("parolsh/history.db");
+    // With the conversation's token, under which `#share` gives it sessions.
     let expected = format!(
-        r#"[{{"name": "parolsh-history", "args": ["mcp", "--db", "{}", "--project", "{}"]}}]"#,
+        r#"[{{"name": "parolsh-history", "args": ["mcp", "--db", "{}", "--project", "{}", "--shares", ""#,
         db.display(),
         env!("CARGO_MANIFEST_DIR")
     );
@@ -1986,6 +1987,102 @@ fn tab_lists_the_sessions_to_pick_one() {
     // One match goes into the line.
     assert!(
         screen.contains("USER     → fake: the retry logic"),
+        "{screen}"
+    );
+}
+
+/// One of the agent's history tools, as its server answers it: `parolsh mcp`
+/// for this project, with `flags`.
+fn agent_tool(home: &std::path::Path, flags: &[&str], name: &str, arguments: &str) -> String {
+    use std::io::Write;
+    let mut server = parolsh()
+        .args(["mcp", "--db"])
+        .arg(home.join("parolsh/history.db"))
+        .args(["--project", env!("CARGO_MANIFEST_DIR")])
+        .args(flags)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
+    );
+    writeln!(server.stdin.take().unwrap(), "{request}").unwrap();
+    let output = server.wait_with_output().unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The agent's history tools only return this project's sessions. `#share
+/// <n>` gives the agent of this conversation one of another project: its
+/// server then returns it, to that conversation only.
+#[test]
+fn a_session_of_another_project_is_shared_with_the_agent() {
+    let home = fake_agent_home_with(&[]);
+    let _billing = session_in(home.path(), "the billing rewrite is called falcon");
+    let lines = ["#share", "#share 1", "#share", "#share 9", "mcp"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+
+    assert!(
+        screen.contains("No session of another project is shared with this conversation."),
+        "{screen}"
+    );
+    let shared = screen
+        .find("The agent of this conversation can now read it with its history tools.")
+        .expect(&screen);
+    // Said when it is shared, and listed by `#share` afterwards.
+    let named = "Session 1: \"the billing rewrite is called falcon\", ";
+    assert!(screen[..shared].contains(named), "{screen}");
+    assert!(screen[shared..].contains(named), "{screen}");
+    assert!(
+        screen.contains("parolsh: no session 9, see #sessions all"),
+        "{screen}"
+    );
+
+    // The conversation's server has a token; the session is read under it.
+    let after = &screen[screen.find("\"--shares\", \"").expect(&screen) + 13..];
+    let token = &after[..after.find('"').expect(after)];
+    let session = r#"{"session": 1}"#;
+    let read = agent_tool(home.path(), &["--shares", token], "get_session", session);
+    assert!(
+        read.contains("the billing rewrite is called falcon"),
+        "{read}"
+    );
+    let found = agent_tool(
+        home.path(),
+        &["--shares", token],
+        "search_history",
+        r#"{"query": "falcon"}"#,
+    );
+    assert!(found.starts_with("session 1 · entry 0"), "{found}");
+
+    // Another conversation, and one without a token, are told how to get it.
+    for flags in [&["--shares", "another-conversation"][..], &[]] {
+        let refused = agent_tool(home.path(), flags, "get_session", session);
+        assert!(refused.contains("the user has not shared it"), "{refused}");
+        assert!(refused.contains("`#share 1`"), "{refused}");
+    }
+}
+
+/// A conversation without history tools has nothing to share a session with,
+/// and a session of this project needs no sharing.
+#[test]
+fn share_says_when_there_is_nothing_to_do() {
+    let home = fake_agent_home_with(&[]);
+    let _billing = session_in(home.path(), "the billing rewrite");
+    run_in(home.path(), "", &["a session here"], "dumb", false);
+
+    let lines = ["#share 2", "#new private", "#share 1"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        screen.contains("Session 2 is of this project: the agent can already read it."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: the agent has no history tools in this conversation"),
         "{screen}"
     );
 }

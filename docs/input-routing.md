@@ -307,6 +307,7 @@ conversation opens, and again when it changes:
 | `#forget [n]` | Remove session `n` of this project from the history, after asking; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so. A session of another project is resumed after asking |
 | `#resume <text>` | Go back to the one session of this project that has the text; `#resume all <text>` looks in every project |
+| `#share [n]` | Let the agent of this conversation read session `n` of another project with its history tools; without `n`, what is shared. See [Sharing a session of another project](#sharing-a-session-of-another-project) |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
 | `#copy code` | Copy the last code block of the last answer |
@@ -458,7 +459,7 @@ project.
   agent's, or one of your `!command` lines, which are searched too. This
   search is yours, at the prompt: the agent's own
   [search](#the-agent-can-search-the-history) stays in this project and
-  leaves your commands out.
+  leaves your commands out. `#share <n>` gives it a session of another one.
 - It matches words, not meanings, and all of them: `retry client` finds the
   entries that have both.
 - Newest first, 20 at most; a line says how many more there are.
@@ -654,6 +655,34 @@ Session #2 was about the billing rewrite, codename Falcon-9 …
 
 The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
 the history without changing it, and its tools only return this project's
-sessions: they cannot ask for another. A `#new private` conversation does not
+sessions, and those of other projects you shared with the conversation: they
+cannot ask for another. A `#new private` conversation does not
 get it. To see what the tools return without the agent, see
 [Asking the history yourself](troubleshooting.md#asking-the-history-yourself).
+
+#### Sharing a session of another project
+
+The agent's tools only return this project's sessions. For one of another
+project, the tool says so, and the agent tells you:
+
+```text
+[claude] ~/projects/site ✦ can you summarize session 7?
+✦ I can't read it: session 7 belongs to another project and hasn't been shared
+  here. Type #share 7 at the Parolsh prompt and I'll check it.
+[claude] ~/projects/site ✦ #share 7
+Session 7: "Inotify limit validation", ~, 2026-10-04 11:30.
+The agent of this conversation can now read it with its history tools.
+[claude] ~/projects/site ✦ try again
+```
+
+- The agent reads it as it reads this project's sessions, a page at a time,
+  and its search covers it. Parolsh puts nothing of it in the conversation.
+- **For this conversation only**: a new one (`#new`, `#cd`, `#agent`,
+  `#resume`) starts without it. The conversation that goes on after a turn
+  was [sent to the background](agents.md#turns-in-the-background) keeps it.
+- Your `!command` lines of that session are left out, as this project's are,
+  unless `commands = "shared"`.
+- `#share` alone lists what is shared. `#sessions all` finds the session's
+  number, and `#audit <n>` shows it to you without giving it to the agent.
+- Not in a `#new private` conversation, nor with the history off: the agent
+  has no history tools there.

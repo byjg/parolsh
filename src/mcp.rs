@@ -2,7 +2,8 @@
 //! Parolsh gives it to the agent in every conversation that is saved (not
 //! `#new private`), as a program the agent starts and talks to over stdio
 //! (newline-delimited JSON-RPC). It reads the database only, and only the
-//! sessions of one project: the tools have no way to ask for another.
+//! sessions of one project, with those of other projects that the user gave
+//! this conversation (`#share`): the tools have no way to ask for another.
 
 use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
 use serde_json::{Value, json};
@@ -24,6 +25,9 @@ const MAX_ENTRY: usize = 4000;
 pub struct Scope<'a> {
     pub project: &'a str,
     pub commands: bool,
+    /// The conversation's token: the sessions of other projects shared
+    /// under it are returned too.
+    pub shares: Option<&'a str>,
 }
 
 /// The MCP server Parolsh gives the agent: this program, reading `db` within
@@ -39,6 +43,9 @@ pub fn server(db: &Path, scope: Scope) -> Option<McpServer> {
     ];
     if scope.commands {
         args.push("--commands".to_string());
+    }
+    if let Some(token) = scope.shares {
+        args.extend(["--shares".to_string(), token.to_string()]);
     }
     Some(McpServer::Stdio(
         McpServerStdio::new(NAME, program).args(args),
@@ -112,7 +119,8 @@ fn tools() -> Value {
     json!([
         {
             "name": "search_history",
-            "description": "Search the earlier sessions of this project (messages, answers, \
+            "description": "Search the earlier sessions of this project, and those of other \
+                projects the user shared with this conversation (messages, answers, \
                 tool calls, shared outputs). Words match any form that starts the same with \
                 `word*`; combine with OR, quote phrases. Returns the best matches with the \
                 session and position to read more with get_session.",
@@ -128,7 +136,8 @@ fn tools() -> Value {
         {
             "name": "list_sessions",
             "description": "The sessions of this project, newest first: number, date, \
-                agent, how many entries, and title.",
+                agent, how many entries, and title. Then the sessions of other projects the \
+                user shared with this conversation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -139,7 +148,9 @@ fn tools() -> Value {
         {
             "name": "get_session",
             "description": "The entries of one session, in order, a page at a time: who, \
-                what kind, and the full text.",
+                what kind, and the full text. A session of this project, or one of another \
+                project that the user shared with this conversation (`#share <n>` at the \
+                Parolsh prompt): the others are refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -176,11 +187,17 @@ fn call(history: &History, scope: Scope, name: &str, arguments: &Value) -> anyho
             .map_or(default, |n| n as usize)
     };
     let text = |key: &str| arguments.get(key).and_then(Value::as_str).unwrap_or("");
+    // Read at each call: the user may share a session at any time.
+    let shared = match scope.shares {
+        Some(token) => history.shared(token)?,
+        None => Vec::new(),
+    };
     let mut out = String::new();
     match name {
         "search_history" => {
+            let limit = number("limit", 20);
             let hits =
-                history.search(project, text("query"), number("limit", 20), scope.commands)?;
+                history.search_with(project, &shared, text("query"), limit, scope.commands)?;
             if hits.is_empty() {
                 out.push_str("No matches.");
             }
@@ -193,18 +210,33 @@ fn call(history: &History, scope: Scope, name: &str, arguments: &Value) -> anyho
         }
         "list_sessions" => {
             let sessions = history.sessions(project)?;
-            if sessions.is_empty() {
+            if sessions.is_empty() && shared.is_empty() {
                 out.push_str("No sessions saved in this project yet.");
             }
-            for session in sessions.into_iter().take(number("limit", 20)) {
-                out.push_str(&format!(
-                    "session {} · {} · {} · {} entries · {}\n",
+            let line = |session: &crate::history::Session| {
+                format!(
+                    "session {} · {} · {} · {} entries · {}",
                     session.id,
                     session.started,
                     session.agent.as_deref().unwrap_or("-"),
                     session.entries,
                     session.title.as_deref().unwrap_or("").replace('\n', " "),
-                ));
+                )
+            };
+            for session in sessions.iter().take(number("limit", 20)) {
+                out.push_str(&format!("{}\n", line(session)));
+            }
+            // Of other projects: the ones the user gave this conversation.
+            for id in &shared {
+                if let Some(session) = history.session_of(*id)?
+                    && session.project != project
+                {
+                    out.push_str(&format!(
+                        "{} · shared by the user, of project {}\n",
+                        line(&session),
+                        session.project
+                    ));
+                }
             }
         }
         "get_session" => {
@@ -212,9 +244,23 @@ fn call(history: &History, scope: Scope, name: &str, arguments: &Value) -> anyho
                 .get("session")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow::anyhow!("`session` is required"))?;
-            let entries = history
-                .entries(project, session)?
-                .ok_or_else(|| anyhow::anyhow!("no session {session} in this project"))?;
+            let entries = match history.entries(project, session)? {
+                Some(entries) => entries,
+                None if shared.contains(&session) => history
+                    .entries_of(session)?
+                    .ok_or_else(|| anyhow::anyhow!("no session {session}"))?,
+                // Said, so that the agent does not guess: the session is
+                // there, and only the user can hand it over.
+                None => match history.session_of(session)? {
+                    Some(other) => anyhow::bail!(
+                        "session {session} is of another project ({}), and the user has not \
+                         shared it with this conversation. They can, by typing `#share \
+                         {session}` at the Parolsh prompt; `#audit {session}` shows it to them.",
+                        other.project
+                    ),
+                    None => anyhow::bail!("no session {session}"),
+                },
+            };
             let from = number("from", 0);
             let limit = number("limit", 30);
             // A plain `!command` keeps its position, and is left out unless
@@ -317,10 +363,18 @@ mod tests {
     const PRIVATE: Scope = Scope {
         project: "/p",
         commands: false,
+        shares: None,
     };
     const SHARED: Scope = Scope {
         project: "/p",
         commands: true,
+        shares: None,
+    };
+    /// A conversation with a token, under which sessions may be shared.
+    const TOKEN: Scope = Scope {
+        project: "/p",
+        commands: false,
+        shares: Some("token"),
     };
 
     fn request(history: &History, method: &str, params: Value) -> Value {
@@ -428,6 +482,58 @@ mod tests {
             "{commands}"
         );
         assert_eq!(commands.lines().count(), 1);
+    }
+
+    /// A session of another project is the agent's to read once the user
+    /// shared it with this conversation, and not before: then the tool says
+    /// what the matter is, and how the user can share it.
+    #[test]
+    fn a_session_of_another_project_is_read_only_when_the_user_shared_it() {
+        let (_dir, db) = fixture();
+        let session = json!({"session": 2});
+        let refused = |scope| {
+            let history = History::open_read_only(&db).unwrap();
+            tool_within(&history, scope, "get_session", session.clone())
+        };
+
+        let said = refused(TOKEN);
+        assert!(
+            said.starts_with(
+                "session 2 is of another project (/other), and the user has not shared"
+            ),
+            "{said}"
+        );
+        assert!(said.contains("`#share 2`"), "{said}");
+        let history = History::open_read_only(&db).unwrap();
+        let none = tool_within(&history, TOKEN, "get_session", json!({"session": 99}));
+        assert_eq!(none, "no session 99");
+        let found = tool_within(&history, TOKEN, "search_history", json!({"query": "other"}));
+        assert_eq!(found, "No matches.");
+        drop(history);
+
+        History::open(&db, 90).unwrap().share("token", 2).unwrap();
+
+        let history = History::open_read_only(&db).unwrap();
+        let read = tool_within(&history, TOKEN, "get_session", session.clone());
+        assert!(read.contains("[0] user message"), "{read}");
+        assert!(read.contains("why retry in /other?"), "{read}");
+        // Its plain commands stay yours, as this project's do.
+        assert!(!read.contains("retry-deploy"), "{read}");
+        let found = tool_within(&history, TOKEN, "search_history", json!({"query": "other"}));
+        assert!(found.starts_with("session 2 · entry 0"), "{found}");
+        let listed = tool_within(&history, TOKEN, "list_sessions", json!({}));
+        assert!(
+            listed.contains("why retry in /other? · shared by the user, of project /other"),
+            "{listed}"
+        );
+        // Shared with that conversation, not with another, nor with one
+        // that has no token.
+        let other = Scope {
+            shares: Some("another"),
+            ..TOKEN
+        };
+        assert!(refused(other).contains("has not shared"));
+        assert!(refused(PRIVATE).contains("has not shared"));
     }
 
     /// Your plain `!commands` are saved for you, not for the agent: its tools

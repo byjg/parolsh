@@ -7,6 +7,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use serde_json::json;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +60,7 @@ Control commands:
   #forget [n]     remove a session from the history, after asking; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex, OpenCode)
   #resume <text>  go back to the one session that has the text (all <text>: in any project)
+  #share [n]      let this conversation's agent read session n of another project
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
   #copy code      copy the last code block of the last answer
@@ -128,6 +130,9 @@ pub struct App {
     handover: Vec<String>,
     /// Leaving was refused once, because something is still running.
     leaving: bool,
+    /// The token of this conversation's history server: `#share` gives it
+    /// sessions of other projects under it. Empty without a server.
+    share_token: RefCell<String>,
     /// What the agent wrote in the last turns, as it wrote it and newest
     /// last: `#copy` and `#raw`. In memory only.
     answers: VecDeque<String>,
@@ -219,6 +224,7 @@ impl App {
             private: false,
             handover: Vec::new(),
             leaving: false,
+            share_token: RefCell::default(),
             answers: VecDeque::new(),
         };
         // Without an agent, plain text can only go to the shell.
@@ -973,6 +979,7 @@ impl App {
             "project" => self.project(args),
             "prompt" => self.prompt_command(args),
             "config" => self.config_command(args),
+            "share" => self.share_command(args),
             "options" => self.options_command(args),
             // Not recorded: looking changes nothing.
             "audit" | "sessions" | "redraw" | "jobs" | "fg" | "copy" | "raw" => {
@@ -1274,7 +1281,7 @@ impl App {
         println!("{}", job.label("in the background"));
         self.jobs.push(job);
 
-        let mcp = self.mcp_servers(self.private);
+        let mcp = self.history_server(self.private);
         let agent = self
             .active_agent()
             .map(|agent| AgentHandle::start_with(agent, self.cwd.clone(), mcp, start.clone()));
@@ -1602,17 +1609,75 @@ impl App {
 
     /// The MCP servers the agent gets in a conversation: the history of this
     /// project, unless the conversation is private or there is no history.
+    ///
+    /// A new conversation: its server gets a token of its own, under which
+    /// `#share` gives it sessions of other projects.
     fn mcp_servers(&self, private: bool) -> Vec<McpServer> {
-        match &self.history_db {
+        self.share_token.replace(new_token());
+        self.history_server(private)
+    }
+
+    /// The history's server for a conversation that goes on in another
+    /// agent process: what was shared with it stays.
+    fn history_server(&self, private: bool) -> Vec<McpServer> {
+        let server = match &self.history_db {
             Some(db) if !private => {
+                let token = self.share_token.borrow();
                 let scope = mcp::Scope {
                     project: &self.project_key(),
                     commands: self.config.commands == Commands::Shared,
+                    shares: Some(token.as_str()),
                 };
-                mcp::server(db, scope).into_iter().collect()
+                mcp::server(db, scope)
             }
-            _ => Vec::new(),
+            _ => None,
+        };
+        if server.is_none() {
+            // No tools: nothing can be shared with this conversation.
+            self.share_token.borrow_mut().clear();
         }
+        server.into_iter().collect()
+    }
+
+    /// `#share [n]`: gives the agent of this conversation session `n` of
+    /// another project, to read with its history tools; without `n`, what
+    /// is shared. The agent only gets what you name.
+    fn share_command(&mut self, args: &str) -> Result<()> {
+        let token = self.share_token.borrow().clone();
+        anyhow::ensure!(
+            !token.is_empty() && self.agent.is_some(),
+            "the agent has no history tools in this conversation (it is private, or the \
+             history is off): there is nothing to share a session with"
+        );
+        let project = self.project_key();
+        let history = self
+            .audit
+            .history_mut()
+            .context("the history is off (history_days = 0)")?;
+        if args.is_empty() {
+            let shared = history.shared(&token)?;
+            if shared.is_empty() {
+                println!("No session of another project is shared with this conversation.");
+            }
+            for id in shared {
+                if let Some(session) = history.session_of(id)? {
+                    println!("{}", describe(&session));
+                }
+            }
+            return Ok(());
+        }
+        let id = session_number(args)?;
+        let session = history
+            .session_of(id)?
+            .with_context(|| format!("no session {id}, see #sessions all"))?;
+        if session.project == project {
+            println!("Session {id} is of this project: the agent can already read it.");
+            return Ok(());
+        }
+        history.share(&token, id)?;
+        println!("{}", describe(&session));
+        println!("The agent of this conversation can now read it with its history tools.");
+        Ok(())
     }
 
     fn active_agent(&self) -> Option<&Agent> {
@@ -1845,6 +1910,27 @@ fn state_dir() -> Option<PathBuf> {
 }
 
 /// A session number, as `#sessions` lists them.
+/// A token no other conversation has, for its history server: this run's
+/// random hasher over the time and a count.
+fn new_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::AtomicU64;
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RANDOM: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
+    let random = RANDOM.get_or_init(Default::default);
+    let part = |salt: u64| {
+        let mut hasher = random.build_hasher();
+        hasher.write_u64(salt);
+        hasher.write_u64(COUNT.fetch_add(1, Ordering::Relaxed));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        hasher.write_u128(nanos);
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", part(1), part(2))
+}
+
 /// `all` and what follows it, or the text alone: `#sessions all retry`.
 fn scope_and_text(args: &str) -> (bool, &str) {
     match args.split_once(char::is_whitespace) {
