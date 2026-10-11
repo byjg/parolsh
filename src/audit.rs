@@ -460,7 +460,7 @@ fn clock(at: Duration) -> String {
     }
 }
 
-fn cut(line: &str, width: usize) -> String {
+pub fn cut(line: &str, width: usize) -> String {
     if line.chars().count() <= width {
         return line.to_string();
     }

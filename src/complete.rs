@@ -13,6 +13,7 @@ use std::time::Duration;
 use reedline::{Completer, CompletionResult, Span, Suggestion};
 
 use crate::acp::{ActivityWatch, AgentCommand};
+use crate::history::History;
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::shellenv::{self, is_executable};
 
@@ -46,6 +47,9 @@ pub struct ShellCompleter {
     pub bash: Option<String>,
     /// The running agent, for its own `/commands`.
     pub agent: Arc<Mutex<Option<ActivityWatch>>>,
+    /// The history's database and the project Parolsh is in, for the
+    /// sessions `#resume`, `#audit` and `#forget` take.
+    pub sessions: Arc<Mutex<Option<(PathBuf, String)>>>,
 }
 
 impl Completer for ShellCompleter {
@@ -58,6 +62,12 @@ impl Completer for ShellCompleter {
             let agent = self.agent.lock().expect("agent lock").clone();
             let commands = agent.map(|agent| agent.commands()).unwrap_or_default();
             return CompletionResult::fresh(agent_commands(&commands, typed, pos));
+        }
+        if let Some(typed) = session_number(line, pos) {
+            let place = self.sessions.lock().expect("sessions lock").clone();
+            let sessions = place.map(|(db, project)| saved_sessions(&db, &project));
+            let found = sessions_from(&sessions.unwrap_or_default(), typed, pos);
+            return CompletionResult::fresh(found);
         }
         let found = completions(line, pos, mode, &cwd, || {
             suggestions(
@@ -72,6 +82,55 @@ impl Completer for ShellCompleter {
         });
         CompletionResult::fresh(found)
     }
+}
+
+/// The commands that take a session's number.
+const SESSION_COMMANDS: [&str; 3] = ["resume", "audit", "forget"];
+
+/// What is typed of a session's number after `#resume`, `#audit` or
+/// `#forget`, with the cursor at `pos` in it: digits, or nothing yet.
+fn session_number(line: &str, pos: usize) -> Option<&str> {
+    let line = line.get(..pos)?;
+    let (name, typed) = line.trim_start().strip_prefix('#')?.split_once(' ')?;
+    let typed = typed.trim_start();
+    let number = typed.chars().all(|c| c.is_ascii_digit());
+    (SESSION_COMMANDS.contains(&name) && number).then_some(typed)
+}
+
+/// The sessions of `project` in the history at `db`, newest first: their
+/// number, and what says which one it is. None when it cannot be read.
+fn saved_sessions(db: &Path, project: &str) -> Vec<(String, String)> {
+    let Ok(history) = History::open_read_only(db) else {
+        return Vec::new();
+    };
+    let sessions = history.sessions(project).unwrap_or_default();
+    let described = |session: crate::history::Session| {
+        let title = session.title.or(session.first_command).unwrap_or_default();
+        let agent = session.agent.unwrap_or_default();
+        let about = format!("{}  {agent}  {}", session.started, one_line(&title));
+        (session.id.to_string(), about)
+    };
+    sessions.into_iter().map(described).collect()
+}
+
+/// The first line of `text`, cut for the menu.
+fn one_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    line.chars().take(60).collect()
+}
+
+/// The sessions whose number starts with `typed`, to replace it before
+/// `pos`: a list to pick from, instead of a number to type right.
+fn sessions_from(sessions: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
+    sessions
+        .iter()
+        .filter(|(number, _)| number.starts_with(typed))
+        .map(|(number, about)| Suggestion {
+            span: Span::new(pos - typed.len(), pos),
+            description: Some(about.clone()),
+            ..suggestion(number.clone(), false)
+        })
+        .collect()
 }
 
 /// What is typed of one of the agent's own commands, without its `/`, when
@@ -571,6 +630,62 @@ mod tests {
             description: description.to_string(),
             hint: hint.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn a_number_after_resume_audit_or_forget_is_a_session() {
+        fn typed(line: &str) -> Option<&str> {
+            session_number(line, line.len())
+        }
+
+        assert_eq!(typed("#resume "), Some(""));
+        assert_eq!(typed("#resume 2"), Some("2"));
+        assert_eq!(typed("  #audit 27"), Some("27"));
+        assert_eq!(typed("#forget  1"), Some("1"));
+        // Not a number: a text to find, or another command's argument.
+        assert_eq!(typed("#resume retry"), None);
+        assert_eq!(typed("#resume 2 x"), None);
+        assert_eq!(typed("#resume"), None);
+        assert_eq!(typed("#cd 2"), None);
+        assert_eq!(typed("resume 2"), None);
+    }
+
+    #[test]
+    fn sessions_are_listed_to_pick_with_what_says_which_they_are() {
+        let sessions = [
+            (
+                "27".to_string(),
+                "2026-10-02 09:14  codex  Billing rewrite".to_string(),
+            ),
+            (
+                "11".to_string(),
+                "2026-09-30 10:02  claude  Add retries".to_string(),
+            ),
+            (
+                "2".to_string(),
+                "2026-09-28 08:00  claude  First".to_string(),
+            ),
+        ];
+        let found = |typed: &str| -> Vec<String> {
+            let line = format!("#resume {typed}");
+            sessions_from(&sessions, typed, line.len())
+                .into_iter()
+                .map(|s| format!("{} {}", s.value, s.description.unwrap()))
+                .collect()
+        };
+
+        assert_eq!(found("").len(), 3);
+        assert_eq!(
+            found("2"),
+            [
+                "27 2026-10-02 09:14  codex  Billing rewrite",
+                "2 2026-09-28 08:00  claude  First"
+            ]
+        );
+        assert!(found("9").is_empty());
+        // It replaces the digits typed, in the command's line.
+        let suggestion = &sessions_from(&sessions, "1", "#resume 1".len())[0];
+        assert_eq!((suggestion.span.start, suggestion.span.end), (8, 9));
     }
 
     #[test]

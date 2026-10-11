@@ -78,6 +78,18 @@ pub struct Session {
     /// not for the agent unless commands are shared.
     pub first_command: Option<String>,
     pub usage: Usage,
+    /// The project it belongs to, and the directory it ran in.
+    pub project: String,
+    pub cwd: String,
+}
+
+/// A session found by its text, with where: `#sessions <text>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    pub session: Session,
+    /// The kind of the entry the text is in, and the matching part with its
+    /// terms between `[` and `]`. `None` when only the title matches.
+    pub place: Option<(String, String)>,
 }
 
 /// What a session used: the sum of what the agent reported with each turn.
@@ -323,16 +335,15 @@ impl History {
         Ok(true)
     }
 
-    /// What `#resume` needs of session `id` of `project`.
-    pub fn resumable(&self, project: &str, id: i64) -> rusqlite::Result<Option<Resumable>> {
+    /// What `#resume` needs of session `id`, of whatever project.
+    pub fn resumable(&self, id: i64) -> rusqlite::Result<Option<Resumable>> {
         self.conn
             .query_row(
                 "SELECT s.agent, s.agent_session_id, s.cwd,
                         (SELECT count(*) FROM entries
                          WHERE session_id = s.id AND kind = 'message')
-                 FROM sessions s JOIN projects p ON p.id = s.project_id
-                 WHERE s.id = ?1 AND p.root = ?2",
-                params![id, project],
+                 FROM sessions s WHERE s.id = ?1",
+                [id],
                 |row| {
                     Ok(Resumable {
                         agent: row.get(0)?,
@@ -511,6 +522,83 @@ impl History {
 
     /// The sessions of `project`, newest first.
     pub fn sessions(&self, project: &str) -> rusqlite::Result<Vec<Session>> {
+        self.list(Some(project), None)
+    }
+
+    /// The sessions of every project, newest first: `#sessions all`.
+    pub fn all_sessions(&self) -> rusqlite::Result<Vec<Session>> {
+        self.list(None, None)
+    }
+
+    /// Session `id`, of whatever project.
+    pub fn session_of(&self, id: i64) -> rusqlite::Result<Option<Session>> {
+        Ok(self.list(None, Some(&[id]))?.into_iter().next())
+    }
+
+    /// The sessions where `text` was said, or that it titles, newest first:
+    /// of `project`, or of every project without one. `!command` lines are
+    /// searched too: this is for the user, not for the agent's tools.
+    pub fn find(&self, project: Option<&str>, text: &str) -> rusqlite::Result<Vec<Found>> {
+        let said = match self.said(project, text) {
+            // Not the syntax of a full-text query: its words, all of them.
+            Err(rusqlite::Error::SqliteFailure(..)) => {
+                let words: Vec<String> = text
+                    .split_whitespace()
+                    .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+                    .collect();
+                match words.is_empty() {
+                    true => Vec::new(),
+                    false => self.said(project, &words.join(" "))?,
+                }
+            }
+            said => said?,
+        };
+        let mut titled = self.conn.prepare(
+            "SELECT s.id FROM sessions s JOIN projects p ON p.id = s.project_id
+             WHERE (?2 IS NULL OR p.root = ?2) AND instr(lower(s.title), lower(?1)) > 0",
+        )?;
+        let titled = titled.query_map(params![text.trim(), project], |row| row.get::<_, i64>(0))?;
+        let mut ids: Vec<i64> = titled.collect::<rusqlite::Result<_>>()?;
+        ids.extend(said.iter().map(|(id, ..)| *id));
+        let sessions = self.list(project, Some(&ids))?;
+        Ok(sessions
+            .into_iter()
+            .map(|session| {
+                let place = said
+                    .iter()
+                    .find(|(id, ..)| *id == session.id)
+                    .map(|(_, kind, snippet)| (kind.clone(), snippet.clone()));
+                Found { session, place }
+            })
+            .collect())
+    }
+
+    /// The entries that match the full-text `query`, best first: their
+    /// session, their kind and the matching part.
+    fn said(
+        &self,
+        project: Option<&str>,
+        query: &str,
+    ) -> rusqlite::Result<Vec<(i64, String, String)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT e.session_id, e.kind, snippet(entries_fts, 0, '[', ']', '…', 12)
+             FROM entries_fts
+             JOIN entries e ON e.id = entries_fts.rowid
+             JOIN sessions s ON s.id = e.session_id
+             JOIN projects p ON p.id = s.project_id
+             WHERE entries_fts MATCH ?1 AND (?2 IS NULL OR p.root = ?2)
+             ORDER BY rank",
+        )?;
+        let rows = statement.query_map(params![query, project], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Sessions, newest first: of `project` or of all, and only those in
+    /// `ids` when given.
+    fn list(&self, project: Option<&str>, ids: Option<&[i64]>) -> rusqlite::Result<Vec<Session>> {
+        let ids = ids.map(|ids| serde_json::json!(ids).to_string());
         let mut statement = self.conn.prepare(
             "SELECT s.id, strftime('%Y-%m-%d %H:%M', s.started_at / 1000, 'unixepoch', 'localtime'),
                     s.agent,
@@ -523,7 +611,7 @@ impl History {
                      WHERE session_id = s.id AND kind IN ('command', 'capture')
                      ORDER BY id LIMIT 1),
                     u.input, u.output, u.cache_read, u.cache_write, u.cost, u.currency,
-                    u.compactions, u.thought
+                    u.compactions, u.thought, p.root, s.cwd
              FROM sessions s JOIN projects p ON p.id = s.project_id
              -- What each turn used is kept with its end, a compaction with
              -- its own entry.
@@ -538,10 +626,11 @@ impl History {
                                count(json_extract(meta, '$.compaction')) AS compactions
                         FROM entries WHERE kind = 'event' GROUP BY session_id) u
                     ON u.session_id = s.id
-             WHERE p.root = ?1
+             WHERE (?1 IS NULL OR p.root = ?1)
+               AND (?2 IS NULL OR s.id IN (SELECT value FROM json_each(?2)))
              ORDER BY s.updated_at DESC, s.id DESC",
         )?;
-        let rows = statement.query_map([project], |row| {
+        let rows = statement.query_map(params![project, ids], |row| {
             let tokens = |column: usize| -> rusqlite::Result<u64> {
                 Ok(row.get::<_, Option<i64>>(column)?.unwrap_or(0).max(0) as u64)
             };
@@ -563,6 +652,8 @@ impl History {
                     currency: row.get(12)?,
                     compactions: tokens(13)? as usize,
                 },
+                project: row.get(15)?,
+                cwd: row.get(16)?,
             })
         })?;
         rows.collect()
@@ -571,6 +662,15 @@ impl History {
     /// The entries of session `id` of `project`, in order; `None` when
     /// `project` has no such session.
     pub fn entries(&self, project: &str, id: i64) -> rusqlite::Result<Option<Vec<Stored>>> {
+        self.entries_in(Some(project), id)
+    }
+
+    /// The entries of session `id`, of whatever project: `#audit <n>`.
+    pub fn entries_of(&self, id: i64) -> rusqlite::Result<Option<Vec<Stored>>> {
+        self.entries_in(None, id)
+    }
+
+    fn entries_in(&self, project: Option<&str>, id: i64) -> rusqlite::Result<Option<Vec<Stored>>> {
         let Some(started) = self.started(project, id)? else {
             return Ok(None);
         };
@@ -593,7 +693,7 @@ impl History {
 
     /// Removes session `id` of `project`. False when there is none.
     pub fn forget(&mut self, project: &str, id: i64) -> rusqlite::Result<bool> {
-        if self.started(project, id)?.is_none() {
+        if self.started(Some(project), id)?.is_none() {
             return Ok(false);
         }
         self.conn
@@ -606,11 +706,11 @@ impl History {
     }
 
     /// When session `id` of `project` started, in milliseconds.
-    fn started(&self, project: &str, id: i64) -> rusqlite::Result<Option<i64>> {
+    fn started(&self, project: Option<&str>, id: i64) -> rusqlite::Result<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT s.started_at FROM sessions s JOIN projects p ON p.id = s.project_id
-                 WHERE s.id = ?1 AND p.root = ?2",
+                 WHERE s.id = ?1 AND (?2 IS NULL OR p.root = ?2)",
                 params![id, project],
                 |row| row.get(0),
             )
@@ -839,19 +939,13 @@ mod tests {
         assert_eq!(said(&history, current), ["first", "one"]);
         assert_eq!(said(&history, split), ["long", "Read a"]);
         // The turn keeps the conversation; this session gets the copy's.
-        let agent_session = |id| {
-            history
-                .resumable("/p", id)
-                .unwrap()
-                .unwrap()
-                .agent_session_id
-        };
+        let agent_session = |id| history.resumable(id).unwrap().unwrap().agent_session_id;
         assert_eq!(agent_session(split), Some("a".to_string()));
         assert_eq!(agent_session(current), None);
         history.set_agent_session_id(Some("copy".to_string()));
         assert_eq!(
             history
-                .resumable("/p", current)
+                .resumable(current)
                 .unwrap()
                 .unwrap()
                 .agent_session_id,
@@ -890,6 +984,111 @@ mod tests {
         assert_eq!(history.split(first.unwrap()).unwrap(), None);
         assert!(!history.append(session).unwrap());
         assert_eq!(said(&history, session), ["first"]);
+    }
+
+    /// Two projects, with what was said in each; the session's numbers.
+    fn two_projects(history: &mut History) -> (i64, i64) {
+        history.begin(start("/wallet"));
+        history
+            .add(
+                "user",
+                "message",
+                "why does the client retry twice",
+                &json!({}),
+            )
+            .unwrap();
+        history
+            .add(
+                "agent",
+                "answer",
+                "It retries once, with no backoff.",
+                &json!({}),
+            )
+            .unwrap();
+        history
+            .add("user", "command", "cargo test falcon", &json!({"exit": 0}))
+            .unwrap();
+        let wallet = history.current().unwrap();
+        history.begin(start("/billing"));
+        history
+            .add(
+                "user",
+                "message",
+                "the rewrite is called falcon",
+                &json!({}),
+            )
+            .unwrap();
+        history.set_title(Some("Billing rewrite".to_string()));
+        (wallet, history.current().unwrap())
+    }
+
+    #[test]
+    fn sessions_are_found_by_what_was_said_in_a_project_or_in_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        let (wallet, billing) = two_projects(&mut history);
+        let found = |project: Option<&str>, text: &str| -> Vec<(i64, Option<String>)> {
+            let found = history.find(project, text).unwrap();
+            let place = |place: Option<(String, String)>| place.map(|(kind, _)| kind);
+            found
+                .into_iter()
+                .map(|f| (f.session.id, place(f.place)))
+                .collect()
+        };
+        let kind = |kind: &str| Some(kind.to_string());
+
+        assert_eq!(found(Some("/wallet"), "retry"), [(wallet, kind("message"))]);
+        assert_eq!(found(Some("/billing"), "retry"), []);
+        // Your commands are searched too.
+        assert_eq!(
+            found(Some("/wallet"), "falcon"),
+            [(wallet, kind("command"))]
+        );
+        // Every project, newest first.
+        assert_eq!(
+            found(None, "falcon"),
+            [(billing, kind("message")), (wallet, kind("command"))]
+        );
+        // All the words, wherever they are in the entry.
+        assert_eq!(found(None, "twice client"), [(wallet, kind("message"))]);
+        assert_eq!(found(None, "twice falcon"), []);
+        // A title alone, in any case; and what is no query is its words.
+        assert_eq!(found(None, "billing REWRITE"), [(billing, None)]);
+        assert_eq!(found(None, "retry\" twice"), [(wallet, kind("message"))]);
+        assert_eq!(found(None, "nothing-has-this"), []);
+
+        let place = history.find(None, "backoff").unwrap().remove(0).place;
+        assert_eq!(place.unwrap().1, "It retries once, with no [backoff].");
+    }
+
+    #[test]
+    fn a_session_is_looked_up_in_any_project_and_forgotten_in_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        let (wallet, billing) = two_projects(&mut history);
+
+        let all: Vec<i64> = history
+            .all_sessions()
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(all, [billing, wallet]);
+        let found = history.session_of(billing).unwrap().unwrap();
+        assert_eq!(
+            (found.project.as_str(), found.cwd.as_str()),
+            ("/billing", "/billing")
+        );
+        assert_eq!(found.title.as_deref(), Some("Billing rewrite"));
+        assert_eq!(history.session_of(99).unwrap(), None);
+        // `#audit` reads any; a tool of the agent stays in its project.
+        assert_eq!(history.entries_of(wallet).unwrap().unwrap().len(), 3);
+        assert_eq!(history.entries("/billing", wallet).unwrap(), None);
+        assert!(history.resumable(wallet).unwrap().is_some());
+        // Forgetting is kept to the project.
+        assert!(!history.forget("/billing", wallet).unwrap());
+        assert!(history.forget("/wallet", wallet).unwrap());
+        assert_eq!(history.session_of(wallet).unwrap(), None);
     }
 
     #[test]
@@ -1089,7 +1288,7 @@ mod tests {
         history.begin(start("/p"));
 
         assert_eq!(
-            history.resumable("/p", first).unwrap(),
+            history.resumable(first).unwrap(),
             Some(Resumable {
                 agent: Some("claude".to_string()),
                 agent_session_id: Some("abc".to_string()),
