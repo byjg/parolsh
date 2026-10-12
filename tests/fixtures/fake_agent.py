@@ -69,6 +69,11 @@ it replays "replayed old answer" before answering. With --no-resume, neither.
 With --sessions-from N, new sessions are numbered from N (s<N>, ...).
 With --forgets, a conversation to resume or load is not found, as when the
 agent removed it.
+With --list, the agent lists three conversations it had outside Parolsh
+(`session/list`, in two pages): ext-1aaa "Fix the crashing api", and ext-2bbb
+and ext-3ccc, both "Greeting". `session/load` of one replays it: a message of
+the user, a thought, a tool call and an answer. With --no-load too, the agent
+only reopens them.
 With --fork, `session/fork` copies a conversation, of any process: the copy
 is f1, f2, ..., titled "Fake work (fork)" with its first prompt. With --fork-upto, also up to a message, the way the adapters
 of Claude and Codex take it (`_meta.jetbrains.air.fork`), which is announced.
@@ -399,6 +404,34 @@ def prompt(request):
     send({"id": request["id"], "result": {"stopReason": stop_reason, **result}})
 
 
+# The conversations the agent had outside Parolsh, with --list.
+EXTERNAL = [
+    {"sessionId": "ext-1aaa", "title": "Fix the crashing api",
+     "updatedAt": "2026-10-02T15:27:00Z"},
+    {"sessionId": "ext-2bbb", "title": "Greeting", "updatedAt": "2026-10-01T19:54:00Z"},
+    {"sessionId": "ext-3ccc", "title": "Greeting", "updatedAt": "2026-10-01T19:53:00Z"},
+]
+
+
+def replay(session_id):
+    """What `session/load` replays of one of them: the user's message, the
+    agent's reasoning, a tool call and its answer in two chunks."""
+    def update(fields):
+        send({"method": "session/update", "params": {"sessionId": session_id,
+                                                      "update": fields}})
+
+    def chunk(kind, message, text):
+        update({"sessionUpdate": kind, "messageId": message,
+                "content": {"type": "text", "text": text}})
+    chunk("user_message_chunk", "u1", "why does the api crash?")
+    chunk("agent_thought_chunk", "a1", "Reading the handler.")
+    update({"sessionUpdate": "tool_call", "toolCallId": "r1", "title": "Read api.rs",
+            "kind": "read", "status": "pending", "locations": [{"path": "/src/api.rs"}]})
+    update({"sessionUpdate": "tool_call_update", "toolCallId": "r1", "status": "completed"})
+    chunk("agent_message_chunk", "a2", "It crashes ")
+    chunk("agent_message_chunk", "a2", "on empty input.")
+
+
 def capabilities():
     if no_resume:
         return {}
@@ -406,6 +439,9 @@ def capabilities():
         return {"loadSession": True}
     if can_fork:
         return {"sessionCapabilities": {"resume": {}, "fork": {}}}
+    if "--list" in sys.argv:
+        listing = {"sessionCapabilities": {"resume": {}, "list": {}}}
+        return listing if "--no-load" in sys.argv else {"loadSession": True, **listing}
     return {"sessionCapabilities": {"resume": {}}}
 
 
@@ -427,6 +463,15 @@ def main():
             if "--fork-upto" in sys.argv:
                 result["_meta"] = {"jetbrains": {"air": {"version": 1}}}
             send({"id": message["id"], "result": result})
+        elif method == "session/list" and "--list" in sys.argv:
+            params = message["params"]
+            # In two pages, like Codex.
+            page = EXTERNAL[2:] if params.get("cursor") else EXTERNAL[:2]
+            result = {"sessions": [{**session, "cwd": params.get("cwd", "/")}
+                                   for session in page]}
+            if not params.get("cursor"):
+                result["nextCursor"] = "page-2"
+            send({"id": message["id"], "result": result})
         elif method == "session/fork" and can_fork:
             params = message["params"]
             point = params.get("_meta", {}).get("jetbrains", {}).get("air", {}).get("fork", {})
@@ -445,7 +490,9 @@ def main():
                 "cwd": params["cwd"], "mode": "code" if kilo else "default",
                 "options": {"effort": "high", "model": "one", "fast": False},
                 "mcp": params.get("mcpServers", [])}
-            if method == "session/load":
+            if method == "session/load" and session_id.startswith("ext-"):
+                replay(session_id)
+            elif method == "session/load":
                 say(session_id, "replayed old answer")
             result = {"configOptions": config_options(session)}
             if method == "session/new":

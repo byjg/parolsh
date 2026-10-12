@@ -795,6 +795,72 @@ impl History {
         Ok(())
     }
 
+    /// The session Parolsh has for the agent's conversation `id`, if any.
+    pub fn session_with(&self, agent_session_id: &str) -> rusqlite::Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id FROM sessions WHERE agent_session_id = ?1 ORDER BY id DESC LIMIT 1",
+                [agent_session_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Records a conversation the agent had elsewhere, as it replayed it: a
+    /// new session of `start`, linked to the agent's `conversation`, with
+    /// `entries` (actor, kind, text, meta) in order. A replay has no dates:
+    /// the session and its entries get `updated`, when the agent says the
+    /// conversation last changed (RFC 3339), or now. The session's number.
+    pub fn import(
+        &mut self,
+        start: &SessionStart,
+        conversation: &str,
+        title: Option<&str>,
+        updated: Option<&str>,
+        entries: &[(&str, &str, String, serde_json::Value)],
+    ) -> rusqlite::Result<i64> {
+        let at: Option<i64> = match updated {
+            Some(updated) => self.conn.query_row(
+                "SELECT CAST(strftime('%s', ?1) AS INTEGER) * 1000",
+                [updated],
+                |row| row.get(0),
+            )?,
+            None => None,
+        };
+        let at = at.unwrap_or_else(now);
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO projects (root) VALUES (?1) ON CONFLICT(root) DO NOTHING",
+            [&start.project],
+        )?;
+        transaction.execute(
+            "INSERT INTO sessions (project_id, agent, agent_session_id, cwd, title, started_at, updated_at)
+             SELECT id, ?2, ?3, ?4, ?5, ?6, ?7 FROM projects WHERE root = ?1",
+            params![start.project, start.agent, conversation, start.cwd, title, at, now()],
+        )?;
+        let session = transaction.last_insert_rowid();
+        for (actor, kind, text, meta) in entries {
+            transaction.execute(
+                "INSERT INTO entries (session_id, at, actor, kind, text, meta)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![session, at, actor, kind, text, meta.to_string()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(session)
+    }
+
+    /// A date as the agent writes it (RFC 3339), in local time as the
+    /// history shows dates: `YYYY-MM-DD HH:MM`. `None` when it is no date.
+    pub fn local_time(&self, date: &str) -> Option<String> {
+        let local = self.conn.query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M', ?1, 'localtime')",
+            [date],
+            |row| row.get(0),
+        );
+        local.ok().flatten()
+    }
+
     /// Gives session `id` to the conversation whose history server has
     /// `token`: `#share`.
     pub fn share(&mut self, token: &str, id: i64) -> rusqlite::Result<()> {
@@ -1174,6 +1240,74 @@ mod tests {
         // A forgotten session is no longer shared.
         assert!(history.forget("/wallet", wallet).unwrap());
         assert_eq!(history.shared("token").unwrap(), [billing]);
+    }
+
+    /// A conversation the agent replayed becomes a session: linked to the
+    /// agent's id, dated when the agent says it last changed, with the
+    /// entries in order, found by the search like any other.
+    #[test]
+    fn a_replayed_conversation_is_recorded_as_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = open(dir.path());
+        let entries = [
+            (
+                "user",
+                "message",
+                "why does the api crash?".to_string(),
+                json!({}),
+            ),
+            ("agent", "answer", "On empty input.".to_string(), json!({})),
+        ];
+        assert_eq!(history.session_with("ext-1").unwrap(), None);
+
+        let updated = Some("2026-10-02T15:27:00Z");
+        let title = Some("Fix the crashing api");
+        let id = history
+            .import(&start("/p"), "ext-1", title, updated, &entries)
+            .unwrap();
+
+        assert_eq!(history.session_with("ext-1").unwrap(), Some(id));
+        assert_eq!(
+            said(&history, id),
+            ["why does the api crash?", "On empty input."]
+        );
+        let session = history.session_of(id).unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), title);
+        assert_eq!(
+            session.started,
+            history.local_time("2026-10-02T15:27:00Z").unwrap()
+        );
+        assert_eq!(
+            history
+                .resumable(id)
+                .unwrap()
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("ext-1")
+        );
+        assert_eq!(history.find(Some("/p"), "crash").unwrap().len(), 1);
+        // It is not the current session until it is resumed.
+        assert_eq!(history.current(), None);
+        assert!(history.resume("/p", id).unwrap());
+        history
+            .add("user", "message", "and now?", &json!({}))
+            .unwrap();
+        assert_eq!(said(&history, id).len(), 3);
+
+        // What is no date is not shown as one, and dates the session now.
+        assert_eq!(history.local_time("not a date"), None);
+        let undated = history
+            .import(&start("/p"), "ext-2", None, Some("?"), &[])
+            .unwrap();
+        assert!(
+            history
+                .session_of(undated)
+                .unwrap()
+                .unwrap()
+                .started
+                .starts_with("20")
+        );
     }
 
     #[test]

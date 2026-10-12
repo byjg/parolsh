@@ -6,13 +6,14 @@ use agent_client_protocol::schema::v1::{
     AvailableCommandInput, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
     ElicitationAction, ElicitationCapabilities, ElicitationFormCapabilities, ElicitationMode,
-    ErrorCode, ForkSessionRequest, InitializeRequest, LoadSessionRequest, McpServer,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PlanEntryStatus,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TextContent, ToolCallContent, ToolCallStatus,
+    ErrorCode, ForkSessionRequest, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
+    McpServer, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent, ToolCallContent,
+    ToolCallStatus,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{
@@ -92,6 +93,9 @@ pub enum Event {
     Error(String),
     /// A `resume` ended: the conversation goes on, or why it could not.
     Resumed(Result<(), String>),
+    /// The conversations the agent has for a directory, or why it cannot
+    /// say: the answer to `list`.
+    Listed(Result<Vec<AgentSession>, String>),
 }
 
 /// How full the agent's context is, and what the conversation cost so far.
@@ -167,6 +171,32 @@ impl Compaction {
 
 /// What Claude adds to the title of a conversation it copied.
 const COPY_TITLE: &str = " (fork)";
+
+/// A conversation the agent has, as it lists it: Parolsh's or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSession {
+    /// The agent's id for it.
+    pub id: String,
+    pub title: Option<String>,
+    /// When it last changed, as the agent writes it (RFC 3339).
+    pub updated: Option<String>,
+}
+
+/// A piece of a conversation the agent replayed, in order: what Parolsh
+/// records of a conversation it did not see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replayed {
+    User(String),
+    Agent(String),
+    Thought(String),
+    Tool {
+        id: String,
+        title: String,
+        kind: String,
+        files: Vec<PathBuf>,
+        finished: Option<bool>,
+    },
+}
 
 /// One of the agent's own commands, typed as `/name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +312,10 @@ struct SessionState {
     context: Option<Context>,
     /// The agent's own `/commands`, as it last listed them.
     commands: Vec<AgentCommand>,
+    /// What the agent replays of the conversation being loaded, when it is
+    /// to be recorded, with the message its last piece belongs to.
+    replay: Option<Vec<Replayed>>,
+    replaying: Option<String>,
     /// How the agent copies a conversation. Kept across conversations.
     forks: Forks,
     /// The conversation is a copy Parolsh asked for: Claude titles it as
@@ -589,7 +623,12 @@ enum Command {
         id: String,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
+        /// Have the agent replay it, and keep the replay: a conversation
+        /// Parolsh has no record of.
+        record: bool,
     },
+    /// Asks the agent for the conversations it has for a directory.
+    List(PathBuf),
     SetOption(String, OptionValue),
 }
 
@@ -798,7 +837,37 @@ impl AgentHandle {
     /// comes as `Event::Resumed`; until then, and if it fails, the current
     /// conversation stays.
     pub fn resume(&self, id: String, cwd: PathBuf, mcp: Vec<McpServer>) -> bool {
-        self.send(Command::Resume { id, cwd, mcp })
+        let record = false;
+        self.send(Command::Resume {
+            id,
+            cwd,
+            mcp,
+            record,
+        })
+    }
+
+    /// `resume`, for a conversation Parolsh has no record of: the agent
+    /// replays it when it can, and `take_replay` has what it replayed.
+    pub fn resume_recording(&self, id: String, cwd: PathBuf, mcp: Vec<McpServer>) -> bool {
+        let record = true;
+        self.send(Command::Resume {
+            id,
+            cwd,
+            mcp,
+            record,
+        })
+    }
+
+    /// What the agent replayed of the conversation just resumed with
+    /// `resume_recording`; `None` when it could only reopen it.
+    pub fn take_replay(&self) -> Option<Vec<Replayed>> {
+        self.shared.lock().ok()?.replay.take()
+    }
+
+    /// Asks for the conversations the agent has for `cwd`. The answer comes
+    /// as `Event::Listed`.
+    pub fn list(&self, cwd: PathBuf) -> bool {
+        self.send(Command::List(cwd))
     }
 
     fn send(&self, command: Command) -> bool {
@@ -991,6 +1060,7 @@ async fn serve(
             }
             // `session/resume` does not replay the conversation; `session/load` does.
             let can_resume = agent_capabilities.session_capabilities.resume.is_some();
+            let can_list = agent_capabilities.session_capabilities.list.is_some();
             let can_load = agent_capabilities.load_session;
             // A copy has to be opened before its first prompt: Claude does
             // not find it otherwise, and Codex never answers.
@@ -1075,8 +1145,26 @@ async fn serve(
                             open_session(&cx, Opening::New, &dir, mcp, &wanted, &events, &shared)
                                 .await?;
                     }
-                    Command::Resume { id, cwd, mcp } => {
-                        let opening = match (can_resume, can_load) {
+                    Command::List(dir) => {
+                        let listed = match can_list {
+                            true => list_sessions(&cx, &dir).await,
+                            false => Err("this agent does not list its conversations".to_string()),
+                        };
+                        let _ = events.send(Event::Listed(listed));
+                    }
+                    Command::Resume {
+                        id,
+                        cwd,
+                        mcp,
+                        record,
+                    } => {
+                        // To record it, the agent has to replay it.
+                        let record = record && can_load;
+                        if let Ok(mut state) = shared.lock() {
+                            state.replay = record.then(Vec::new);
+                            state.replaying = None;
+                        }
+                        let opening = match (can_resume && !record, can_load) {
                             (true, _) => Opening::Resume(id),
                             (false, true) => Opening::Load(id),
                             (false, false) => {
@@ -1214,6 +1302,112 @@ struct First {
     start: Start,
 }
 
+/// The conversations the agent has for `cwd`, newest first as it lists
+/// them, following its pages up to a limit.
+async fn list_sessions(cx: &ConnectionTo<Agent>, cwd: &Path) -> Result<Vec<AgentSession>, String> {
+    const PAGES: usize = 20;
+    let mut sessions = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..PAGES {
+        let request = ListSessionsRequest::new()
+            .cwd(cwd.to_path_buf())
+            .cursor(cursor);
+        let page = cx
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|e| stop_reason(&e))?;
+        sessions.extend(page.sessions.into_iter().map(|session| AgentSession {
+            id: session.session_id.to_string(),
+            title: session.title.filter(|title| !title.trim().is_empty()),
+            updated: session.updated_at,
+        }));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(sessions)
+}
+
+/// Keeps `update` when it is a piece of a conversation being replayed to be
+/// recorded: a message, a thought, a tool call. True when it was one.
+fn replayed(state: &mut SessionState, update: &SessionUpdate) -> bool {
+    if !state.loading {
+        return false;
+    }
+    let Some(replay) = state.replay.as_mut() else {
+        return false;
+    };
+    let replaying = &mut state.replaying;
+    // The chunks of one message come one after the other, with its id.
+    let mut said = |chunk: &ContentChunk, piece: fn(String) -> Replayed| {
+        let ContentBlock::Text(text) = &chunk.content else {
+            return;
+        };
+        let message = chunk.message_id.as_ref().map(|id| id.0.to_string());
+        let same = message.is_some() && message == *replaying;
+        let last = match (same, replay.last_mut()) {
+            (
+                true,
+                Some(Replayed::User(last) | Replayed::Agent(last) | Replayed::Thought(last)),
+            ) => Some(last),
+            _ => None,
+        };
+        match last {
+            Some(last) => last.push_str(&text.text),
+            None => replay.push(piece(text.text.clone())),
+        }
+        *replaying = message;
+    };
+    match update {
+        SessionUpdate::UserMessageChunk(chunk) => said(chunk, Replayed::User),
+        SessionUpdate::AgentMessageChunk(chunk) => said(chunk, Replayed::Agent),
+        SessionUpdate::AgentThoughtChunk(chunk) => said(chunk, Replayed::Thought),
+        SessionUpdate::ToolCall(call) => {
+            *replaying = None;
+            replay.push(Replayed::Tool {
+                id: call.tool_call_id.to_string(),
+                title: call.title.clone(),
+                kind: serde_json::to_value(call.kind)
+                    .ok()
+                    .and_then(|kind| kind.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+                files: call.locations.iter().map(|at| at.path.clone()).collect(),
+                finished: match call.status {
+                    ToolCallStatus::Completed => Some(true),
+                    ToolCallStatus::Failed => Some(false),
+                    _ => None,
+                },
+            });
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            let call = update.tool_call_id.to_string();
+            let tool = replay.iter_mut().rev().find_map(|piece| match piece {
+                Replayed::Tool {
+                    id,
+                    title,
+                    finished,
+                    ..
+                } if *id == call => Some((title, finished)),
+                _ => None,
+            });
+            if let Some((title, finished)) = tool {
+                if let Some(new) = &update.fields.title {
+                    *title = new.clone();
+                }
+                match update.fields.status {
+                    Some(ToolCallStatus::Completed) => *finished = Some(true),
+                    Some(ToolCallStatus::Failed) => *finished = Some(false),
+                    _ => {}
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Copies the conversation `of`, which another agent process may be working
 /// on. The copy's id.
 async fn fork(
@@ -1333,6 +1527,7 @@ async fn open_session(
             session_id: Some(session.to_string()),
             forks: state.forks,
             commands: std::mem::take(&mut state.commands),
+            replay: state.replay.take(),
             ..Default::default()
         };
     }
@@ -1467,6 +1662,12 @@ fn turn_usage(shared: &Shared, response: &PromptResponse) -> Option<TurnUsage> {
 }
 
 fn forward(events: &mpsc::Sender<Event>, shared: &Shared, update: SessionUpdate) {
+    if shared
+        .lock()
+        .is_ok_and(|mut state| replayed(&mut state, &update))
+    {
+        return;
+    }
     let event = match update {
         SessionUpdate::CurrentModeUpdate(update) => {
             if let Ok(mut state) = shared.lock()
@@ -2209,6 +2410,80 @@ mod tests {
         assert_eq!(of, "null");
         assert_eq!(agent.activity().get().forks, Forks::No);
         assert_eq!(agent.activity().get().session_id.as_deref(), Some("s1"));
+    }
+
+    /// The agent's answer to `list`.
+    fn listed(agent: &AgentHandle, dir: &Path) -> Result<Vec<AgentSession>, String> {
+        assert!(agent.list(dir.to_path_buf()));
+        loop {
+            if let Event::Listed(listed) = next(agent) {
+                return listed;
+            }
+        }
+    }
+
+    #[test]
+    fn the_agents_own_conversations_are_listed_through_its_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &["--list"], dir.path());
+
+        let sessions = listed(&agent, dir.path()).unwrap();
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["ext-1aaa", "ext-2bbb", "ext-3ccc"]);
+        assert_eq!(sessions[0].title.as_deref(), Some("Fix the crashing api"));
+        assert_eq!(sessions[0].updated.as_deref(), Some("2026-10-02T15:27:00Z"));
+
+        // An agent that has no such list says so, and keeps running.
+        let agent = start(None, &[], dir.path());
+        let refused = listed(&agent, dir.path()).unwrap_err();
+        assert_eq!(refused, "this agent does not list its conversations");
+        assert_eq!(turn(&agent, "warn").0, "warned");
+    }
+
+    /// A conversation Parolsh did not see is replayed to be recorded: its
+    /// pieces in order, the chunks of a message as one, a tool call with how
+    /// it ended. Nothing of it is shown as it comes.
+    #[test]
+    fn a_conversation_is_replayed_to_be_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = start(None, &["--list"], dir.path());
+        let resumed = |agent: &AgentHandle| match next(agent) {
+            Event::Resumed(resumed) => resumed,
+            other => panic!("shown while replaying: {other:?}"),
+        };
+
+        let id = "ext-1aaa".to_string();
+        assert!(agent.resume_recording(id.clone(), dir.path().to_path_buf(), Vec::new()));
+        assert_eq!(resumed(&agent), Ok(()));
+        let text = |text: &str| text.to_string();
+        assert_eq!(
+            agent.take_replay().unwrap(),
+            [
+                Replayed::User(text("why does the api crash?")),
+                Replayed::Thought(text("Reading the handler.")),
+                Replayed::Tool {
+                    id: text("r1"),
+                    title: text("Read api.rs"),
+                    kind: text("read"),
+                    files: vec![PathBuf::from("/src/api.rs")],
+                    finished: Some(true),
+                },
+                Replayed::Agent(text("It crashes on empty input.")),
+            ]
+        );
+        // Taken once, and the conversation goes on in it.
+        assert_eq!(agent.take_replay(), None);
+        assert!(turn(&agent, "hello").0.contains("[ext-1aaa|"));
+
+        // A plain resume records nothing; nor does an agent that cannot
+        // replay, which only reopens the conversation.
+        assert!(agent.resume(id.clone(), dir.path().to_path_buf(), Vec::new()));
+        assert_eq!(resumed(&agent), Ok(()));
+        assert_eq!(agent.take_replay(), None);
+        let agent = start(None, &["--list", "--no-load"], dir.path());
+        assert!(agent.resume_recording(id, dir.path().to_path_buf(), Vec::new()));
+        assert_eq!(resumed(&agent), Ok(()));
+        assert_eq!(agent.take_replay(), None);
     }
 
     #[test]

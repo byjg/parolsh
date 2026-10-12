@@ -11,7 +11,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use crate::acp::{AgentHandle, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage};
+use crate::acp::{
+    AgentHandle, AgentSession, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage,
+};
 use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
 use crate::config::{LinkStyle, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
@@ -290,6 +292,7 @@ impl Turn {
                 | Event::Plan { .. }
                 | Event::Activity
                 | Event::Resumed(_)
+                | Event::Listed(_)
                 | Event::Compacting
                 | Event::Notice(_) => {}
             }
@@ -452,7 +455,7 @@ fn follow(
                 out.tool_update(&id, title, finished);
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
-            Event::Activity | Event::Resumed(_) => {}
+            Event::Activity | Event::Resumed(_) | Event::Listed(_) => {}
             Event::Compacting => {
                 turn.flush(audit);
                 out.pin("Compacting…");
@@ -700,6 +703,26 @@ pub fn wait_resumed(agent: &AgentHandle) -> Resumed {
     }
 }
 
+/// Waits for the agent's answer to `list`: the conversations it has, or why
+/// it cannot say.
+pub fn wait_listed(agent: &AgentHandle) -> Result<Vec<AgentSession>, String> {
+    loop {
+        match agent.recv_timeout(Duration::from_secs(60)) {
+            Ok(Event::Listed(listed)) => return listed,
+            Ok(Event::Notice(message)) => eprintln!("parolsh: {message}"),
+            Ok(Event::Error(message)) => return Err(message),
+            Ok(Event::TurnEnd(id, _) | Event::TurnFailed(id, _)) => {
+                agent.ended(id);
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                return Err("the agent did not answer in a minute".to_string());
+            }
+            Err(RecvTimeoutError::Disconnected) => return Err("the agent stopped".to_string()),
+        }
+    }
+}
+
 /// Prints notices and errors that arrived while no turn was running, such as
 /// an agent that failed to start. False when the agent stopped.
 pub fn drain(agent: &AgentHandle) -> bool {
@@ -866,6 +889,7 @@ pub fn watch(
             | Event::Plan { .. }
             | Event::Activity
             | Event::Resumed(_)
+            | Event::Listed(_)
             | Event::Compacting
             | Event::Usage(_) => {}
         }

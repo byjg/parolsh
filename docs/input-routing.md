@@ -304,9 +304,11 @@ conversation opens, and again when it changes:
 | `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
 | `#sessions <text>` | The ones where the text was said, or that it titles, see [Finding a session](#finding-a-session) |
 | `#sessions all [text]` | The same over every project |
+| `#sessions agent` | The conversations the running agent itself has for this directory, also the ones it had outside Parolsh. See [A conversation the agent had elsewhere](#a-conversation-the-agent-had-elsewhere) |
 | `#forget [n]` | Remove session `n` of this project from the history, after asking; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so. A session of another project is resumed after asking |
 | `#resume <text>` | Go back to the one session of this project that has the text; `#resume all <text>` looks in every project |
+| `#resume agent <text>` | Go back to one of the agent's own conversations, by its title or the start of its id; it is recorded as a session |
 | `#share [n]` | Let the agent of this conversation read session `n` of another project with its history tools; without `n`, what is shared. See [Sharing a session of another project](#sharing-a-session-of-another-project) |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
@@ -515,6 +517,49 @@ A number is easily mistyped, and the one next to it is a session too:
 - A session whose directory no longer exists, or whose agent is not
   configured any more, is not resumed, and Parolsh says which; `#audit <n>`
   still shows it.
+
+### A conversation the agent had elsewhere
+
+Parolsh's history only has what happened in Parolsh. A conversation you had
+with the agent in its own terminal, or in an editor, is the agent's:
+`#sessions agent` lists what the running agent has for this directory, and
+`#resume agent <text>` goes back to one.
+
+```text
+[claude] ~/projects/wallet ✦ #sessions agent
+     ·  2026-10-11 20:12  3062a1f0  Background task handling
+     ·  2026-10-07 13:47  9b41c2de  Background turns summary
+    14  2026-10-02 15:27  ef501917  Fix the crashing api
+A dot: not in Parolsh's history. #resume agent <title or id> opens one.
+[claude] ~/projects/wallet ✦ #resume agent task handling
+…its last exchanges…
+Resumed "Background task handling": the agent remembers that conversation.
+It is session 33 from now on, with what the agent replayed of it.
+```
+
+- Each line has when the conversation last changed, the start of the agent's
+  id for it, and its title. The ones Parolsh has a session for show its
+  number; `#resume agent` opens that session.
+- `#resume agent <text>` takes part of the title, in any case, or the start
+  of the id. When several match, as two conversations with the same title
+  do, it lists them: the id tells them apart. After a listing, Tab completes
+  to the id.
+- **It is recorded when it is opened.** The agent replays the conversation
+  (your messages, its answers, its tool calls), and Parolsh saves that as a
+  new session: `#redraw`, `#audit <n>`, `#sessions <text>` and `#resume <n>`
+  work on it like on any other. Only the conversation you open is taken, when
+  you open it.
+- A replay has no dates: the session is dated when the agent says the
+  conversation last changed, and its usage starts from now.
+- The running agent, for this directory. For another agent's, `#agent
+  <name>` first. An agent that cannot replay a conversation only reopens it,
+  and Parolsh says that it has nothing of what came before; one that does not
+  list its conversations says so.
+
+:::warning Not while it is open elsewhere
+A conversation that is still open in the agent's own terminal would be
+written to by two programs. Parolsh cannot tell: close it there first.
+:::
 
 ### Showing the conversation again
 
