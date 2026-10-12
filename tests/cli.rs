@@ -2187,3 +2187,76 @@ fn a_conversation_that_cannot_be_replayed_or_listed_is_said() {
         "{screen}"
     );
 }
+
+/// A configuration with two agents that say who they are (`env WHO`), the
+/// first being the default.
+fn home_with_two_agents() -> tempfile::TempDir {
+    config_home(&format!(
+        "default_agent = \"first\"\n\
+         [agents.first]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\nenv = {{ WHO = \"agent-one\" }}\n\
+         [agents.second]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\nenv = {{ WHO = \"agent-two\" }}\n"
+    ))
+}
+
+/// `--agent <name>` starts Parolsh with that agent instead of the default
+/// one, the project's included, and `#cd` keeps it.
+#[test]
+fn the_agent_flag_starts_with_that_agent() {
+    let home = home_with_two_agents();
+    // A project that asks for the default agent by name.
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".parolsh")).unwrap();
+    std::fs::write(
+        project.path().join(".parolsh/config.toml"),
+        "default_agent = \"first\"\n",
+    )
+    .unwrap();
+    let cd = format!("#cd {}", project.path().display());
+
+    let lines = ["env WHO", "#agent", cd.as_str(), "env WHO"];
+    let screen = run_in(home.path(), "--agent second", &lines, "dumb", false);
+    assert_eq!(screen.matches("\nagent-two").count(), 2, "{screen}");
+    assert!(screen.contains("[second] "), "{screen}");
+    assert!(screen.contains("\nsecond\n"), "{screen}");
+    // The default one was not started first.
+    assert!(!screen.contains("agent-one"), "{screen}");
+    assert!(!screen.contains("[first] "), "{screen}");
+
+    // Without the flag, the default.
+    let screen = run_in(home.path(), "", &["env WHO"], "dumb", false);
+    assert!(screen.contains("\nagent-one"), "{screen}");
+}
+
+/// A name that is no agent is said before anything starts, with the ones
+/// that are; and the flag does not go with a session to resume, whose agent
+/// is its own, nor with `-c`, which runs without one.
+#[test]
+fn the_agent_flag_refuses_what_it_cannot_do() {
+    let home = home_with_two_agents();
+    let run = |args: &[&str]| {
+        let output = parolsh()
+            .args(args)
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("XDG_STATE_HOME", home.path())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+
+    let (code, said) = run(&["--agent", "nope"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert_eq!(
+        said.trim(),
+        "parolsh: no agent named `nope`. Configured: first, second"
+    );
+
+    for other in [&["--continue"][..], &["--resume", "1"], &["-c", "true"]] {
+        let args = [&["--agent", "second"][..], other].concat();
+        let (code, said) = run(&args);
+        assert_eq!(code, Some(2), "{args:?}: {said}");
+        assert!(said.contains("cannot be used with"), "{args:?}: {said}");
+    }
+}

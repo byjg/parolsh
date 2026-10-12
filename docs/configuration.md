@@ -104,7 +104,7 @@ launched as `claude-agent-acp`.
 | `clipboard` | the desktop's | Command `#copy` gives the text to, on its standard input. Without one: `wl-copy` on Wayland, `xclip` or `xsel` on X11, `pbcopy` on macOS, else the terminal (OSC 52). See [Copying an answer](input-routing.md#copying-an-answer). |
 | `prompt` | `"parolsh"` | Prompt style: `parolsh`, `starship` or `minimal`. See [Prompt](#prompt). |
 | `input` | `"agent"` | Where plain text goes when Parolsh starts: `agent` or `shell`. `parolsh --input=agent\|shell` overrides it. See [Shell mode](input-routing.md#shell-mode). |
-| `default_agent` | none | Agent used when Parolsh starts. Must name a configured agent. `#agent <name>` switches until you leave Parolsh. |
+| `default_agent` | none | Agent used when Parolsh starts. Must name a configured agent. `parolsh --agent <name>` starts with another one for a run, and `#agent <name>` switches until you leave Parolsh. See [Switching agents](agents.md#switching-agents). |
 | `agents.<name>.command` | required | Program that speaks ACP over stdio |
 | `agents.<name>.args` | `[]` | Arguments for `command` |
 | `agents.<name>.env` | `{}` | Environment variables added for the agent, such as a base URL or a model. See [API keys](agents.md#api-keys) before putting a key here. |
