@@ -50,6 +50,9 @@ pub struct ShellCompleter {
     /// The history's database and the project Parolsh is in, for the
     /// sessions `#resume`, `#audit` and `#forget` take.
     pub sessions: Arc<Mutex<Option<(PathBuf, String)>>>,
+    /// The agent's own conversations, as it last listed them (`#sessions
+    /// agent`): the start of the id, and what says which one it is.
+    pub agent_sessions: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Completer for ShellCompleter {
@@ -62,6 +65,10 @@ impl Completer for ShellCompleter {
             let agent = self.agent.lock().expect("agent lock").clone();
             let commands = agent.map(|agent| agent.commands()).unwrap_or_default();
             return CompletionResult::fresh(agent_commands(&commands, typed, pos));
+        }
+        if let Some(typed) = agent_session(line, pos) {
+            let listed = self.agent_sessions.lock().expect("sessions lock").clone();
+            return CompletionResult::fresh(agent_sessions_from(&listed, typed, pos));
         }
         if let Some(typed) = session_number(line, pos) {
             let place = self.sessions.lock().expect("sessions lock").clone();
@@ -95,6 +102,32 @@ fn session_number(line: &str, pos: usize) -> Option<&str> {
     let typed = typed.trim_start();
     let number = typed.chars().all(|c| c.is_ascii_digit());
     (SESSION_COMMANDS.contains(&name) && number).then_some(typed)
+}
+
+/// What is typed after `#resume agent `, with the cursor at `pos` in it:
+/// part of the title or of the id of one of the agent's own conversations.
+fn agent_session(line: &str, pos: usize) -> Option<&str> {
+    let line = line.get(..pos)?;
+    let rest = line.trim_start().strip_prefix("#resume")?;
+    let rest = rest.strip_prefix(char::is_whitespace)?.trim_start();
+    let typed = rest.strip_prefix("agent")?;
+    Some(typed.strip_prefix(char::is_whitespace)?.trim_start())
+}
+
+/// The agent's conversations that `typed` is in the title of, or starts the
+/// id of: each completes to its id, which two with the same title do not
+/// share, with its date and title beside it.
+fn agent_sessions_from(listed: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
+    let wanted = typed.to_lowercase();
+    listed
+        .iter()
+        .filter(|(id, about)| id.starts_with(typed) || about.to_lowercase().contains(&wanted))
+        .map(|(id, about)| Suggestion {
+            span: Span::new(pos - typed.len(), pos),
+            description: Some(about.clone()),
+            ..suggestion(id.clone(), false)
+        })
+        .collect()
 }
 
 /// The sessions of `project` in the history at `db`, newest first: their
@@ -686,6 +719,48 @@ mod tests {
         // It replaces the digits typed, in the command's line.
         let suggestion = &sessions_from(&sessions, "1", "#resume 1".len())[0];
         assert_eq!((suggestion.span.start, suggestion.span.end), (8, 9));
+    }
+
+    #[test]
+    fn the_agents_own_conversations_complete_to_their_id() {
+        fn typed(line: &str) -> Option<&str> {
+            agent_session(line, line.len())
+        }
+        assert_eq!(typed("#resume agent "), Some(""));
+        assert_eq!(typed("#resume agent fix the"), Some("fix the"));
+        assert_eq!(typed("  #resume  agent  ext"), Some("ext"));
+        assert_eq!(typed("#resume agent"), None);
+        assert_eq!(typed("#resume agents x"), None);
+        assert_eq!(typed("#audit agent x"), None);
+
+        let listed = [
+            (
+                "ext-1aaa".to_string(),
+                "2026-10-02 15:27  Fix the crashing api".to_string(),
+            ),
+            (
+                "ext-2bbb".to_string(),
+                "2026-10-01 19:54  Greeting".to_string(),
+            ),
+            (
+                "ext-3ccc".to_string(),
+                "2026-10-01 19:53  Greeting".to_string(),
+            ),
+        ];
+        let found = |typed: &str| -> Vec<String> {
+            let line = format!("#resume agent {typed}");
+            let found = agent_sessions_from(&listed, typed, line.len());
+            found.into_iter().map(|s| s.value).collect()
+        };
+        assert_eq!(found("").len(), 3);
+        // By the title, in any case, or by the start of the id.
+        assert_eq!(found("CRASH"), ["ext-1aaa"]);
+        assert_eq!(found("greeting"), ["ext-2bbb", "ext-3ccc"]);
+        assert_eq!(found("ext-3"), ["ext-3ccc"]);
+        assert!(found("nothing").is_empty());
+        let line = "#resume agent greet";
+        let suggestion = &agent_sessions_from(&listed, "greet", line.len())[0];
+        assert_eq!((suggestion.span.start, suggestion.span.end), (14, 19));
     }
 
     #[test]

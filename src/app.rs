@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::acp::{ActivityWatch, AgentHandle, Block, ForkOf, Forks, Start};
+use crate::acp::{ActivityWatch, AgentHandle, AgentSession, Block, ForkOf, Forks, Replayed, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
 use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
@@ -57,9 +57,11 @@ Control commands:
   #sessions       the earlier sessions of this project, from the history
   #sessions <text>  the ones where the text was said
   #sessions all [text]  the same over every project
+  #sessions agent  the conversations the agent itself has here, also from outside Parolsh
   #forget [n]     remove a session from the history, after asking; the current one without n
   #resume <n>     go back to session n with the agent, when it can (Claude, Codex, OpenCode)
   #resume <text>  go back to the one session that has the text (all <text>: in any project)
+  #resume agent <text>  go back to one of the agent's own conversations, by its title or id
   #share [n]      let this conversation's agent read session n of another project
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
@@ -86,6 +88,9 @@ pub struct App {
     /// The history and the project, shared with the Tab completion of the
     /// sessions' numbers.
     completion_sessions: Arc<Mutex<Option<(PathBuf, String)>>>,
+    /// The agent's own conversations as it last listed them, shared with
+    /// the Tab completion of `#resume agent`.
+    completion_agent_sessions: Arc<Mutex<Vec<(String, String)>>>,
     /// Where plain text goes, shared with the colors, hints and completion.
     mode: SharedMode,
     project_root: Option<PathBuf>,
@@ -199,6 +204,7 @@ impl App {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             completion_agent: Arc::default(),
             completion_sessions: Arc::default(),
+            completion_agent_sessions: Arc::default(),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
             shell_changes: shell::Changes::default(),
@@ -568,6 +574,9 @@ impl App {
     /// of this project or of `all`, and with `text` only those where it was
     /// said or that it titles. `*` marks the current one.
     fn sessions_command(&self, args: &str) -> Result<()> {
+        if args == "agent" {
+            return self.agent_sessions_command();
+        }
         let (everywhere, text) = scope_and_text(args);
         let history = self.history()?;
         let project = self.project_key();
@@ -585,6 +594,169 @@ impl App {
                 "No session of this project has `{text}`. #sessions all {text} looks in every project."
             ),
             (true, false, true) => println!("No session has `{text}`."),
+        }
+        Ok(())
+    }
+
+    /// The conversations the running agent has for this directory, as it
+    /// lists them: also the ones it had outside Parolsh.
+    fn agent_sessions(&self) -> Result<Vec<AgentSession>> {
+        let agent = self.agent.as_ref().with_context(no_agent)?;
+        anyhow::ensure!(agent.list(self.cwd.clone()), "the agent stopped");
+        let sessions = turn::wait_listed(agent).map_err(anyhow::Error::msg)?;
+        // For Tab after `#resume agent`: what was just listed.
+        let listed = sessions.iter().map(|session| {
+            let about = format!(
+                "{}  {}",
+                self.agent_date(session),
+                session.title.as_deref().unwrap_or("(no title)")
+            );
+            (short_id(&session.id), about)
+        });
+        *self
+            .completion_agent_sessions
+            .lock()
+            .expect("sessions lock") = listed.collect();
+        Ok(sessions)
+    }
+
+    /// When the agent says a conversation last changed, in local time.
+    fn agent_date(&self, session: &AgentSession) -> String {
+        let updated = session.updated.as_deref().unwrap_or_default();
+        let local = self
+            .audit
+            .history()
+            .and_then(|history| history.local_time(updated));
+        local.unwrap_or_else(|| updated.chars().take(16).collect())
+    }
+
+    /// `#sessions agent`: the running agent's own conversations for this
+    /// directory, newest first, with Parolsh's number for the ones it has a
+    /// session for, and a dot for the others.
+    fn agent_sessions_command(&self) -> Result<()> {
+        let sessions = self.agent_sessions()?;
+        if sessions.is_empty() {
+            println!("The agent has no conversation for this directory.");
+            return Ok(());
+        }
+        self.print_agent_sessions(&sessions);
+        if sessions.iter().any(|session| self.known(session).is_none()) {
+            println!("A dot: not in Parolsh's history. #resume agent <title or id> opens one.");
+        }
+        Ok(())
+    }
+
+    /// Parolsh's session for one of the agent's conversations, if any.
+    fn known(&self, session: &AgentSession) -> Option<i64> {
+        let history = self.audit.history()?;
+        history.session_with(&session.id).ok().flatten()
+    }
+
+    fn print_agent_sessions(&self, sessions: &[AgentSession]) {
+        for session in sessions.iter().take(SESSIONS_SHOWN) {
+            let number = match self.known(session) {
+                Some(number) => number.to_string(),
+                None => "·".to_string(),
+            };
+            let date = self.agent_date(session);
+            let line = format!(
+                "  {number:>4}  {date:<16}  {:<8}  {}",
+                short_id(&session.id),
+                session.title.as_deref().unwrap_or("(no title)"),
+            );
+            println!("{}", audit::cut(&line, ui::width()));
+        }
+        if sessions.len() > SESSIONS_SHOWN {
+            println!("… and {} more.", sessions.len() - SESSIONS_SHOWN);
+        }
+    }
+
+    /// `#resume agent <text>`: goes back to the one conversation of the
+    /// running agent whose title has `text`, or whose id starts with it. One
+    /// Parolsh has no session for is replayed by the agent and recorded as a
+    /// new session, so that it is whole from then on.
+    fn resume_agent_session(&mut self, text: &str) -> Result<()> {
+        anyhow::ensure!(
+            !text.is_empty(),
+            "#resume agent <title or id>: #sessions agent lists the agent's conversations"
+        );
+        let wanted = text.to_lowercase();
+        let found: Vec<AgentSession> = self
+            .agent_sessions()?
+            .into_iter()
+            .filter(|session| {
+                let title = session.title.as_deref().unwrap_or_default().to_lowercase();
+                session.id.starts_with(text) || title.contains(&wanted)
+            })
+            .collect();
+        let session = match found.as_slice() {
+            [] => anyhow::bail!(
+                "the agent has no conversation with `{text}` in its title, see #sessions agent"
+            ),
+            [one] => one.clone(),
+            _ => {
+                self.print_agent_sessions(&found);
+                println!("Several have `{text}`: give more of the title, or the id before it.");
+                return Ok(());
+            }
+        };
+        // Already Parolsh's: its session, with all it recorded of it.
+        if let Some(number) = self.known(&session) {
+            return self.resume_session(number);
+        }
+        let record = self.audit.history().is_some();
+        let mcp = self.mcp_servers(false);
+        let agent = self.agent.as_ref().with_context(no_agent)?;
+        let sent = match record {
+            true => agent.resume_recording(session.id.clone(), self.cwd.clone(), mcp),
+            false => agent.resume(session.id.clone(), self.cwd.clone(), mcp),
+        };
+        anyhow::ensure!(sent, "the agent stopped");
+        match turn::wait_resumed(agent) {
+            turn::Resumed::Yes => {}
+            turn::Resumed::No(why) => anyhow::bail!("cannot resume that conversation: {why}"),
+            turn::Resumed::AgentStopped(why) => {
+                self.agent = None;
+                anyhow::bail!("{why}. Run #new to start it again.");
+            }
+        }
+        let replay = agent.take_replay();
+        let title = session.title.as_deref().unwrap_or("(no title)");
+        // Another conversation: what a background turn answers is not its.
+        self.conversation += 1;
+        self.private = false;
+        self.handover.clear();
+        let start = SessionStart {
+            project: self.project_key(),
+            agent: self.active.clone(),
+            cwd: self.cwd.display().to_string(),
+        };
+        let name = self.active.clone().unwrap_or_default();
+        let Some(history) = self.audit.history_mut() else {
+            println!("Resumed \"{title}\": the agent remembers that conversation.");
+            return Ok(());
+        };
+        let recorded = replay.is_some();
+        let entries = imported(replay.unwrap_or_default(), &name);
+        let number = history.import(
+            &start,
+            &session.id,
+            session.title.as_deref(),
+            session.updated.as_deref(),
+            &entries,
+        )?;
+        history.resume(&start.project, number)?;
+        // Where it was, before going on.
+        self.show_exchanges(self.config.redraw_exchanges)?;
+        println!("Resumed \"{title}\": the agent remembers that conversation.");
+        match recorded {
+            true => {
+                println!("It is session {number} from now on, with what the agent replayed of it.")
+            }
+            false => println!(
+                "It is session {number} from now on. The agent cannot replay it: \
+                 Parolsh has what follows, not what came before."
+            ),
         }
         Ok(())
     }
@@ -691,6 +863,12 @@ impl App {
     /// `#resume <n>`: goes back to session `n` of this project with its
     /// agent, in its directory, and goes on saving to it.
     fn resume_command(&mut self, args: &str) -> Result<()> {
+        // One of the agent's own conversations, by its title or id.
+        match args.split_once(char::is_whitespace) {
+            Some(("agent", text)) => return self.resume_agent_session(text.trim()),
+            None if args == "agent" => return self.resume_agent_session(""),
+            _ => {}
+        }
         if let Ok(id) = args.parse::<i64>() {
             return self.resume_session(session_number(&id.to_string())?);
         }
@@ -1046,6 +1224,7 @@ impl App {
             bash: is_bash.then_some(shell),
             agent: self.completion_agent.clone(),
             sessions: self.completion_sessions.clone(),
+            agent_sessions: self.completion_agent_sessions.clone(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
@@ -1910,6 +2089,54 @@ fn state_dir() -> Option<PathBuf> {
 }
 
 /// A session number, as `#sessions` lists them.
+/// The start of an agent's id for a conversation: enough to tell two with
+/// the same title apart, and to type.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// What the agent replayed of a conversation, as entries of the history:
+/// the same as if Parolsh had seen them, then a line saying where they are
+/// from.
+fn imported(
+    replay: Vec<Replayed>,
+    agent: &str,
+) -> Vec<(&'static str, &'static str, String, serde_json::Value)> {
+    let mut entries: Vec<_> = replay
+        .into_iter()
+        .filter_map(|piece| {
+            Some(match piece {
+                Replayed::User(text) => ("user", "message", text, json!({"agent": agent})),
+                Replayed::Agent(text) => ("agent", "answer", text, json!({})),
+                Replayed::Thought(text) => ("agent", "thought", text, json!({})),
+                Replayed::Tool {
+                    title,
+                    kind,
+                    files,
+                    finished,
+                    ..
+                } => {
+                    let files: Vec<String> = files
+                        .iter()
+                        .map(|file| file.display().to_string())
+                        .collect();
+                    let mut meta = json!({"kind": kind, "files": files});
+                    if let Some(finished) = finished {
+                        meta["finished"] = json!(finished);
+                    }
+                    ("agent", "tool", title, meta)
+                }
+            })
+            .filter(|(_, _, text, _)| !text.trim().is_empty())
+        })
+        .collect();
+    if !entries.is_empty() {
+        let note = "recorded from the agent's replay of the conversation".to_string();
+        entries.push(("parolsh", "event", note, json!({"imported": true})));
+    }
+    entries
+}
+
 /// A token no other conversation has, for its history server: this run's
 /// random hasher over the time and a count.
 fn new_token() -> String {

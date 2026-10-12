@@ -2086,3 +2086,104 @@ fn share_says_when_there_is_nothing_to_do() {
         "{screen}"
     );
 }
+
+/// `#sessions agent` lists the conversations the agent itself has here,
+/// also those it had outside Parolsh; `#resume agent <text>` goes back to
+/// one by its title or its id. The agent replays it, and it is a session of
+/// Parolsh from then on, with what was replayed.
+#[test]
+fn a_conversation_the_agent_had_elsewhere_is_resumed_and_recorded() {
+    let home = fake_agent_home_with(&["--list"]);
+    let lines = [
+        "#sessions agent",
+        "#resume agent greeting",
+        "#resume agent nothing-has-this",
+        "#resume agent crashing",
+        "and now?",
+        "#sessions agent",
+    ];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+
+    // Not in Parolsh's history yet: a dot, the start of its id, its title.
+    assert!(
+        screen.contains("  ext-1aaa  Fix the crashing api\n"),
+        "{screen}"
+    );
+    assert!(screen.contains("     ·  "), "{screen}");
+    // Two have that title: listed, to pick one by its id.
+    assert!(
+        screen.contains("Several have `greeting`: give more of the title, or the id before it."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: the agent has no conversation with `nothing-has-this`"),
+        "{screen}"
+    );
+    // The replay is recorded and shown, then the conversation goes on in it.
+    let resumed = &screen[screen.find("#resume agent crashing").expect(&screen)..];
+    let replayed = [
+        "why does the api crash?",
+        "read: Read api.rs [/src/api.rs] · completed",
+        "It crashes on empty input.",
+        "Resumed \"Fix the crashing api\": the agent remembers that conversation.",
+        "It is session 1 from now on, with what the agent replayed of it.",
+        "[ext-1aaa|default|",
+    ];
+    let order: Vec<usize> = replayed
+        .iter()
+        .map(|text| {
+            resumed
+                .find(text)
+                .unwrap_or_else(|| panic!("no {text} in {resumed}"))
+        })
+        .collect();
+    assert!(order.is_sorted(), "{resumed}");
+    // Now Parolsh's: its number in the agent's list.
+    let after = &screen[screen.rfind("#sessions agent").unwrap()..];
+    assert!(after.contains("     1  "), "{after}");
+
+    // A later run: one session, whole, and not recorded twice.
+    let lines = ["#resume agent ext-1", "#sessions", "#audit 1"];
+    let screen = run_in(home.path(), "", &lines, "dumb", false);
+    assert!(
+        screen.contains("Resumed session 1: the agent remembers"),
+        "{screen}"
+    );
+    assert_eq!(sessions_listed(&screen), 1, "{screen}");
+    assert_eq!(
+        screen
+            .matches("USER     → fake: why does the api crash?")
+            .count(),
+        1
+    );
+    assert!(screen.contains("USER     → fake: and now?"), "{screen}");
+}
+
+/// An agent that cannot replay a conversation only reopens it, and Parolsh
+/// says that it has nothing of what came before. One that does not list its
+/// conversations says so.
+#[test]
+fn a_conversation_that_cannot_be_replayed_or_listed_is_said() {
+    let home = fake_agent_home_with(&["--list", "--no-load"]);
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#resume agent crashing", "#audit 1"],
+        "dumb",
+        false,
+    );
+    assert!(
+        screen.contains(
+            "The agent cannot replay it: Parolsh has what follows, not what came before."
+        ),
+        "{screen}"
+    );
+    assert!(!screen.contains("why does the api crash?"), "{screen}");
+
+    let home = fake_agent_home_with(&[]);
+    let screen = run_in(home.path(), "", &["#sessions agent"], "dumb", false);
+    assert!(
+        screen.contains("parolsh: this agent does not list its conversations"),
+        "{screen}"
+    );
+}
