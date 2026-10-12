@@ -39,6 +39,15 @@ struct Cli {
     #[arg(long, value_enum, conflicts_with = "command")]
     input: Option<input::Mode>,
 
+    /// Start with this agent, one of the configured ones (overrides
+    /// `default_agent` in config.toml)
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["command", "resume", "continue_last"]
+    )]
+    agent: Option<String>,
+
     /// Go back to session N, like `#resume N` (see `#sessions`); of another project, after asking
     #[arg(
         long,
@@ -144,7 +153,7 @@ fn main() -> ExitCode {
 
     let result = std::env::current_dir()
         .map_err(anyhow::Error::from)
-        .and_then(|cwd| app::App::new(cwd, notices, cli.input, resume))
+        .and_then(|cwd| app::App::new(cwd, notices, cli.input, cli.agent, resume))
         .and_then(|mut app| app.run());
 
     match result {

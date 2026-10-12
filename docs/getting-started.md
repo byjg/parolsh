@@ -115,7 +115,9 @@ see [Turns in the background](agents.md#turns-in-the-background).
 
 To start with plain text going to bash, run `parolsh --input=shell` or set
 `input = "shell"` in the configuration (see
-[Shell mode](input-routing.md#shell-mode)).
+[Shell mode](input-routing.md#shell-mode)). To start with another agent than
+the default one, `parolsh --agent <name>` (see
+[Switching agents](agents.md#switching-agents)).
 
 To pick up where you left off, `parolsh --continue` goes back to the last
 conversation of this project, and `parolsh --resume <n>` to session `n` (see

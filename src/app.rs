@@ -163,6 +163,7 @@ impl App {
         cwd: PathBuf,
         mut notices: Vec<String>,
         input: Option<Mode>,
+        agent: Option<String>,
         resume: Option<Resume>,
     ) -> Result<Self> {
         // Before loading: the first run may write the global configuration.
@@ -172,6 +173,12 @@ impl App {
         );
         let project_root = project::find_root(&cwd);
         let config = Config::load(project_root.as_deref())?;
+        // `--agent`: instead of the default one, the project's included,
+        // and started in its place, not after it.
+        if let Some(name) = &agent {
+            known_agent(&config, name)?;
+        }
+        let active = agent.or_else(|| config.default_agent.clone());
         let mut audit = Audit::new(config.audit_entries);
         let mut history_db = None;
         if config.history_days > 0
@@ -204,7 +211,7 @@ impl App {
             shell_changes: shell::Changes::default(),
             cwd,
             project_root,
-            active: config.default_agent.clone(),
+            active,
             config,
             agent: None,
             prompt_override: None,
@@ -1699,17 +1706,7 @@ impl App {
     }
 
     fn switch_agent(&mut self, name: &str) -> Result<()> {
-        if !self.config.agents.contains_key(name) {
-            let names: Vec<&str> = self.config.agents.keys().map(String::as_str).collect();
-            anyhow::bail!(
-                "no agent named `{name}`. Configured: {}",
-                if names.is_empty() {
-                    "none".to_string()
-                } else {
-                    names.join(", ")
-                }
-            );
-        }
+        known_agent(&self.config, name)?;
         if self.active.as_deref() == Some(name) && self.agent.is_some() {
             println!("Already using {name}.");
             return Ok(());
@@ -1929,6 +1926,22 @@ fn new_token() -> String {
         hasher.finish()
     };
     format!("{:016x}{:016x}", part(1), part(2))
+}
+
+/// An error for a name that is no configured agent, with the ones that are.
+fn known_agent(config: &Config, name: &str) -> Result<()> {
+    if config.agents.contains_key(name) {
+        return Ok(());
+    }
+    let names: Vec<&str> = config.agents.keys().map(String::as_str).collect();
+    anyhow::bail!(
+        "no agent named `{name}`. Configured: {}",
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
+    )
 }
 
 /// `all` and what follows it, or the text alone: `#sessions all retry`.
