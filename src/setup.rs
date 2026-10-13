@@ -125,7 +125,10 @@ mod tests {
         std::fs::write(first.path().join("gemini"), "").unwrap();
         let path = std::env::join_paths([first.path(), second.path()]).unwrap();
 
-        assert_eq!(installed_agents(path.to_str()), ["codex", "qwen", "copilot"]);
+        assert_eq!(
+            installed_agents(path.to_str()),
+            ["codex", "qwen", "copilot"]
+        );
         assert!(installed_agents(None).is_empty());
     }
 
