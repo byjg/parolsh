@@ -187,6 +187,15 @@
 # options = { reasoning_effort = "none" }
 
 
+# GitHub Copilot CLI
+#   npm install -g @github/copilot
+#   Login: copilot auth login
+#
+# [agents.copilot]
+# command = "copilot"
+# args = ["--acp"]
+
+
 # Any OpenAI-compatible API (OpenAI, OpenRouter, Azure, vLLM, Ollama, ...),
 # through Qwen Code. Set OPENAI_API_KEY in your shell.
 #

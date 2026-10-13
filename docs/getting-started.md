@@ -40,8 +40,9 @@ For example, Claude:
 npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-[Agents](agents.md) lists the others (Codex, Gemini CLI, Qwen Code, Kilo
-Code, OpenCode, Goose, ...) with their install command and login.
+[Agents](agents.md) lists the others (Codex, Gemini CLI, Qwen Code, GitHub
+Copilot CLI, Kilo Code, OpenCode, Goose, ...) with their install command and
+login.
 
 ## First run
 
@@ -49,7 +50,7 @@ The first time Parolsh starts, it creates your configuration,
 `~/.config/parolsh/config.toml`, from its built-in sample:
 
 - every agent it finds on your `PATH` (`claude-agent-acp`, `codex-acp`,
-  `gemini`, `qwen`, `kilo`, `opencode`, `goose`) is already enabled;
+  `gemini`, `qwen`, `copilot`, `kilo`, `opencode`, `goose`) is already enabled;
 - the first one found becomes `default_agent`, in that order;
 - everything else stays in the file as commented examples.
 
