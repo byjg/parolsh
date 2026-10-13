@@ -9,11 +9,12 @@ pub const SAMPLE: &str = include_str!("../config.sample.toml");
 
 /// Agents from the sample that can be enabled without the user's data, in
 /// order of preference for `default_agent`, with the command to look for.
-const KNOWN_AGENTS: [(&str, &str); 7] = [
+const KNOWN_AGENTS: [(&str, &str); 8] = [
     ("claude", "claude-agent-acp"),
     ("codex", "codex-acp"),
     ("gemini", "gemini"),
     ("qwen", "qwen"),
+    ("copilot", "copilot"),
     ("kilo", "kilo"),
     ("opencode", "opencode"),
     ("goose", "goose"),
@@ -119,11 +120,12 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         fake_command(first.path(), "qwen");
         fake_command(second.path(), "codex-acp");
+        fake_command(first.path(), "copilot");
         // Not executable: not an installed command.
         std::fs::write(first.path().join("gemini"), "").unwrap();
         let path = std::env::join_paths([first.path(), second.path()]).unwrap();
 
-        assert_eq!(installed_agents(path.to_str()), ["codex", "qwen"]);
+        assert_eq!(installed_agents(path.to_str()), ["codex", "qwen", "copilot"]);
         assert!(installed_agents(None).is_empty());
     }
 
@@ -131,14 +133,15 @@ mod tests {
     fn enables_the_found_agents_and_sets_the_default() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, configuration(&["codex", "goose"])).unwrap();
+        std::fs::write(&path, configuration(&["codex", "copilot", "goose"])).unwrap();
 
         let config = Config::load_file(&path).unwrap();
 
         assert_eq!(config.default_agent.as_deref(), Some("codex"));
         let names: Vec<&str> = config.agents.keys().map(String::as_str).collect();
-        assert_eq!(names, ["codex", "goose"]);
+        assert_eq!(names, ["codex", "copilot", "goose"]);
         assert_eq!(config.agents["codex"].mode.as_deref(), Some("agent"));
+        assert_eq!(config.agents["copilot"].args, ["--acp"]);
         assert_eq!(config.agents["goose"].args, ["acp"]);
         // The example env and options values stay commented out.
         assert!(config.agents["goose"].env.is_empty());
