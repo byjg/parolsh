@@ -316,6 +316,10 @@ conversation opens, and again when it changes:
 | `#raw [n]` | Print the last answer, or an earlier one, without the layout of the screen |
 | `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](agents.md#turns-in-the-background) |
 | `#fg [n]` | Wait for background turn `n`, or the last one. `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
+| `#pair <agent>` | Pair with a second agent: your next message is the issue, for both, and it answers what the agent says when it stops, once you agree. See [Pairing two agents](agents.md#pairing-two-agents) |
+| `#pair <agent> <text>` | Ask the second agent something of its own ("review the tests"): the agent is not sent it, and the second agent starts at once with what the agent answered last |
+| `#pair [off]` | Show the second agent, or stop pairing |
+| `#decide` | Ask the second agent again about what the agent said last |
 | `#exit` | Leave Parolsh (`Ctrl+D` also works). While a turn or a task of the agent runs in the background, the first one says so and stays: leaving stops them |
 
 ## Copying an answer

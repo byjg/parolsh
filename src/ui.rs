@@ -91,6 +91,8 @@ pub struct PromptContext<'a> {
     /// Where plain text goes.
     pub mode: Mode,
     pub agent: Option<BannerAgent<'a>>,
+    /// The second agent, while pairing.
+    pub pair: Option<&'a str>,
 }
 
 impl Prompt {
@@ -98,15 +100,20 @@ impl Prompt {
     /// in `[claude] ~/…/byjg/parolsh ✦ `: `✦` to the agent, `❯` to the
     /// shell. The symbol is red after a failure. When shell commands moved
     /// away from the agent's directory, it shows both:
-    /// `[claude ~/…/byjg/parolsh] /tmp ❯ `.
+    /// `[claude ~/…/byjg/parolsh] /tmp ❯ `. While pairing, the second agent
+    /// comes after the one that works: `[claude ⇄ codex]`.
     pub fn parolsh(context: &PromptContext, home: Option<&Path>, ansi: bool) -> Self {
         let name = context
             .agent
             .as_ref()
             .map_or("no agent", |agent| agent.name);
+        let name = match context.pair {
+            Some(pair) => format!("{name} ⇄ {pair}"),
+            None => name.to_string(),
+        };
         let agent = match context.agent_cwd {
             Some(dir) => format!("{name} {}", short_path(dir, home)),
-            None => name.to_string(),
+            None => name,
         };
         let path = short_path(context.cwd, home);
         let left = if ansi {
@@ -153,6 +160,7 @@ impl Prompt {
                 .env_remove("PAROLSH_AGENT")
                 .env_remove("PAROLSH_AGENT_DIR")
                 .env_remove("PAROLSH_MODE")
+                .env_remove("PAROLSH_PAIR")
                 .env(
                     "PAROLSH_INPUT",
                     match context.mode {
@@ -162,6 +170,9 @@ impl Prompt {
                 );
             if let Some(dir) = context.agent_cwd {
                 command.env("PAROLSH_AGENT_DIR", dir);
+            }
+            if let Some(pair) = context.pair {
+                command.env("PAROLSH_PAIR", pair);
             }
             if let Some(agent) = &context.agent {
                 command.env("PAROLSH_AGENT", agent.name);
@@ -540,6 +551,18 @@ pub fn waiting(jobs: &[usize]) -> Option<String> {
     }
 }
 
+/// Drops what was typed on the terminal and not read yet, before a question:
+/// only what you type once it is shown answers it, not what was left of a
+/// paste, typed while the agent worked, or meant for an earlier question.
+pub fn discard_typed_ahead() {
+    use nix::sys::termios::{FlushArg, tcflush};
+    match tcflush(std::io::stdin(), FlushArg::TCIFLUSH) {
+        // Not a terminal: a script's answers are all written ahead.
+        Ok(()) | Err(nix::errno::Errno::ENOTTY) => {}
+        Err(e) => eprintln!("parolsh: cannot discard the input typed ahead: {e}"),
+    }
+}
+
 /// A line that sets apart what belongs to a turn in the background:
 /// `── background turn 2: compare the code ──`.
 pub fn rule(text: &str) -> String {
@@ -862,7 +885,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\n\
-             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT|${PAROLSH_AGENT_DIR-unset}\"\n",
+             echo \"$*|$PWD|$STARSHIP_SHELL|${PAROLSH_AGENT-unset}|${PAROLSH_MODE-unset}|$PAROLSH_INPUT|${PAROLSH_AGENT_DIR-unset}|${PAROLSH_PAIR-unset}\"\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
@@ -878,6 +901,7 @@ mod tests {
                 name: "codex",
                 mode: Some("agent"),
             }),
+            pair: Some("claude"),
         };
 
         let prompt = Prompt::starship(fake.to_str().unwrap(), &context).unwrap();
@@ -887,13 +911,13 @@ mod tests {
         assert_eq!(
             prompt.left,
             format!(
-                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet\n"
+                "prompt --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet|claude\n"
             )
         );
         assert_eq!(
             prompt.right,
             format!(
-                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet"
+                "prompt --right --status=3 --cmd-duration=1500 --terminal-width={width}|{cwd}||codex|agent|shell|/srv/wallet|claude"
             )
         );
         assert_eq!(prompt.indicator, "");
@@ -907,7 +931,23 @@ mod tests {
             duration: Duration::ZERO,
             mode: Mode::Agent,
             agent: agent.map(|name| BannerAgent { name, mode: None }),
+            pair: None,
         }
+    }
+
+    #[test]
+    fn parolsh_prompt_shows_the_second_agent_while_pairing() {
+        let cwd = Path::new("/tmp");
+        let mut pairing = context(cwd, 0, Some("claude"));
+        pairing.pair = Some("codex");
+
+        let prompt = Prompt::parolsh(&pairing, None, false);
+        assert_eq!(prompt.left, "[claude ⇄ codex] /tmp");
+
+        // With the agent's directory, when shell commands moved away.
+        pairing.agent_cwd = Some(Path::new("/srv/wallet"));
+        let prompt = Prompt::parolsh(&pairing, None, false);
+        assert_eq!(prompt.left, "[claude ⇄ codex /srv/wallet] /tmp");
     }
 
     #[test]
@@ -1004,6 +1044,7 @@ mod tests {
             duration: Duration::ZERO,
             mode: Mode::Agent,
             agent: None,
+            pair: None,
         };
 
         assert!(Prompt::starship("/nonexistent/starship", &context).is_err());

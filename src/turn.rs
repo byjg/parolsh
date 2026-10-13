@@ -55,10 +55,20 @@ pub fn interrupt_asked() -> bool {
 pub enum Outcome {
     /// Ctrl+Z: the turn goes on, to be followed in the background.
     Background(Box<Turn>),
-    Finished,
+    /// With how, when it is not a plain end: `cancelled`, ...
+    Finished(Option<&'static str>),
     /// The agent answered with an error, and keeps running.
     Failed,
     AgentStopped,
+}
+
+/// What the agent wrote in a turn that is over.
+#[derive(Debug, Default)]
+pub struct Wrote {
+    /// All of it, as it wrote it: `#copy`.
+    pub said: String,
+    /// Its text since its last tool call: its answer.
+    pub answer: String,
 }
 
 /// How a turn is shown, from the configuration.
@@ -313,21 +323,27 @@ impl Turn {
 /// What the agent does and what you answer go to `audit`. The turns already
 /// in the background (`jobs`) are followed meanwhile.
 ///
-/// With how it ended comes what the agent wrote, as it wrote it: `#copy`.
+/// With how it ended comes what the agent wrote.
 pub fn run(
     agent: &AgentHandle,
     blocks: Vec<Block>,
     display: Display,
     audit: &mut Audit,
     jobs: &mut [Job],
-) -> (Outcome, String) {
+) -> (Outcome, Wrote) {
     let Some(id) = agent.prompt_blocks(blocks) else {
-        return (Outcome::AgentStopped, String::new());
+        return (Outcome::AgentStopped, Wrote::default());
     };
     let mut turn = Turn::new(id);
     match follow(agent, &mut turn, display, audit, jobs) {
-        Some(outcome) => (outcome, turn.said),
-        None => (Outcome::Background(Box::new(turn)), String::new()),
+        Some(outcome) => {
+            let wrote = Wrote {
+                said: turn.said,
+                answer: turn.answer,
+            };
+            (outcome, wrote)
+        }
+        None => (Outcome::Background(Box::new(turn)), Wrote::default()),
     }
 }
 
@@ -489,7 +505,7 @@ fn follow(
                     eprintln!("({message})");
                 }
                 turn.end(audit, how, context.as_ref());
-                return Some(Outcome::Finished);
+                return Some(Outcome::Finished(how));
             }
             Event::TurnFailed(_, message) => {
                 out.finish(None);
@@ -507,7 +523,7 @@ fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audi
     out.finish(None);
     eprintln!("(cancelled — the agent did not confirm)");
     audit.add(parolsh_event("cancelled, the agent did not confirm"));
-    Outcome::Finished
+    Outcome::Finished(Some("cancelled"))
 }
 
 fn parolsh_event(text: impl Into<String>) -> Record {
@@ -1048,6 +1064,7 @@ fn ask_permission(
     for (i, option) in options.iter().enumerate() {
         println!("  [{}] {}", i + 1, option.name);
     }
+    ui::discard_typed_ahead();
     print!("Choose: ");
     let _ = std::io::stdout().flush();
 
@@ -1059,6 +1076,7 @@ fn ask_permission(
 /// Asks each question of the form. Enter skips a question; `None` (cancel)
 /// when the input closes. A skipped required question declines the form.
 fn ask_form(form: &Form) -> Option<Answers> {
+    ui::discard_typed_ahead();
     println!("The agent asks (press Enter to skip a question):");
     if !form.message.is_empty() {
         println!("  {}", form.message);

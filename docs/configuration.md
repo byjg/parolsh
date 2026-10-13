@@ -173,7 +173,9 @@ style = "bold purple"
 `PAROLSH_INPUT` is `agent` or `shell`: where plain text goes (see
 [Shell mode](input-routing.md#shell-mode)). Starship runs in the directory of
 your commands; after a `cd` moved them away from the agent,
-`PAROLSH_AGENT_DIR` is the agent's directory.
+`PAROLSH_AGENT_DIR` is the agent's directory. `PAROLSH_PAIR` is the second
+agent while you are [pairing](agents.md#pairing-two-agents), and not set
+otherwise.
 
 Your bash `PS1` is not used: Parolsh is not bash and cannot evaluate it.
 Starship is configured outside the shell, which is why it works in both.
