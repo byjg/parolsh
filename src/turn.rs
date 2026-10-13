@@ -1064,6 +1064,7 @@ fn ask_permission(
     for (i, option) in options.iter().enumerate() {
         println!("  [{}] {}", i + 1, option.name);
     }
+    ui::discard_typed_ahead();
     print!("Choose: ");
     let _ = std::io::stdout().flush();
 
@@ -1075,6 +1076,7 @@ fn ask_permission(
 /// Asks each question of the form. Enter skips a question; `None` (cancel)
 /// when the input closes. A skipped required question declines the form.
 fn ask_form(form: &Form) -> Option<Answers> {
+    ui::discard_typed_ahead();
     println!("The agent asks (press Enter to skip a question):");
     if !form.message.is_empty() {
         println!("  {}", form.message);

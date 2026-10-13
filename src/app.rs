@@ -70,10 +70,10 @@ Control commands:
   #raw [n]        print it without the layout, to select it with the mouse
   #jobs           the turns sent to the background (Ctrl+Z during a turn)
   #fg [n]         wait for background turn n, or the last one (Ctrl+C cancels it)
-  #pair <agent>   pair with a second agent, the navigator: your next message is the issue,
-                  and it decides what the agent asks when it stops, once you agree
-  #review <agent> [what to look at]  pair with a reviewer instead: it says what it sees
-                  in what the agent did, starting with the agent's last answer
+  #pair <agent>   pair with a second agent: your next message is the issue, for both, and
+                  it answers what the agent says when it stops, once you agree
+  #pair <agent> <text>  ask the second agent something of its own (review the tests):
+                  the agent is not sent it, and the second agent starts at once
   #pair [off]     show the second agent, or stop pairing
   #decide         ask the second agent again about what the agent said last
   #exit           leave Parolsh";
@@ -148,7 +148,7 @@ pub struct App {
     /// What the agent wrote in the last turns, as it wrote it and newest
     /// last: `#copy` and `#raw`. In memory only.
     answers: VecDeque<String>,
-    /// The second agent, while pairing (`#pair <agent>`, `#review <agent>`).
+    /// The second agent, while pairing (`#pair <agent>`).
     pair: Option<Pair>,
     /// What the agent answered last, and in which conversation: what the
     /// second agent is asked about.
@@ -496,6 +496,7 @@ impl App {
             mode: self.mode.get(),
             // Only a running agent answers.
             agent: self.agent.as_ref().and(self.banner_agent()),
+            pair: self.pair.as_ref().map(|pair| pair.name.as_str()),
         };
         let mut fell_back = false;
         let prompt = match style {
@@ -1182,7 +1183,6 @@ impl App {
             "options" => self.options_command(args),
             "pair" => self.pair_command(args),
             "decide" => self.decide_command(args),
-            "review" => self.review_command(args),
             // Not recorded: looking changes nothing.
             "audit" | "sessions" | "redraw" | "jobs" | "fg" | "copy" | "raw" => {
                 let result = match name {
@@ -1488,39 +1488,37 @@ impl App {
         }
     }
 
-    /// `#pair <agent>` pairs with a navigator; `#pair off` stops the pairing,
-    /// a reviewer's too, and `#pair` says who the second agent is.
+    /// `#pair <agent>` pairs with a second agent, which gets your next
+    /// message as the issue, as the agent does. `#pair <agent> <text>` asks
+    /// it something of its own, which the agent is not sent, and it starts
+    /// at once. `#pair off` stops the pairing, and `#pair` says who the
+    /// second agent is.
     fn pair_command(&mut self, args: &str) -> Result<()> {
         match args {
-            "" => match self.pair.as_mut() {
+            "" => match &self.pair {
                 Some(pair) => println!("Pairing with {}. #pair off stops it.", pair.name),
-                None => println!("Not pairing. #pair <agent> or #review <agent> starts it."),
+                None => println!("Not pairing. #pair <agent> starts it."),
             },
             "off" => {
-                anyhow::ensure!(self.pair.as_mut().is_some(), "not pairing");
+                anyhow::ensure!(self.pair.is_some(), "not pairing");
                 self.end_pair("#pair off");
             }
-            name => {
-                self.start_pair(name, Brief::navigator())?;
+            args => {
+                let (name, asked) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+                let brief = Brief::new(asked);
+                let waits = brief.wants_issue();
+                self.start_pair(name, brief)?;
                 let working = self.active.as_deref().unwrap_or("the agent");
-                println!(
-                    "Pairing with {name}: it decides what {working} asks when it stops.\n\
-                     Your next message is the issue, for both."
-                );
+                println!("Pairing with {name}: it answers what {working} says when it stops.");
+                if waits {
+                    println!("Your next message is the issue, for both.");
+                    return Ok(());
+                }
+                // What you asked is the second agent's alone.
+                println!("Only {name} got what you wrote: {working} was not sent it.");
+                self.second_opinion();
             }
         }
-        Ok(())
-    }
-
-    /// `#review <agent> [what to look at]`: pairs with a reviewer, which
-    /// starts at once, with what the agent answered last when it did.
-    fn review_command(&mut self, args: &str) -> Result<()> {
-        let (name, focus) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
-        anyhow::ensure!(!name.is_empty(), "usage: #review <agent> [what to look at]");
-        self.start_pair(name, Brief::reviewer(focus))?;
-        let working = self.active.as_deref().unwrap_or("the agent");
-        println!("Pairing with {name}: it reviews what {working} did.");
-        self.second_opinion();
         Ok(())
     }
 
@@ -1528,10 +1526,7 @@ impl App {
     fn start_pair(&mut self, name: &str, brief: Brief) -> Result<()> {
         known_agent(&self.config, name)?;
         anyhow::ensure!(self.agent.is_some(), no_agent());
-        anyhow::ensure!(
-            self.pair.as_mut().is_none(),
-            "already pairing: #pair off stops it"
-        );
+        anyhow::ensure!(self.pair.is_none(), "already pairing: #pair off stops it");
         // Without the history: it holds what the agent did and why.
         let second = &self.config.agents[name];
         let agent = AgentHandle::start(second, self.cwd.clone(), Vec::new());
@@ -1554,20 +1549,14 @@ impl App {
     /// `#decide`: the second agent answers again what the agent said last.
     fn decide_command(&mut self, args: &str) -> Result<()> {
         anyhow::ensure!(args.is_empty(), "`#decide` takes nothing");
-        let working = self.active.clone().unwrap_or_else(|| "the agent".into());
-        let answered = self.answered().to_string();
         let pair = self
             .pair
-            .as_mut()
-            .context("not pairing: #pair <agent> or #review <agent> starts it")?;
+            .as_ref()
+            .context("not pairing: #pair <agent> starts it")?;
         anyhow::ensure!(
             !pair.brief.wants_issue(),
             "{} has no issue yet: your next message is the issue",
             pair.name
-        );
-        anyhow::ensure!(
-            pair.brief.message(&answered, true).is_some(),
-            "{working} has not answered in this conversation: nothing to decide"
         );
         self.second_opinion();
         Ok(())
@@ -1589,27 +1578,22 @@ impl App {
         let working = self.active.clone().unwrap_or_else(|| "the agent".into());
         let answered = self.answered().to_string();
         let pair = self.pair.as_mut()?;
-        let (name, role) = (pair.name.clone(), pair.brief.role);
+        let name = pair.name.clone();
         let mut message = pair.brief.message(&answered, asked)?;
         // What you write to the second agent is yours in the record.
         let mut from = Actor::Parolsh;
         loop {
-            let decision = self.ask_navigator(message, from)?;
+            let decision = self.ask_second(message, from)?;
             // Only an answer briefs it: a cancelled turn is briefed again.
             if let Some(pair) = &mut self.pair {
                 pair.brief.briefed();
             }
             if pair::is_done(&decision) {
-                println!("{name} {}.", role.done());
+                println!("{name} has nothing more to say.");
                 return None;
             }
-            // Only what you type once the answer is shown agrees to it: not
-            // what was left of a paste, or typed while it was written.
-            if let Err(e) = discard_typed_ahead()
-                && e != nix::errno::Errno::ENOTTY
-            {
-                eprintln!("parolsh: cannot discard the input typed ahead: {e}");
-            }
+            // Only what you type once the answer is shown agrees to it.
+            ui::discard_typed_ahead();
             print!("Send this to {working}? [Y/n], or write to {name}: ");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             let mut answer = String::new();
@@ -1635,11 +1619,10 @@ impl App {
 
     /// A turn of the second agent: what it answered, or `None` when it did not
     /// end the turn itself, which also ends the pairing when it cannot go on.
-    fn ask_navigator(&mut self, message: String, from: Actor) -> Option<String> {
+    fn ask_second(&mut self, message: String, from: Actor) -> Option<String> {
         let display = self.display();
         let pair = self.pair.as_ref()?;
-        let doing = format!("{} {}", pair.name, pair.brief.role.verb());
-        println!("{}", ui::rule(&doing));
+        println!("{}", ui::rule(&format!("{} answers", pair.name)));
         self.audit.add(
             Record::new(from, Kind::Message, message.clone())
                 .meta(json!({"agent": pair.name, "pair": true})),
@@ -2469,17 +2452,12 @@ fn describe(session: &Session) -> String {
 
 /// Asks a question to answer with `y`; anything else, and no input, is no.
 fn confirm(question: &str) -> bool {
+    ui::discard_typed_ahead();
     print!("{question} [y/N] ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
-}
-
-/// Drops what was typed on the terminal and not read yet.
-fn discard_typed_ahead() -> nix::Result<()> {
-    use nix::sys::termios::{FlushArg, tcflush};
-    tcflush(std::io::stdin(), FlushArg::TCIFLUSH)
 }
 
 fn session_number(text: &str) -> Result<i64> {
