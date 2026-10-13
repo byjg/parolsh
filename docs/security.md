@@ -1,5 +1,5 @@
 ---
-sidebar_position: 6
+sidebar_position: 8
 ---
 
 # Security model
@@ -23,7 +23,7 @@ mode allows in the agent's own documentation.
 ## Permission prompts come from the agent
 
 When the agent asks before acting, Parolsh shows its request and its options
-(see [During a turn](agents.md#during-a-turn)). The agent decides when to ask:
+(see [During a turn](working-with-agents.md#during-a-turn)). The agent decides when to ask:
 Parolsh does not see what the agent does without asking, and cannot stop it.
 In a mode that skips the prompts (`bypassPermissions`, `agent-full-access`),
 nothing is asked.
@@ -38,13 +38,21 @@ as typing them in bash.
 
 ## What reaches the agent
 
-Only what you send:
+What you send, and what Parolsh passes on for you:
 
 - the text you type for the agent;
 - the output of each `!+command` since your last message: its stdout and
   stderr, the last 16 KB at most, without terminal escape sequences, with the
   command, its directory and its exit code;
-- the current directory, when a conversation starts.
+- each `@path` you mention, as a link to the file, which the agent then
+  reads itself (see [Mentioning files](input-routing.md#mentioning-files));
+- the current directory, when a conversation starts;
+- after a turn [sent to the background](working-with-agents.md#turns-in-the-background)
+  ends, its request and the last 16 KB of its answer, with your next message;
+- while you are [pairing](working-with-agents.md#pairing-two-agents), the
+  issue and what the agent wrote after its last tool call go to the second
+  agent each time the agent stops, without asking: the second agent may be of
+  another provider. Its answer reaches the agent only after your `Enter`.
 
 The output of `!command` and of `!bash` is never sent. The agent can still
 read your files and run commands with its own tools, see
@@ -63,7 +71,7 @@ Parolsh from.
 
 What you export later with a shell command (`!export TOKEN=…`,
 `!source .env`) carries over to your next shell commands only (see
-[`!command`](input-routing.md#command)). The values are kept in memory, not
+[Shell commands](input-routing.md#shell-commands)). The values are kept in memory, not
 in the history, and are not given to the agent, whose environment is the one
 it started with. The line you typed is saved like any `!command` (see
 [Looking back](#looking-back)).
@@ -71,21 +79,29 @@ it started with. The line you typed is saved like any `!command` (see
 ## Project configuration
 
 A `.parolsh/config.toml` comes with the directory, often from a repository
-you cloned. It can change how Parolsh looks and pick one of the agents you
-configured, but not what is executed: `shell` and the agents' `command`,
-`args` and `env` are only read from your global configuration. See
+you cloned. It cannot replace the programs Parolsh runs: `shell`,
+`clipboard` and the agents' `command`, `args` and `env` are only read from
+your global configuration, and so are `history_days` and `commands`.
+
+It can still change what the agent is allowed to do: the agents' `mode` and
+`options` are a project's to set, and a mode that skips the prompts
+(`bypassPermissions`, `agent-full-access`) is a mode like any other. It can
+also set `shell_env`, which imports the environment your own startup files
+set up, secrets included, and gives it to the agent. Read a cloned
+repository's `.parolsh/config.toml` before you start Parolsh in it. See
 [What a project can change](configuration.md#what-a-project-can-change).
 
 ## Looking back
 
 `#audit` lists what ran on your machine, what reached the agent and what the
 agent reported doing, for the current run (see
-[`#audit`](input-routing.md#audit)).
+[`#audit`](sessions.md#audit)).
 
-The [history of sessions](input-routing.md#the-history-of-sessions) keeps more,
+The [history of sessions](sessions.md#the-history-of-sessions) keeps more,
 on disk: your messages, the outputs you shared, the agent's answers, reasoning
 and tool calls, and your answers to its questions, for 90 days by default. It
-is `~/.local/state/parolsh/history.db`, readable only by you.
+is `~/.local/state/parolsh/history.db` (in `$XDG_STATE_HOME/parolsh/` when
+that is set), readable only by you.
 
 - Your `!command` lines are in it too, with their exit code and never their
   output, so that `#redraw` and a resumed session show them. A secret typed in
@@ -98,17 +114,17 @@ is `~/.local/state/parolsh/history.db`, readable only by you.
 - A project file cannot change these settings.
 
 The agent gets this history as an MCP server (see
-[The agent can search the history](input-routing.md#the-agent-can-search-the-history)),
+[The agent can search the history](sessions.md#the-agent-can-search-the-history)),
 so **what was saved can reach the agent again**: any agent you use in this
 project, of any provider, can read what its searches return from earlier
 sessions, including what was first sent to another agent. Its tools do not
-return your `!command` lines, unless you set `commands = "shared"`, which the
-banner then says. A `#new private` conversation does not get
+return your `!command` lines, unless you set `commands = "shared"`, which a
+notice after the banner then says. A `#new private` conversation does not get
 the server; `history_days = 0` turns both the history and the server off.
 
 The server's tools only return this project's sessions, and the sessions of
 other projects that you gave this conversation with `#share <n>` (see
-[Sharing a session of another project](input-routing.md#sharing-a-session-of-another-project)):
+[Sharing a session of another project](sessions.md#sharing-a-session-of-another-project)):
 the agent gets one of those because you named it, for that conversation
 only. That keeps an agent from wandering into other projects by accident; it
 is not a barrier. Parolsh is not a sandbox: an agent that can run commands or

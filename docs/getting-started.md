@@ -86,7 +86,7 @@ mode and the directory:
 
 ```text
 ╭─────────╮     Parolsh x.y.z
-│  > _    │     agent: claude (auto)
+│  > _    │     agent: claude (default)
 ╰─┬───────╯     project: ~/projects/wallet
   ╱             #help
 
@@ -111,7 +111,7 @@ Type `#help` to see the commands and `#exit` (or `Ctrl+D`) to leave.
 
 The answer is printed as it arrives. `Ctrl+C` cancels it and returns to the
 prompt. `Ctrl+Z` gives you the prompt back while the agent goes on with it,
-see [Turns in the background](agents.md#turns-in-the-background).
+see [Turns in the background](working-with-agents.md#turns-in-the-background).
 
 To start with plain text going to bash, run `parolsh --input=shell` or set
 `input = "shell"` in the configuration (see
@@ -121,7 +121,7 @@ the default one, `parolsh --agent <name>` (see
 
 To pick up where you left off, `parolsh --continue` goes back to the last
 conversation of this project, and `parolsh --resume <n>` to session `n` (see
-[Resuming a session](input-routing.md#resuming-a-session)).
+[Resuming a session](sessions.md#resuming-a-session)).
 
 `parolsh --version` prints the version. A build that is not the release, from
 a later commit or with changed files, says so:
