@@ -815,6 +815,99 @@ row of the table.
 Not sent to the background: a `!command` (see
 [`!command`](input-routing.md#command)), and a turn being cancelled.
 
+## Pairing two agents
+
+`#pair <agent>` brings in a second agent, the **navigator**, to decide what
+the agent you work with asks when it stops: "A, B or C? I recommend A". The
+navigator knows the issue and what the agent said last, and looks at the
+files itself. It does not see how the agent got there, so its decision is a
+second opinion, not an echo of the first.
+
+```text
+[claude] ~/projects/wallet ✦ #pair codex
+Pairing with codex: it decides what claude asks when it stops.
+Your next message is the issue, for both.
+[claude] ~/projects/wallet ✦ the transfer endpoint accepts a negative amount
+  ... claude works, and stops ...
+I can reject it in the controller (A) or in the Transfer model (B).
+I recommend B. Which one?
+── codex decides ──
+  ... codex reads the code ...
+Go with B, and add a test for an amount of zero as well.
+Send this to claude? [Y/n], or write to codex:
+```
+
+At that question:
+
+| | |
+|---|---|
+| `Enter` or `y` | The decision goes to the agent as its next message, and when the agent stops again the navigator decides again |
+| `n` | Nothing is sent: your next message goes to the agent, as usual. `#copy` has the decision |
+| Anything else | Goes to the navigator, which decides again: "why not A?" |
+
+Nothing reaches the agent without your `Enter`, so the two never go on by
+themselves. Only what you type once the question is shown counts: what was
+typed or pasted before it is dropped.
+
+- **The issue** is your first message after `#pair`. The agent gets it as any
+  message; the navigator gets it with the agent's first answer.
+- **The navigator gets** what the agent wrote after its last tool call, each
+  time the agent ends a turn. Not its reasoning, its tool calls, or what it
+  wrote in between, and not the history of the session: the navigator runs
+  without the history server.
+- **It is a conversation of its own**, in a second agent process, in the
+  same directory. Its permission requests come to you like the agent's. Any
+  configured agent can be the navigator, the same one included: give it a
+  [mode](#modes) that does not change files, in an entry of its own:
+
+  ```toml
+  [agents.navigator]
+  command = "claude-agent-acp"
+  mode = "plan"
+  ```
+
+- **When nothing is left to decide** the navigator says so, and you are back
+  at the prompt.
+- **`#decide`** asks the navigator again about what the agent said last, for
+  example after you answered the agent yourself. Not before the issue: the
+  navigator gets it with your next message.
+- **`#pair off`** stops it, and `#pair` says who the navigator is. A new
+  conversation (`#new`, `#agent`, `#cd`, `#resume`) and a turn sent to the
+  background with `Ctrl+Z` stop it too.
+
+Questions the agent asks in the middle of a turn, as a form or a permission
+request, still come to you: see
+[Questions from the agent](#questions-from-the-agent).
+
+### A reviewer, after the work
+
+`#review <agent>` pairs the same way, for when the agent already did the
+work: there is no issue to give, and the second agent is a **reviewer**. It
+starts at once with what the agent answered last, looks at the work itself,
+and writes what it observes: what is wrong, risky or missing. It is told not
+to decide for the agent or tell it what to do.
+
+```text
+[claude] ~/projects/wallet ✦ #review codex the tests
+Pairing with codex: it reviews what claude did.
+── codex reviews ──
+  ... codex reads the diff ...
+The amount of zero has no test, and the error message leaks the account id.
+Send this to claude? [Y/n], or write to codex:
+```
+
+What you write after the agent's name says what to look at, and is optional.
+The question is the same as with a navigator, and so is what follows: with
+`Enter` the agent gets the observations and does what it finds right with
+them, and when it stops its answer goes back to the reviewer, until the
+reviewer has nothing to add or you answer `n`. `#decide` and `#pair off` work
+as above.
+
+The reviewer does not get the request the agent worked on, only its last
+answer: say what matters after the agent's name. When the agent has not
+answered yet in this conversation, as right after `#new` or `#resume`, the
+reviewer starts with that alone and looks at the work as it is.
+
 ## The context and what it costs
 
 An agent remembers the conversation in its context, which has a size. Claude,

@@ -12,6 +12,7 @@ mod jobs;
 mod markdown;
 mod mcp;
 mod mention;
+mod pair;
 mod project;
 mod replay;
 mod setup;

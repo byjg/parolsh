@@ -27,6 +27,7 @@ The prompt is the text of the last block; earlier blocks are context.
   fail   answers the prompt with an error, like Qwen's loop protection
   die    prints "boom" on stderr and exits with status 1, without answering
   env X  replies the value of the environment variable X
+         (also with --says)
   warn   prints "fake warning" on stderr and replies "warned"
   tools  starts two tool calls, renames the first, completes it, fails the
          second, sends a plan and a usage update, then replies "done"
@@ -99,6 +100,8 @@ kilo = "--kilo" in sys.argv
 load_only = "--load-only" in sys.argv
 no_resume = "--no-resume" in sys.argv
 forgets = "--forgets" in sys.argv
+# --says TEXT: every prompt is answered TEXT, like a navigator that decided.
+says = sys.argv[sys.argv.index("--says") + 1] if "--says" in sys.argv else None
 can_fork = "--fork" in sys.argv or "--fork-upto" in sys.argv
 # The copies made by session/fork: what each is a copy of.
 forks = {}
@@ -188,7 +191,9 @@ def prompt(request):
         session["used"] = used
         update({"sessionUpdate": "usage_update", "used": used, "size": size, **more})
 
-    if text == "perm":
+    if says is not None and not text.startswith("env "):
+        say(session_id, says)
+    elif text == "perm":
         tool_call = {"toolCallId": "t1", "title": "Writing to notes.txt", "kind": "edit",
                      "content": [{"type": "diff", "path": "/tmp/notes.txt",
                                   "oldText": "a\n", "newText": "a\nb\n"}]}

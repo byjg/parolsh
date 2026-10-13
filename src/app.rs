@@ -21,6 +21,7 @@ use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
 use crate::history::{Found, History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::jobs::{self, Job};
+use crate::pair::{self, Brief, Gate, Pair};
 use crate::title::Title;
 use crate::turn::Ended;
 use crate::{
@@ -69,6 +70,12 @@ Control commands:
   #raw [n]        print it without the layout, to select it with the mouse
   #jobs           the turns sent to the background (Ctrl+Z during a turn)
   #fg [n]         wait for background turn n, or the last one (Ctrl+C cancels it)
+  #pair <agent>   pair with a second agent, the navigator: your next message is the issue,
+                  and it decides what the agent asks when it stops, once you agree
+  #review <agent> [what to look at]  pair with a reviewer instead: it says what it sees
+                  in what the agent did, starting with the agent's last answer
+  #pair [off]     show the second agent, or stop pairing
+  #decide         ask the second agent again about what the agent said last
   #exit           leave Parolsh";
 
 pub struct App {
@@ -141,6 +148,11 @@ pub struct App {
     /// What the agent wrote in the last turns, as it wrote it and newest
     /// last: `#copy` and `#raw`. In memory only.
     answers: VecDeque<String>,
+    /// The second agent, while pairing (`#pair <agent>`, `#review <agent>`).
+    pair: Option<Pair>,
+    /// What the agent answered last, and in which conversation: what the
+    /// second agent is asked about.
+    stopped_with: (u64, String),
 }
 
 /// How many answers `#copy <n>` can go back to.
@@ -239,6 +251,8 @@ impl App {
             leaving: false,
             share_token: RefCell::default(),
             answers: VecDeque::new(),
+            pair: None,
+            stopped_with: (0, String::new()),
         };
         // Without an agent, plain text can only go to the shell.
         app.mode.set(match (&app.active, input) {
@@ -430,7 +444,7 @@ impl App {
         };
         let status = match input {
             Input::Empty => return Flow::Continue,
-            Input::Agent(text) => self.ask(text),
+            Input::Agent(text) => self.converse(text),
             Input::Shell(line) => {
                 let ran = shell::run(
                     &self.config.shell,
@@ -729,10 +743,7 @@ impl App {
         }
         let replay = agent.take_replay();
         let title = session.title.as_deref().unwrap_or("(no title)");
-        // Another conversation: what a background turn answers is not its.
-        self.conversation += 1;
-        self.private = false;
-        self.handover.clear();
+        self.next_conversation(false);
         let start = SessionStart {
             project: self.project_key(),
             agent: self.active.clone(),
@@ -997,10 +1008,7 @@ impl App {
         if let Some(history) = self.audit.history_mut() {
             history.resume(&project, id)?;
         }
-        // Another conversation: what a background turn answers is not its.
-        self.conversation += 1;
-        self.private = false;
-        self.handover.clear();
+        self.next_conversation(false);
         // Where the session was, before going on.
         self.show_exchanges(self.config.redraw_exchanges)?;
         if conversation {
@@ -1089,12 +1097,18 @@ impl App {
             .to_string()
     }
 
-    /// A new conversation: a new session in the history, unless private.
-    fn begin_session(&mut self, private: bool) {
+    /// Another conversation: what a background turn answered is not its,
+    /// and the second agent paired in the one before stops now.
+    fn next_conversation(&mut self, private: bool) {
+        self.end_pair("the conversation is another one");
         self.conversation += 1;
         self.private = private;
-        // What a background turn answered was for the conversation it left.
         self.handover.clear();
+    }
+
+    /// A new conversation: a new session in the history, unless private.
+    fn begin_session(&mut self, private: bool) {
+        self.next_conversation(private);
         self.audit.begin(SessionStart {
             project: self.project_key(),
             agent: self.agent.as_ref().and(self.active.clone()),
@@ -1166,6 +1180,9 @@ impl App {
             "config" => self.config_command(args),
             "share" => self.share_command(args),
             "options" => self.options_command(args),
+            "pair" => self.pair_command(args),
+            "decide" => self.decide_command(args),
+            "review" => self.review_command(args),
             // Not recorded: looking changes nothing.
             "audit" | "sessions" | "redraw" | "jobs" | "fg" | "copy" | "raw" => {
                 let result = match name {
@@ -1404,8 +1421,8 @@ impl App {
         blocks.extend(files.into_iter().map(Block::File));
         blocks.push(Block::Text(sent));
         let display = self.display();
-        let (outcome, said) = turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs);
-        self.remember(said);
+        let (outcome, wrote) = turn::run(agent, blocks, display, &mut self.audit, &mut self.jobs);
+        self.remember(wrote.said);
         // Borrowed again: `remember` needed the whole of `self`.
         let Some(agent) = &self.agent else {
             return 1;
@@ -1414,10 +1431,20 @@ impl App {
             turn::Outcome::Background(turn) => {
                 // The copy the conversation goes on in was not told either.
                 self.handover = told;
+                self.end_pair("the turn went to the background");
                 self.send_to_background(*turn, text, message.row());
                 0
             }
-            turn::Outcome::Finished => 0,
+            turn::Outcome::Finished(how) => {
+                // Only an answer: what a cancelled turn wrote is not one.
+                let answer = if how.is_none() {
+                    wrote.answer
+                } else {
+                    String::new()
+                };
+                self.stopped_with = (self.conversation, answer);
+                0
+            }
             turn::Outcome::Failed => 1,
             turn::Outcome::AgentStopped => {
                 turn::drain(agent);
@@ -1429,6 +1456,215 @@ impl App {
                 eprintln!("parolsh: the agent stopped. Run #new to start it again.");
                 self.agent = None;
                 1
+            }
+        }
+    }
+
+    /// Plain text for the agent. While pairing, what the agent stops with
+    /// goes to the second agent, and what that one answers comes back as
+    /// the agent's next message, once you agree: until you do not, or it
+    /// has nothing more to say.
+    fn converse(&mut self, mut text: String) -> i32 {
+        loop {
+            if let Some(pair) = self.pair.as_mut()
+                && pair.brief.wants_issue()
+            {
+                pair.brief.set_issue(text.clone());
+            }
+            let status = self.ask(text);
+            if status != 0 {
+                return status;
+            }
+            match self.decide(false) {
+                Some(decision) => text = decision,
+                None => return 0,
+            }
+        }
+    }
+
+    fn end_pair(&mut self, why: &str) {
+        if let Some(pair) = self.pair.take() {
+            println!("Pairing with {} ended: {why}.", pair.name);
+        }
+    }
+
+    /// `#pair <agent>` pairs with a navigator; `#pair off` stops the pairing,
+    /// a reviewer's too, and `#pair` says who the second agent is.
+    fn pair_command(&mut self, args: &str) -> Result<()> {
+        match args {
+            "" => match self.pair.as_mut() {
+                Some(pair) => println!("Pairing with {}. #pair off stops it.", pair.name),
+                None => println!("Not pairing. #pair <agent> or #review <agent> starts it."),
+            },
+            "off" => {
+                anyhow::ensure!(self.pair.as_mut().is_some(), "not pairing");
+                self.end_pair("#pair off");
+            }
+            name => {
+                self.start_pair(name, Brief::navigator())?;
+                let working = self.active.as_deref().unwrap_or("the agent");
+                println!(
+                    "Pairing with {name}: it decides what {working} asks when it stops.\n\
+                     Your next message is the issue, for both."
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `#review <agent> [what to look at]`: pairs with a reviewer, which
+    /// starts at once, with what the agent answered last when it did.
+    fn review_command(&mut self, args: &str) -> Result<()> {
+        let (name, focus) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        anyhow::ensure!(!name.is_empty(), "usage: #review <agent> [what to look at]");
+        self.start_pair(name, Brief::reviewer(focus))?;
+        let working = self.active.as_deref().unwrap_or("the agent");
+        println!("Pairing with {name}: it reviews what {working} did.");
+        self.second_opinion();
+        Ok(())
+    }
+
+    /// Starts the second agent, in a conversation of its own.
+    fn start_pair(&mut self, name: &str, brief: Brief) -> Result<()> {
+        known_agent(&self.config, name)?;
+        anyhow::ensure!(self.agent.is_some(), no_agent());
+        anyhow::ensure!(
+            self.pair.as_mut().is_none(),
+            "already pairing: #pair off stops it"
+        );
+        // Without the history: it holds what the agent did and why.
+        let second = &self.config.agents[name];
+        let agent = AgentHandle::start(second, self.cwd.clone(), Vec::new());
+        self.pair = Some(Pair {
+            name: name.to_string(),
+            agent,
+            brief,
+        });
+        Ok(())
+    }
+
+    /// What the agent answered last in this conversation, if it did.
+    fn answered(&self) -> &str {
+        match &self.stopped_with {
+            (conversation, answer) if *conversation == self.conversation => answer.trim(),
+            _ => "",
+        }
+    }
+
+    /// `#decide`: the second agent answers again what the agent said last.
+    fn decide_command(&mut self, args: &str) -> Result<()> {
+        anyhow::ensure!(args.is_empty(), "`#decide` takes nothing");
+        let working = self.active.clone().unwrap_or_else(|| "the agent".into());
+        let answered = self.answered().to_string();
+        let pair = self
+            .pair
+            .as_mut()
+            .context("not pairing: #pair <agent> or #review <agent> starts it")?;
+        anyhow::ensure!(
+            !pair.brief.wants_issue(),
+            "{} has no issue yet: your next message is the issue",
+            pair.name
+        );
+        anyhow::ensure!(
+            pair.brief.message(&answered, true).is_some(),
+            "{working} has not answered in this conversation: nothing to decide"
+        );
+        self.second_opinion();
+        Ok(())
+    }
+
+    /// Asks the second agent about the agent's last answer, as you asked,
+    /// and goes on with the agent when its answer is sent. When it is not,
+    /// `decide` said why.
+    fn second_opinion(&mut self) {
+        if let Some(decision) = self.decide(true) {
+            self.converse(decision);
+        }
+    }
+
+    /// Asks the second agent about the agent's last answer, and you whether
+    /// what it says goes to the agent: what to send it, or `None` when
+    /// nothing is. `asked`: you asked for it, not the agent's turn ending.
+    fn decide(&mut self, asked: bool) -> Option<String> {
+        let working = self.active.clone().unwrap_or_else(|| "the agent".into());
+        let answered = self.answered().to_string();
+        let pair = self.pair.as_mut()?;
+        let (name, role) = (pair.name.clone(), pair.brief.role);
+        let mut message = pair.brief.message(&answered, asked)?;
+        // What you write to the second agent is yours in the record.
+        let mut from = Actor::Parolsh;
+        loop {
+            let decision = self.ask_navigator(message, from)?;
+            // Only an answer briefs it: a cancelled turn is briefed again.
+            if let Some(pair) = &mut self.pair {
+                pair.brief.briefed();
+            }
+            if pair::is_done(&decision) {
+                println!("{name} {}.", role.done());
+                return None;
+            }
+            // Only what you type once the answer is shown agrees to it: not
+            // what was left of a paste, or typed while it was written.
+            if let Err(e) = discard_typed_ahead()
+                && e != nix::errno::Errno::ENOTTY
+            {
+                eprintln!("parolsh: cannot discard the input typed ahead: {e}");
+            }
+            print!("Send this to {working}? [Y/n], or write to {name}: ");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let mut answer = String::new();
+            let read = std::io::stdin().read_line(&mut answer);
+            let gate = pair::gate(read.is_ok_and(|n| n > 0).then_some(&answer));
+            let reply = |text: String| Record::new(Actor::User, Kind::Reply, text);
+            match gate {
+                Gate::Send => {
+                    let sent = format!("pair: sent what {name} said to {working}");
+                    self.audit.add(reply(sent));
+                    return Some(decision);
+                }
+                Gate::Keep => {
+                    self.audit
+                        .add(reply(format!("pair: kept what {name} said")));
+                    println!("Not sent: your next message goes to {working}.");
+                    return None;
+                }
+                Gate::Ask(text) => (message, from) = (text, Actor::User),
+            }
+        }
+    }
+
+    /// A turn of the second agent: what it answered, or `None` when it did not
+    /// end the turn itself, which also ends the pairing when it cannot go on.
+    fn ask_navigator(&mut self, message: String, from: Actor) -> Option<String> {
+        let display = self.display();
+        let pair = self.pair.as_ref()?;
+        let doing = format!("{} {}", pair.name, pair.brief.role.verb());
+        println!("{}", ui::rule(&doing));
+        self.audit.add(
+            Record::new(from, Kind::Message, message.clone())
+                .meta(json!({"agent": pair.name, "pair": true})),
+        );
+        let blocks = vec![Block::Text(message)];
+        let (outcome, wrote) = turn::run(
+            &pair.agent,
+            blocks,
+            display,
+            &mut self.audit,
+            &mut self.jobs,
+        );
+        let answer = wrote.answer.trim().to_string();
+        self.remember(wrote.said);
+        match outcome {
+            turn::Outcome::Finished(None) if !answer.is_empty() => Some(answer),
+            turn::Outcome::Finished(_) | turn::Outcome::Failed => None,
+            // Its turn cannot be waited for and decided on later.
+            turn::Outcome::Background(_) => {
+                self.end_pair("the second agent does not work in the background");
+                None
+            }
+            turn::Outcome::AgentStopped => {
+                self.end_pair("the second agent stopped");
+                None
             }
         }
     }
@@ -2238,6 +2474,12 @@ fn confirm(question: &str) -> bool {
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Drops what was typed on the terminal and not read yet.
+fn discard_typed_ahead() -> nix::Result<()> {
+    use nix::sys::termios::{FlushArg, tcflush};
+    tcflush(std::io::stdin(), FlushArg::TCIFLUSH)
 }
 
 fn session_number(text: &str) -> Result<i64> {

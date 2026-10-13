@@ -2260,3 +2260,265 @@ fn the_agent_flag_refuses_what_it_cannot_do() {
         assert!(said.contains("cannot be used with"), "{args:?}: {said}");
     }
 }
+
+/// Parolsh with the fake agent working (`WHO` is `the-driver`) and a second
+/// one to pair with, `nav`, started with `navigator` flags.
+fn pairing(navigator: &str, lines: &[&str]) -> String {
+    let config = format!(
+        "default_agent = \"fake\"\n\
+         [agents.fake]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"]\n\
+         env = {{ WHO = \"the-driver\" }}\n\
+         [agents.nav]\ncommand = \"python3\"\nargs = [\"{FAKE_AGENT}\"{navigator}]\n\
+         env = {{ WHO = \"the-navigator\" }}\n"
+    );
+    screen(&config, "", lines, "dumb")
+}
+
+/// `#pair <agent>`: the next message is the issue, what the agent stops with
+/// goes to the navigator, and what that one decides goes back to the agent
+/// only after Enter. `n` keeps the next decision from it.
+#[test]
+fn pair_sends_what_the_navigator_decides_to_the_agent_once_agreed() {
+    let screen = pairing(
+        ", \"--says\", \"Go with A.\"",
+        &["#pair nav", "A or B?", "", "n", "#pair"],
+    );
+
+    let at = |text: &str, from: usize| {
+        from + screen[from..]
+            .find(text)
+            .unwrap_or_else(|| panic!("no `{text}` after {from}:\n{screen}"))
+    };
+    let started = at(
+        "Pairing with nav: it decides what fake asks when it stops.",
+        0,
+    );
+    let next = at("\nYour next message is the issue, for both.\n", started);
+    // The agent works on the issue, then the navigator decides.
+    let issue = at("] A or B?", next);
+    let decides = at("── nav decides ──", issue);
+    let decision = at("\nGo with A.", decides);
+    let asked = at("Send this to fake? [Y/n], or write to nav:", decision);
+    // Enter: the agent gets the decision as its next message, and stops again.
+    let sent = at("] Go with A.", asked);
+    let again = at("── nav decides ──", sent);
+    let kept = at("Not sent: your next message goes to fake.", again);
+    at("Pairing with nav. #pair off stops it.", kept);
+}
+
+/// The navigator gets its role, the issue and only what the agent answered;
+/// what is written at the gate goes to it, not to the agent.
+#[test]
+fn pair_tells_the_navigator_the_issue_and_what_the_agent_stopped_with() {
+    // This navigator answers what it got; `env WHO` says which agent it is.
+    let screen = pairing("", &["#pair nav", "add a retry", "env WHO", "n"]);
+
+    let decides = screen.find("── nav decides ──").expect(&screen);
+    let got = &screen[decides..];
+    assert!(
+        got.contains("You are pairing with another coding agent"),
+        "{screen}"
+    );
+    assert!(got.contains("The issue:\nadd a retry\n"), "{screen}");
+    assert!(got.contains("The agent stopped with:\n[s1|"), "{screen}");
+    assert!(got.contains("\nthe-navigator\n"), "{screen}");
+    assert!(!screen.contains("the-driver"), "{screen}");
+}
+
+/// `DONE` from the navigator ends the exchange without asking, `#decide`
+/// asks it again, and `#pair off` stops the pairing.
+#[test]
+fn pair_stops_when_the_navigator_has_nothing_left_to_decide() {
+    let screen = pairing(
+        ", \"--says\", \"DONE\"",
+        &[
+            "#decide",
+            "#pair nav",
+            "fix it",
+            "#decide",
+            "#pair off",
+            "#pair",
+        ],
+    );
+
+    assert!(
+        screen.contains("not pairing: #pair <agent> or #review <agent> starts it"),
+        "{screen}"
+    );
+    assert_eq!(
+        screen.matches("nav has nothing left to decide.").count(),
+        2,
+        "{screen}"
+    );
+    assert!(!screen.contains("Send this to fake?"), "{screen}");
+    assert!(
+        screen.contains("Pairing with nav ended: #pair off."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Not pairing. #pair <agent> or #review <agent> starts it."),
+        "{screen}"
+    );
+}
+
+/// Another conversation ends the pairing, and stops the navigator at once:
+/// it knew the issue of the one it left. Its process is counted by the
+/// marker it was started with, which no other test uses (`[r]` keeps
+/// `pgrep` from finding its own shell).
+#[test]
+fn pair_ends_with_the_conversation() {
+    let screen = pairing(
+        ", \"--says\", \"pair-ends-marker\"",
+        &[
+            "#pair nav",
+            "!pgrep -fc pair-ends-marke[r]",
+            "#new",
+            "!pgrep -fc pair-ends-marke[r]",
+        ],
+    );
+
+    let ended = screen
+        .find("Pairing with nav ended: the conversation is another one.")
+        .expect(&screen);
+    let new = screen.find("Started a new conversation.").expect(&screen);
+    assert!(ended < new, "{screen}");
+    assert!(screen[..ended].contains("\n1\n"), "{screen}");
+    assert!(screen[new..].contains("\n0\n"), "{screen}");
+}
+
+/// `#review <agent>` comes after the work: the reviewer starts at once with
+/// what the agent answered last and what to look at, without an issue, and
+/// what it observes goes to the agent after Enter. From there the two are
+/// paired: the agent's answer goes back to the reviewer.
+#[test]
+fn review_starts_with_the_last_answer_and_pairs_from_there() {
+    let screen = pairing(
+        ", \"--says\", \"The zero amount is not tested.\"",
+        &[
+            "validate the amount",
+            "#review nav the tests",
+            "",
+            "n",
+            "#pair",
+        ],
+    );
+
+    let at = |text: &str, from: usize| {
+        from + screen[from..]
+            .find(text)
+            .unwrap_or_else(|| panic!("no `{text}` after {from}:\n{screen}"))
+    };
+    let worked = at("] validate the amount", 0);
+    let started = at("Pairing with nav: it reviews what fake did.", worked);
+    let reviews = at("── nav reviews ──", started);
+    let observed = at("\nThe zero amount is not tested.", reviews);
+    let asked = at("Send this to fake? [Y/n], or write to nav:", observed);
+    // Enter: the agent gets it, and its answer goes back to the reviewer.
+    let sent = at("] The zero amount is not tested.", asked);
+    let again = at("── nav reviews ──", sent);
+    let kept = at("Not sent: your next message goes to fake.", again);
+    at("Pairing with nav. #pair off stops it.", kept);
+}
+
+/// The reviewer is told to observe, not to decide, with what to look at and
+/// what the agent answered: not the request the agent worked on.
+#[test]
+fn review_tells_the_reviewer_what_to_look_at_and_what_the_agent_answered() {
+    // This reviewer answers what it got.
+    let screen = pairing("", &["secret request", "#review nav the tests", "n"]);
+
+    let reviews = screen.find("── nav reviews ──").expect(&screen);
+    let got = &screen[reviews..];
+    assert!(
+        got.contains("You are reviewing the work of another coding agent"),
+        "{screen}"
+    );
+    assert!(got.contains("Look at:\nthe tests\n"), "{screen}");
+    assert!(got.contains("The agent stopped with:\n[s1|"), "{screen}");
+    assert!(!got.contains("The issue:"), "{screen}");
+}
+
+/// The work may be older than the conversation, as after `#resume agent`:
+/// the reviewer starts with what to look at, and what it observes still
+/// goes to the agent.
+#[test]
+fn review_starts_before_the_agent_answered_in_this_conversation() {
+    let screen = pairing("", &["#review nav the pairing", "", "n"]);
+
+    let reviews = screen.find("── nav reviews ──").expect(&screen);
+    let got = &screen[reviews..];
+    assert!(got.contains("Look at:\nthe pairing\n"), "{screen}");
+    assert!(
+        got.contains("The agent has not said anything yet: look at the work as it is."),
+        "{screen}"
+    );
+    let asked = got.find("Send this to fake? [Y/n]").expect(&screen);
+    assert!(
+        !got[..asked].contains("The agent stopped with:"),
+        "{screen}"
+    );
+    // Enter: the agent gets what the reviewer wrote, and its answer goes
+    // back to the reviewer.
+    let again = got[asked..].find("── nav reviews ──").expect(&screen);
+    assert!(
+        got[asked + again..].contains("The agent stopped with:"),
+        "{screen}"
+    );
+}
+
+/// Only Enter typed after the answer is shown sends it: what was left from
+/// a paste at the question before does not approve the next answer.
+#[test]
+fn pair_does_not_send_on_input_typed_before_the_question() {
+    let screen = pairing(
+        ", \"--says\", \"Go with A.\"",
+        &["#pair nav", "A or B?", "paste:why A?\\n\\n", "n"],
+    );
+
+    assert_eq!(
+        screen.matches("Send this to fake? [Y/n]").count(),
+        2,
+        "{screen}"
+    );
+    assert!(!screen.contains("] Go with A."), "{screen}");
+    assert!(
+        screen.contains("Not sent: your next message goes to fake."),
+        "{screen}"
+    );
+}
+
+/// `#decide` before the issue does not brief the navigator without it: the
+/// next message is still the issue.
+#[test]
+fn pair_waits_for_the_issue_before_the_navigator_decides() {
+    let screen = pairing(
+        "",
+        &[
+            "earlier work",
+            "#pair nav",
+            "#decide",
+            "the actual issue",
+            "n",
+        ],
+    );
+
+    assert!(
+        screen.contains("nav has no issue yet: your next message is the issue"),
+        "{screen}"
+    );
+    let decides = screen.find("── nav decides ──").expect(&screen);
+    assert!(
+        screen[decides..].contains("The issue:\nthe actual issue\n"),
+        "{screen}"
+    );
+}
+
+/// `#decide` asks the reviewer again, also when the agent has still not
+/// answered.
+#[test]
+fn decide_asks_the_reviewer_again_without_an_answer() {
+    let screen = pairing("", &["#review nav", "n", "#decide", "n"]);
+
+    assert_eq!(screen.matches("── nav reviews ──").count(), 2, "{screen}");
+    assert!(!screen.contains("Nothing was sent"), "{screen}");
+}
