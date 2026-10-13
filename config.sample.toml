@@ -11,9 +11,12 @@
 # With Homebrew, the sample is in $(brew --prefix)/share/parolsh/.
 #
 # A project's `.parolsh/config.toml` overrides this file field by field,
-# except `shell` and the agents' `command`, `args` and `env`, which are global
-# only: a cloned repository cannot choose what runs. Full reference:
-# docs/configuration.md and docs/agents.md, or https://opensource.byjg.com/docs/ai/parolsh
+# except `shell`, `clipboard`, `history_days`, `commands` and the agents'
+# `command`, `args` and `env`, which are global only: a cloned repository
+# cannot choose the programs that run, nor what the history keeps. It can
+# still set an agent's `mode` and `options`, its permissions included.
+# Full reference: docs/configuration.md and docs/agents.md, or
+# https://opensource.byjg.com/docs/ai/parolsh
 
 
 # --- Shell ------------------------------------------------------------------

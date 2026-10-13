@@ -1,5 +1,5 @@
 ---
-sidebar_position: 5
+sidebar_position: 7
 ---
 
 # Configuration
@@ -18,13 +18,29 @@ instead of being ignored.
 ## What a project can change
 
 A project file comes with the directory, often from a repository you cloned,
-so it can change how Parolsh looks and which configured agent it uses, but
-never what is executed. These keys are **global only**:
+so it cannot choose the programs Parolsh runs. These keys are **global
+only**:
 
 - `shell` and `clipboard`
 - `agents.<name>.command`, `agents.<name>.args` and `agents.<name>.env`
-- `history_days` and `commands`: what is kept about your sessions is
-  yours to choose, not a repository's
+- `history_days` and `commands` (and the older `save_commands`): what is
+  kept about your sessions is yours to choose, not a repository's
+
+A project can set everything else, and some of it changes more than how
+Parolsh looks:
+
+- **The agents' `mode` and `options`.** A mode is the agent's own permission
+  level, so a project can pick one that asks less, or nothing at all
+  (Claude's `bypassPermissions`, Codex's `agent-full-access`). Read a cloned
+  repository's `.parolsh/config.toml` before you trust it, as you would its
+  build scripts.
+- **`shell_env`**, read from the project of the directory Parolsh starts in:
+  `always` makes Parolsh import the environment your own `~/.profile` and
+  `~/.bashrc` set up, and gives it to the agent (see
+  [Shell environment](#shell-environment)). It runs your files, not the
+  project's.
+- `default_agent`, `input`, `prompt`, `thinking`, `markdown`, `links`,
+  `audit_entries`, `redraw_exchanges`.
 
 A project can only refer to agents defined in the global file: it cannot add
 one. A project file that sets a global-only key is reported as an error and
@@ -36,7 +52,10 @@ parolsh: invalid /home/joao/projects/wallet/.parolsh/config.toml: `shell` can on
 
 To use other variables or arguments in one project, define a second agent in
 the global file (for example `qwen-mini` with its own `env`) and pick it with
-the project's `default_agent`.
+the project's `default_agent`. That choice is made when Parolsh starts in the
+project: a `#cd` into it keeps the agent in use, since the global file
+configures it there too, and `#agent qwen-mini` switches (see
+[Parolsh commands](input-routing.md#parolsh-commands), `#cd`).
 
 ## The first run creates it
 
@@ -63,8 +82,9 @@ cp /usr/share/doc/parolsh/config.sample.toml ~/.config/parolsh/config.toml
 
 # Installed with Homebrew:
 cp "$(brew --prefix)/share/parolsh/config.sample.toml" ~/.config/parolsh/config.toml
-``` The sample is also in
-the repository as
+```
+
+The sample is also in the repository as
 [`config.sample.toml`](https://github.com/byjg/parolsh/blob/master/config.sample.toml).
 
 ## Example
@@ -93,8 +113,10 @@ default_agent = "claude"
 mode = "auto"
 ```
 
-In that project, the default agent is `claude` in its `auto` mode, still
-launched as `claude-agent-acp`.
+Started in that project, Parolsh uses `claude` in its `auto` mode, still
+launched as `claude-agent-acp`. Coming from elsewhere with `#cd`, it keeps
+the agent in use (here `qwen`, which the global file configures) until
+`#agent claude`.
 
 ## Keys
 
@@ -112,11 +134,11 @@ launched as `claude-agent-acp`.
 | `agents.<name>.options` | `{}` | The agent's own config options (`effort`, `model`, ...), set on every new conversation. See [Options](agents.md#options). |
 | `markdown` | `true` | Render the answers' markdown on ANSI terminals: `**bold**`, `` `code` `` in cyan, code blocks, `#` headings and `-` bullets, with the markers hidden. `false` prints the raw text. |
 | `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
-| `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](agents.md#during-a-turn). |
-| `audit_entries` | `1000` | How many entries [`#audit`](input-routing.md#audit) keeps, the oldest dropped first. `0` keeps none. |
-| `redraw_exchanges` | `5` | How many exchanges [`#redraw`](input-routing.md#showing-the-conversation-again) and `Ctrl+L` show again, and how many are shown when a session is resumed. |
-| `history_days` | `90` | Days an idle session stays in the [history of sessions](input-routing.md#the-history-of-sessions). `0` saves nothing. Global only. |
-| `commands` | `"private"` | The lines of your `!commands` (never their output) in the history: `private` (saved for you: `#redraw`, `#resume` and `#audit <n>` show them; the agent's tools do not return them), `shared` (returned to the agent too), `off` (not saved). Global only. `save_commands = true` or `false`, from 0.6.0, still means `shared` or `off`. See [The history of sessions](input-routing.md#the-history-of-sessions). |
+| `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](working-with-agents.md#during-a-turn). |
+| `audit_entries` | `1000` | How many entries [`#audit`](sessions.md#audit) keeps, the oldest dropped first. `0` keeps none. |
+| `redraw_exchanges` | `5` | How many exchanges [`#redraw`](sessions.md#showing-the-conversation-again) and `Ctrl+L` show again, and how many are shown when a session is resumed. |
+| `history_days` | `90` | Days an idle session stays in the [history of sessions](sessions.md#the-history-of-sessions). `0` saves nothing. Global only. |
+| `commands` | `"private"` | The lines of your `!commands` (never their output) in the history: `private` (saved for you: `#redraw`, `#resume` and `#audit <n>` show them; the agent's tools do not return them), `shared` (returned to the agent too), `off` (not saved). Global only. `save_commands = true` or `false`, from 0.6.0, still means `shared` or `off`. See [The history of sessions](sessions.md#the-history-of-sessions). |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
@@ -141,7 +163,7 @@ The `parolsh` prompt shows:
   last two directories: `~/Projects/opensource/byjg/parolsh` shows as
   `~/…/byjg/parolsh`. After a `cd` moved them away from the agent, the
   agent's directory goes in the brackets: `[claude ~/…/byjg/parolsh] /tmp`
-  (see [`!command`](input-routing.md#command));
+  (see [Shell commands](input-routing.md#shell-commands));
 - where plain text goes: `✦` to the agent, `❯` to the shell (see
   [Shell mode](input-routing.md#shell-mode)). It is red when the last `!`
   command, agent turn or `#` command failed. `minimal` shows only this
@@ -174,7 +196,7 @@ style = "bold purple"
 [Shell mode](input-routing.md#shell-mode)). Starship runs in the directory of
 your commands; after a `cd` moved them away from the agent,
 `PAROLSH_AGENT_DIR` is the agent's directory. `PAROLSH_PAIR` is the second
-agent while you are [pairing](agents.md#pairing-two-agents), and not set
+agent while you are [pairing](working-with-agents.md#pairing-two-agents), and not set
 otherwise.
 
 Your bash `PS1` is not used: Parolsh is not bash and cannot evaluate it.
@@ -213,5 +235,6 @@ environment it was given.
 | Path | Content |
 |---|---|
 | `~/.local/state/parolsh/history` (or `$XDG_STATE_HOME/parolsh/history`) | Input history, last 1000 lines |
+| `~/.local/state/parolsh/history.db` (or `$XDG_STATE_HOME/parolsh/history.db`) | The [history of sessions](sessions.md#the-history-of-sessions) (SQLite) |
 | `/usr/share/doc/parolsh/config.sample.toml` | The commented sample configuration (Linux packages) |
 | `$(brew --prefix)/share/parolsh/config.sample.toml` | The same, installed with Homebrew |

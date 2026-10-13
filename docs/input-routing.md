@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 2
 ---
 
 # Input routing
@@ -9,13 +9,13 @@ character decides, always:
 
 | Input | Route |
 |---|---|
-| `text` | The active ACP agent |
+| `text` | The active ACP agent, see [Text](#text) |
 | `?text` | The active ACP agent |
-| `/command` | The active ACP agent, unchanged |
-| `!command` | The configured shell, default `bash -ic` |
-| `!+command` | The same, and its output goes with your next message |
-| `!bash` | An interactive Bash session |
-| `#command` | Parolsh itself |
+| `/command` | The active ACP agent, unchanged, see [Agent slash commands](#agent-slash-commands) |
+| `!command` | The configured shell, default `bash -ic`, see [Shell commands](#shell-commands) |
+| `!+command` | The same, and its output goes with your next message, see [Sharing a command's output](#sharing-a-commands-output) |
+| `!bash` | An interactive Bash session, see [Interactive Bash](#interactive-bash) |
+| `#command` | Parolsh itself, see [Parolsh commands](#parolsh-commands) |
 | `!` alone | Lock: plain text goes to the shell, see [Shell mode](#shell-mode) |
 | `?` alone | Unlock: plain text goes to the agent again |
 
@@ -45,14 +45,14 @@ unlocked:
 |---|---|---|
 | `text` | the agent | the shell, like `!text` |
 | `?text` | the agent | the agent |
-| `/command` | the agent | the shell (`/usr/bin/ls` runs); `?/command` reaches the agent |
+| `/command` | the agent | the shell (`/usr/bin/ls` runs); `?/command` reaches the agent. `Tab` still completes the agent's commands there, see [Tab completion](#tab-completion) |
 | `!command`, `!+command`, `!bash` | the shell | the same |
 | `#command` | Parolsh | Parolsh |
 
 Unlike `!bash`, shell mode stays in Parolsh: the agent is a `?` away, `!+`
 shares output with it, and `#` commands work. Each command runs in its own
 shell, but a `cd` and the variables you export carry over to the next (see
-[`!command`](#command)). The mode lasts until you change it or leave Parolsh.
+[Shell commands](#shell-commands)). The mode lasts until you change it or leave Parolsh.
 
 To start in shell mode, set `input = "shell"` in `config.toml` (see
 [Configuration](configuration.md#keys)), or run `parolsh --input=shell`;
@@ -109,18 +109,26 @@ On `#` lines, `Tab` completes the command's name (`#a` gives `#agent` and
 in. `#cd` takes the path as typed, so names with spaces are not escaped there
 (`#cd My Projects/`). After `#resume`, `#audit` and `#forget`, it lists this
 project's sessions to pick one, see
-[Resuming a session](#resuming-a-session). Other `#` commands have no
-arguments to complete.
+[Resuming a session](sessions.md#resuming-a-session). The arguments of the
+other `#` commands are not completed, including those that take one:
+`#agent <name>`, `#pair <agent>`, `#prompt <name>`, `#share <n>`.
 
 In text for the agent (`?text` in shell mode), `Tab` completes `@path` with a
 file or directory name from where your commands run, escaped like on a shell
 line (`@My\ Notes.md`); see [Mentioning files](#mentioning-files). A `/` that
 starts the text completes one of the agent's own commands, see
-[`/command`](#command-1). Other words of the text have no completion.
+[Agent slash commands](#agent-slash-commands). Other words of the text have
+no completion.
 
-## `!command`
+In shell mode a plain line that starts with `/` runs as a shell command, but
+`Tab` there still completes the agent's commands, not paths: `/usr/bi<Tab>`
+offers the agent's list. Type `!/usr/bi<Tab>` to complete the path.
 
-The command runs as `bash -ic "<command>"`, in the directory the last
+## Shell commands
+
+<a id="command"></a>
+
+`!command` runs as `bash -ic "<command>"`, in the directory the last
 command ended in.
 
 - **Your `~/.bashrc` is loaded**, so aliases, functions and shell options work
@@ -147,8 +155,10 @@ command ended in.
   a line is gone when it ends (so a virtualenv's `deactivate` is not there;
   `set -a; source .env; set +a` exports a file of plain `KEY=value` lines).
   `!bash` starts with these changes, and is a session that keeps all of its
-  state. They are kept in memory until you leave Parolsh, and are not given to
-  the agent: it keeps the environment it started with.
+  state. There they are set before its startup files run, so a variable your
+  `~/.bashrc` sets again (a `PATH` it adds to) takes its value from
+  `~/.bashrc`. They are kept in memory until you leave Parolsh, and are not
+  given to the agent: it keeps the environment it started with.
 - **The agent stays where it is.** A `cd` moves your commands, not the
   conversation: the agent keeps working in the directory it started in, and
   the prompt shows both while they differ:
@@ -161,6 +171,10 @@ command ended in.
 
   `#cd .` starts a new conversation in the directory of your commands. The
   outputs you share with `!+` say where they ran.
+
+  The project stays too: a `cd` does not look for `.parolsh/` again, so its
+  configuration is still that of the agent's directory until `#cd` (see
+  [Projects](projects.md)).
 - The directory comes back through the shell's `EXIT` trap, so the
   `shell` must understand `trap` (bash, zsh, dash do). A command that ends
   with `exec`, or is killed, leaves the directory as it was.
@@ -169,7 +183,7 @@ command ended in.
 - A non-zero exit code is printed after the output, for example `exit 1`.
 - `Ctrl+C` stops the running command, not Parolsh.
 - Parolsh has no job control for your commands (for the agent's turns, see
-  [Turns in the background](agents.md#turns-in-the-background)). With the
+  [Turns in the background](working-with-agents.md#turns-in-the-background)). With the
   default `bash -ic`, `Ctrl+Z` is handled by that bash, as if you had typed the line in bash: the running program is
   paused (`Stopped`), the rest of the line continues, and the paused program
   ends when the command finishes. With a non-interactive `shell` such as
@@ -186,10 +200,12 @@ The shell is configurable, see [Configuration](configuration.md):
 shell = ["zsh", "-ic"]
 ```
 
-## `!+command`
+## Sharing a command's output
 
-Runs the command like `!command`, shows its output, and keeps it for the
-agent: it is sent with your next message, then forgotten.
+<a id="command-1"></a>
+
+`!+command` runs the command like `!command`, shows its output, and keeps
+it for the agent: it is sent with your next message, then forgotten.
 
 ```text
 [claude] ~/projects/wallet ✦ !+docker ps
@@ -212,18 +228,22 @@ The agent answers from that output instead of running the command again.
   terminal, so a `sudo` password prompt works.
 - `!+` alone shows how to use it.
 
-## `!bash`
+## Interactive Bash
 
-Opens a real interactive Bash in the directory of your commands, with your full
-`~/.bashrc` and completions. `exit` returns to Parolsh, in the directory it was
+<a id="bash"></a>
+
+`!bash` opens a real interactive Bash in the directory of your commands,
+with your full `~/.bashrc` and completions. `exit` returns to Parolsh, in the directory it was
 in before: changes made inside the session stay there.
 
 ## Text
 
-Anything that does not start with `!`, `#` or `/` is a question for the
-agent, in agent mode (in shell mode, start it with `?`). The answer is printed as it arrives, with a status line showing what
-the agent is doing (see [During a turn](agents.md#during-a-turn)). `Ctrl+C`
-cancels the turn.
+In agent mode, a line that does not start with `!` or `#` goes to the agent
+(in shell mode, start it with `?`): text is a question, and a line that
+starts with `/` is one of the [agent's commands](#agent-slash-commands).
+The answer is printed as it arrives, with a status line showing what the
+agent is doing (see [During a turn](working-with-agents.md#during-a-turn)).
+`Ctrl+C` cancels the turn.
 
 ### Mentioning files
 
@@ -255,7 +275,9 @@ shows how many files a message linked.
 
 Not on `!` lines: there, `@` is the shell's.
 
-## `/command`
+## Agent slash commands
+
+<a id="command-2"></a>
 
 Lines starting with `/` belong to the agent. Parolsh reserves no `/` commands
 and forwards the line as typed, so the agent's own slash commands work.
@@ -280,43 +302,47 @@ conversation opens, and again when it changes:
   in shell mode). What follows it is not completed, and `/` elsewhere in a
   sentence is a path like any other word.
 
-## `#command`
+## Parolsh commands
+
+<a id="command-3"></a>
+
+Lines starting with `#` are Parolsh's own commands; `#help` lists them.
 
 | Command | What it does |
 |---|---|
 | `#help` | Show the input rules and commands |
 | `#new` | Start a new conversation with the agent, in the agent's directory |
-| `#new private` | Start a new conversation that is not saved in the [history](#the-history-of-sessions), until the next `#new`, `#cd` or `#agent` |
-| `#cd <path>` | Change Parolsh's directory, for the agent and your commands, and start a new conversation there. `~` and relative paths work, from the directory of your commands, so `#cd .` brings the agent where a `cd` took them; no path means your home directory. Reloads the configuration of the project found there. An agent chosen with `#agent` stays when that project configures it; otherwise the project's `default_agent` is used, and the agent restarts if it changed. |
+| `#new private` | Start a new conversation that is not saved in the [history](sessions.md#the-history-of-sessions), until the next `#new`, `#cd`, `#agent` or `#resume` |
+| `#cd <path>` | Change Parolsh's directory, for the agent and your commands, and start a new conversation there. `~` and relative paths work, from the directory of your commands, so `#cd .` brings the agent where a `cd` took them; no path means your home directory. Reloads the configuration of the project found there. The agent in use stays when that project configures it, which agents defined in the global file always are, even if the project's `default_agent` names another; only when it is not configured there does the project's `default_agent` take over. The agent restarts when its settings (`mode`, `options`) differ there. |
 | `#agent` | Show the agent in use |
 | `#agent list` | List configured agents; `*` marks the one in use |
 | `#agent <name>` | Switch to another configured agent, with a new conversation. `default_agent` does not change. |
 | `#options` | Show the running agent's options, `*` on the current values |
-| `#options <id> <value>` | Set one of the agent's options until you leave Parolsh |
+| `#options <id> <value>` | Set one of the agent's options for the running agent process; a new process takes the configuration's again, see [Options](agents.md#options) |
 | `#config` | Show the configuration files in use, and whether they exist |
 | `#config sample` | Print the full sample configuration |
 | `#prompt` | Show the prompt style in use |
 | `#prompt <name>` | Switch the prompt: `parolsh`, `starship` or `minimal`, until you leave Parolsh |
 | `#project` | Show the project root |
-| `#project init` | Create `.parolsh/` in the current directory |
-| `#audit` | What happened since Parolsh started, see [`#audit`](#audit) |
-| `#audit <n>` | What happened in session `n`, of any project, from the [history](#the-history-of-sessions) |
-| `#sessions` | The sessions of this project saved in the [history](#the-history-of-sessions), newest first; `*` marks the current one |
-| `#sessions <text>` | The ones where the text was said, or that it titles, see [Finding a session](#finding-a-session) |
+| `#project init` | Create `.parolsh/` in Parolsh's directory, the agent's: after a `cd` moved your commands away, not the one they are in. See [Projects](projects.md) |
+| `#audit` | What happened since Parolsh started, see [`#audit`](sessions.md#audit) |
+| `#audit <n>` | What happened in session `n`, of any project, from the [history](sessions.md#the-history-of-sessions) |
+| `#sessions` | The sessions of this project saved in the [history](sessions.md#the-history-of-sessions), newest first; `*` marks the current one |
+| `#sessions <text>` | The ones where the text was said, or that it titles, see [Finding a session](sessions.md#finding-a-session) |
 | `#sessions all [text]` | The same over every project |
-| `#sessions agent` | The conversations the running agent itself has for this directory, also the ones it had outside Parolsh. See [A conversation the agent had elsewhere](#a-conversation-the-agent-had-elsewhere) |
+| `#sessions agent` | The conversations the running agent itself has for this directory, also the ones it had outside Parolsh. See [A conversation the agent had elsewhere](sessions.md#a-conversation-the-agent-had-elsewhere) |
 | `#forget [n]` | Remove session `n` of this project from the history, after asking; the current one without `n` |
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so. A session of another project is resumed after asking |
 | `#resume <text>` | Go back to the one session of this project that has the text; `#resume all <text>` looks in every project |
 | `#resume agent <text>` | Go back to one of the agent's own conversations, by its title or the start of its id; it is recorded as a session |
-| `#share [n]` | Let the agent of this conversation read session `n` of another project with its history tools; without `n`, what is shared. See [Sharing a session of another project](#sharing-a-session-of-another-project) |
-| `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](#showing-the-conversation-again). `Ctrl+L` does the same |
+| `#share [n]` | Let the agent of this conversation read session `n` of another project with its history tools; without `n`, what is shared. See [Sharing a session of another project](sessions.md#sharing-a-session-of-another-project) |
+| `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](sessions.md#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
 | `#copy code` | Copy the last code block of the last answer |
 | `#raw [n]` | Print the last answer, or an earlier one, without the layout of the screen |
-| `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](agents.md#turns-in-the-background) |
+| `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](working-with-agents.md#turns-in-the-background) |
 | `#fg [n]` | Wait for background turn `n`, or the last one. `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
-| `#pair <agent>` | Pair with a second agent: your next message is the issue, for both, and it answers what the agent says when it stops, once you agree. See [Pairing two agents](agents.md#pairing-two-agents) |
+| `#pair <agent>` | Pair with a second agent: your next message is the issue, for both, and it answers what the agent says when it stops, once you agree. See [Pairing two agents](working-with-agents.md#pairing-two-agents) |
 | `#pair <agent> <text>` | Ask the second agent something of its own ("review the tests"): the agent is not sent it, and the second agent starts at once with what the agent answered last |
 | `#pair [off]` | Show the second agent, or stop pairing |
 | `#decide` | Ask the second agent again about what the agent said last |
@@ -353,385 +379,18 @@ do not, and say nothing. `clipboard` in the
 The answers are kept in memory, not read back from the history: after
 Parolsh restarts, `#copy` has the answers of the new run only.
 
-## `#audit`
+## Moved sections
 
-`#audit` lists what happened since Parolsh started, oldest first: what ran on
-your machine, what reached the agent, what the agent did, and what you
-answered.
+Sessions and history have [a page of their own](sessions.md). The sections
+that were here:
 
-```text
-[claude] ~/projects/wallet ✦ #audit
-   0:12  USER     !kubectl get pods · exit 0
-   0:20  USER     !+kubectl logs api · exit 0 · 12 KB kept
-   0:31  SHARED   1 output(s), 12 KB → claude
-   0:31  USER     → claude: why is the api crashing?
-   0:44  AGENT    execute: kubectl describe pod api · completed
-   0:52  AGENT    asks: Writing to src/foo.rs
-   0:55  USER     → Allow once
-   0:58  AGENT    edit: Write src/foo.rs [src/foo.rs] · completed
-   1:03  PAROLSH  turn ended · 32s
-```
-
-| Who | What |
-|---|---|
-| `USER` | `!command`, `!+command` and `!bash` with their exit code, your messages (their first line) with the agent they went to, `#` commands, and your answers to the agent's questions |
-| `SHARED` | `!+` output sent with a message, and its size |
-| `AGENT` | Tool calls, with their kind, the files the agent names and how they ended; permission requests and questions |
-| `PAROLSH` | How each turn ended, a cancel the agent did not confirm, an agent that stopped |
-
-It keeps titles and commands only, the first line of each and at most 200
-characters: outputs and answers stay in the scrollback. It is in memory, and
-gone when you leave Parolsh; for a full record, see
-[Logging the agent's messages](troubleshooting.md#logging-the-agents-messages).
-It keeps the last 1000 entries and says how many older ones were dropped;
-`audit_entries` in the [configuration](configuration.md#keys) changes that,
-and `0` turns it off.
-What the agent does without telling (a tool it does not report) is not
-there: see [Security model](security.md).
-
-## The history of sessions
-
-Parolsh also saves each conversation in a history, so you can look back at
-it after you leave: `history.db` (SQLite) in `$XDG_STATE_HOME/parolsh/`
-(`~/.local/state/parolsh/`), readable only by you, one file for every
-project.
-
-```text
-[claude] ~/projects/wallet ✦ #sessions
-*   14  2026-10-02 15:27  claude     23 entries  412k tok    $1.84  Fix the crashing api
-    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  Add retries to the client
-[claude] ~/projects/wallet ✦ #audit 11
-   0:00  USER     → claude: the client gives up too early
-   0:09  AGENT    read: Read src/client.rs [src/client.rs] · completed
-   0:15  AGENT    answer: It retries once, with no backoff. …
-   ...
-```
-
-- A session is one conversation: it starts with Parolsh, `#new`, `#cd` or
-  `#agent`, and is saved from its first entry. `#sessions` names it with the
-  agent's title (Claude and Codex give one), or your first message.
-- `#sessions` also says what each session used, when the agent reports it
-  (Claude, Codex, Kilo Code and OpenCode do, Qwen Code does not):
-  the tokens of all its turns, and the cost for the agents that give one
-  (see [The context and what it costs](agents.md#the-context-and-what-it-costs)).
-  The total counts what was sent, received, reasoned, and read from and
-  written to the agent's cache; most of it is cache reads, which cost far less. The four
-  are kept apart with each turn, with the model that answered: see
-  [Usage in the database](#usage-in-the-database).
-- It keeps what `#audit` shows, with the full text instead of a short line,
-  and also the agent's answers and reasoning, and the outputs shared with
-  `!+`. `#audit <n>` shows answers as one line each; reasoning is not shown.
-- **Your `!command` lines are saved for you, not for the agent.** The line and
-  its exit code, never its output, typed with `!` or in shell mode: `#redraw`,
-  a resumed session and `#audit <n>` show them (`!cargo test · exit 101`), and
-  the tools the agent searches the history with leave them out.
-  `commands = "shared"` gives them to the agent too (the banner then says
-  so), and `commands = "off"` does not save them. A `!+` command is always
-  saved and returned to the agent: its output was sent to it.
-- Sessions belong to the project (its root, or the agent's directory without
-  one): `#sessions` lists this project's, and `#forget` only removes one of
-  them. Their numbers are the same everywhere, never given twice: see
-  [Finding a session](#finding-a-session) for the other projects'.
-- A session idle for more than 90 days is removed when Parolsh starts;
-  `history_days` changes that, and `0` saves nothing. `#forget` removes one
-  now, and `#new private` starts a conversation that is not saved.
-
-`history_days` and `commands` can only be set in the global
-[configuration](configuration.md#keys).
-
-### Finding a session
-
-`#sessions` takes the text to look for, and `all` for every project:
-
-| | |
-|---|---|
-| `#sessions` | This project's sessions |
-| `#sessions <text>` | Those where the text was said, or that it titles |
-| `#sessions all` | The sessions of every project |
-| `#sessions all <text>` | The same search over every project |
-
-```text
-[claude] ~/projects/wallet ✦ #sessions retry
-    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  Add retries to the client
-        agent: It [retries] once, with no backoff. …
-[claude] ~/projects/wallet ✦ #sessions all falcon
-    27  2026-10-02 09:14  codex      18 entries                     billing  Billing rewrite
-        you: the rewrite is called [falcon]
-    11  2026-09-30 10:02  claude     41 entries  1.2M tok    $4.31  wallet   Add retries to the client
-        command: cargo test [falcon]
-```
-
-- Under each session, the line the text is in, and whose it is: yours, the
-  agent's, or one of your `!command` lines, which are searched too. This
-  search is yours, at the prompt: the agent's own
-  [search](#the-agent-can-search-the-history) stays in this project and
-  leaves your commands out. `#share <n>` gives it a session of another one.
-- It matches words, not meanings, and all of them: `retry client` finds the
-  entries that have both.
-- Newest first, 20 at most; a line says how many more there are.
-- With `all`, each session's project, by the name of its directory.
-  `#resume` says the whole path before going there.
-- `#audit <n>` shows a session of any project: it only looks.
-- Parolsh reads its history itself: no agent is asked, and it works without
-  one.
-
-### Resuming a session
-
-`#resume <n>` goes back to session `n`: Parolsh moves to its directory and
-agent if needed, and asks the agent to reopen that conversation (ACP
-`session/resume`, or `session/load` when that is all the agent offers; the
-conversation it replays is not printed again). The agent then remembers
-everything that was said, and the session goes on in the history.
-
-```text
-[claude] ~/projects/wallet ✦ #resume 11
-Resumed session 11: the agent remembers that conversation.
-[claude] ~/projects/wallet ✦ and the timeout, did we change it?
-```
-
-From the command line, `parolsh --resume 11` starts in that session, and
-`parolsh --continue` in the last one of the project. Either way, Parolsh first
-shows the session's last exchanges, so you see where it was.
-
-`#resume <text>` goes back to the one session of this project that has the
-text, as `#sessions <text>` finds it; when several have it, it lists them.
-`#resume all <text>` looks in every project.
-
-**A session of another project** is said, and asked about, before anything
-moves: going there is what `#cd` does (that project's configuration, maybe
-another agent), and it ends the conversation you are in.
-
-```text
-[claude] ~/projects/wallet ✦ #resume 27
-Session 27: "Billing rewrite", ~/projects/billing, 2026-10-02 09:14.
-Go there? [y/N] y
-Now in ~/projects/billing (project).
-Resumed session 27: the agent remembers that conversation.
-```
-
-Anything but `y` stays where you are. `parolsh --resume 27` from another
-directory asks the same.
-
-A number is easily mistyped, and the one next to it is a session too:
-
-- `Tab` after `#resume`, `#audit` or `#forget` lists this project's sessions
-  with their date, agent and title, to pick one instead.
-- `#forget` says which session it is and asks before removing it: that one
-  cannot be undone.
-- A session whose directory no longer exists, or whose agent is not
-  configured any more, is not resumed, and Parolsh says which; `#audit <n>`
-  still shows it.
-
-### A conversation the agent had elsewhere
-
-Parolsh's history only has what happened in Parolsh. A conversation you had
-with the agent in its own terminal, or in an editor, is the agent's:
-`#sessions agent` lists what the running agent has for this directory, and
-`#resume agent <text>` goes back to one.
-
-```text
-[claude] ~/projects/wallet ✦ #sessions agent
-     ·  2026-10-11 20:12  3062a1f0  Background task handling
-     ·  2026-10-07 13:47  9b41c2de  Background turns summary
-    14  2026-10-02 15:27  ef501917  Fix the crashing api
-A dot: not in Parolsh's history. #resume agent <title or id> opens one.
-[claude] ~/projects/wallet ✦ #resume agent task handling
-…its last exchanges…
-Resumed "Background task handling": the agent remembers that conversation.
-It is session 33 from now on, with what the agent replayed of it.
-```
-
-- Each line has when the conversation last changed, the start of the agent's
-  id for it, and its title. The ones Parolsh has a session for show its
-  number; `#resume agent` opens that session.
-- `#resume agent <text>` takes part of the title, in any case, or the start
-  of the id. When several match, as two conversations with the same title
-  do, it lists them: the id tells them apart. After a listing, Tab completes
-  to the id.
-- **It is recorded when it is opened.** The agent replays the conversation
-  (your messages, its answers, its tool calls), and Parolsh saves that as a
-  new session: `#redraw`, `#audit <n>`, `#sessions <text>` and `#resume <n>`
-  work on it like on any other. Only the conversation you open is taken, when
-  you open it.
-- A replay has no dates: the session is dated when the agent says the
-  conversation last changed, and its usage starts from now.
-- The running agent, for this directory. For another agent's, `#agent
-  <name>` first. An agent that cannot replay a conversation only reopens it,
-  and Parolsh says that it has nothing of what came before; one that does not
-  list its conversations says so.
-
-:::warning Not while it is open elsewhere
-A conversation that is still open in the agent's own terminal would be
-written to by two programs. Parolsh cannot tell: close it there first.
-:::
-
-### Showing the conversation again
-
-`#redraw`, or `Ctrl+L`, clears the terminal and prints the last exchanges of
-the conversation again from the history, laid out for the terminal's width as
-it is now:
-
-```text
-[claude] ~/projects/wallet ✦ why is the api container restarting?
-• read: Read docker-compose.yml [docker-compose.yml] · completed
-✦ The container exits because DATABASE_URL is not set: the entrypoint reads
-  it before the compose file's env_file is loaded.
-
-turn ended · 18s
-[claude] ~/projects/wallet ✦
-```
-
-- Use it after resizing the window: what was already printed is not laid out
-  again by itself (see [During a turn](agents.md#during-a-turn)).
-- An exchange is your message and what followed it. `#redraw` shows the last
-  5, `#redraw 2` the last 2, and `redraw_exchanges` in the
-  [configuration](configuration.md#keys) changes the 5.
-- It shows your messages, the answers, and one line for each tool call,
-  question, answer of yours and `!+` output (its size, not its text).
-- **The whole terminal is cleared, its scrollback too.** The output of your
-  earlier `!commands` goes with it: Parolsh does not keep it and cannot print
-  it again.
-- `Ctrl+L` keeps the line you are typing.
-- In a conversation that is not saved (`#new private`, or `history_days = 0`)
-  there is nothing to show again: it only clears.
-
-The agent keeps conversations itself (Claude in `~/.claude/projects/`): if it
-removed one, it cannot be resumed, and `#audit <n>` still shows what Parolsh
-saved:
-
-```text
-parolsh: cannot resume session 11: the agent no longer has that conversation. #audit 11 shows what Parolsh saved of it
-```
-
-A session where you only ran shell commands has no conversation for the agent
-to go back to: an agent keeps one from its first message. `#sessions` names
-it by its first command, and `#resume` shows its commands and goes on with it,
-the agent starting a new conversation:
-
-```text
-[claude] ~/projects/wallet ✦ #sessions
-    7  2026-10-03 15:38  claude      2 entries  (commands only) !source .env
-[claude] ~/projects/wallet ✦ #resume 7
-!source .env · exit 0
-!cd infra/ · exit 0
-Continued session 7: it has only shell commands, so the agent starts a new conversation.
-```
-
-What the commands had set up is not there again: the directory your commands
-were in, and what they exported, are not saved.
-
-### A turn in the background
-
-A turn sent to the background with `Ctrl+Z` (see
-[Turns in the background](agents.md#turns-in-the-background)) leaves the
-session while it runs: its entries, from your message on, are a session of
-their own, which `#sessions` lists and `#audit <n>` shows. When the turn ends
-they go to the end of the session it left, where it ended, and that session
-of its own is gone. If the conversation it left was replaced meanwhile
-(`#new`, `#cd`, `#agent`, `#resume`), or you left Parolsh, it stays a session
-of its own, which `#resume <n>` can go back to.
-
-### Usage in the database
-
-For a report, what each turn used is in `history.db`, in the `meta` of the
-entry that ends it (`kind = 'event'`, `turn ended …`), under `usage`:
-
-| Field | What |
-|---|---|
-| `input`, `output` | Tokens sent to the model and received from it |
-| `thought` | Reasoning tokens, for the agents that count them apart (Kilo Code) |
-| `cache_read`, `cache_write` | Tokens read from and written to the agent's cache |
-| `models` | The models that answered |
-| `cost`, `currency` | What the conversation cost since the turn before, when the agent says it |
-| `context`, `context_size` | The tokens in the context after the turn, and its size |
-
-```bash
-sqlite3 ~/.local/state/parolsh/history.db "
-  SELECT s.id, s.agent, sum(json_extract(e.meta, '\$.usage.input')) AS input,
-         sum(json_extract(e.meta, '\$.usage.output')) AS output,
-         round(sum(json_extract(e.meta, '\$.usage.cost')), 2) AS cost
-  FROM sessions s JOIN entries e ON e.session_id = s.id
-  WHERE e.kind = 'event' GROUP BY s.id"
-```
-
-A turn the agent starts by itself, after a background task, reports no
-tokens: its cost is counted with the next turn you send. A compaction is its
-own entry, with `compaction.before` and `compaction.after`.
-
-### The agent can search the history
-
-In every conversation that is saved, the agent gets the history of this
-project as an MCP server, `parolsh-history`, so it can look up earlier work
-itself when you refer to it, without loading whole sessions:
-
-```text
-[claude] ~/projects/wallet ✦ how did we fix the retries last week?
-• mcp__parolsh-history__search_history
-Last Tuesday we added exponential backoff in src/client.rs …
-```
-
-| Tool | What it returns |
-|---|---|
-| `search_history` | The best matches for some words (SQLite FTS5: `retry OR backoff`, `"a phrase"`, `prefix*`), with the session and entry |
-| `list_sessions` | The sessions: number, date, agent, title |
-| `get_session` | The entries of one session, a page at a time, with their full text |
-| `commands` | The saved shell commands and their exit codes |
-
-Ask in your own words; the agent picks the tool:
-
-| You ask | The agent uses |
-|---|---|
-| `where did we change the retry logic?` | `search_history` |
-| `summarize session #2` | `get_session`, with the number `#sessions` shows |
-| `what did we work on last week?` | `list_sessions`, then `get_session` |
-| `which commands failed today?` | `commands` (`!+` ones; plain `!command` lines only with `commands = "shared"`) |
-
-```text
-[claude] ~/projects/wallet ✦ summarize session #2
-• mcp__parolsh-history__get_session
-Session #2 was about the billing rewrite, codename Falcon-9 …
-```
-
-- Start the line with a word, not with `#`: `#2 summarize` is a Parolsh
-  command.
-- The search matches words, not meanings. For something exact, give the words:
-  `search the history for Falcon-9`.
-- If the agent answers without looking, name the tools: `use the
-  parolsh-history tools to find …`. Claude, Codex, Kilo Code and OpenCode
-  used the tools when asked to search the history; Qwen Code and Goose
-  searched the files instead, and used them once they were named. Kilo and
-  Qwen ask before each call, like for any tool.
-
-The server is Parolsh itself (`parolsh mcp`), started by the agent. It reads
-the history without changing it, and its tools only return this project's
-sessions, and those of other projects you shared with the conversation: they
-cannot ask for another. A `#new private` conversation does not
-get it. To see what the tools return without the agent, see
-[Asking the history yourself](troubleshooting.md#asking-the-history-yourself).
-
-#### Sharing a session of another project
-
-The agent's tools only return this project's sessions. For one of another
-project, the tool says so, and the agent tells you:
-
-```text
-[claude] ~/projects/site ✦ can you summarize session 7?
-✦ I can't read it: session 7 belongs to another project and hasn't been shared
-  here. Type #share 7 at the Parolsh prompt and I'll check it.
-[claude] ~/projects/site ✦ #share 7
-Session 7: "Inotify limit validation", ~, 2026-10-04 11:30.
-The agent of this conversation can now read it with its history tools.
-[claude] ~/projects/site ✦ try again
-```
-
-- The agent reads it as it reads this project's sessions, a page at a time,
-  and its search covers it. Parolsh puts nothing of it in the conversation.
-- **For this conversation only**: a new one (`#new`, `#cd`, `#agent`,
-  `#resume`) starts without it. The conversation that goes on after a turn
-  was [sent to the background](agents.md#turns-in-the-background) keeps it.
-- Your `!command` lines of that session are left out, as this project's are,
-  unless `commands = "shared"`.
-- `#share` alone lists what is shared. `#sessions all` finds the session's
-  number, and `#audit <n>` shows it to you without giving it to the agent.
-- Not in a `#new private` conversation, nor with the history off: the agent
-  has no history tools there.
+- <a id="audit"></a>[`#audit`](sessions.md#audit)
+- <a id="the-history-of-sessions"></a>[The history of sessions](sessions.md#the-history-of-sessions)
+- <a id="finding-a-session"></a>[Finding a session](sessions.md#finding-a-session)
+- <a id="resuming-a-session"></a>[Resuming a session](sessions.md#resuming-a-session)
+- <a id="a-conversation-the-agent-had-elsewhere"></a>[A conversation the agent had elsewhere](sessions.md#a-conversation-the-agent-had-elsewhere)
+- <a id="showing-the-conversation-again"></a>[Showing the conversation again](sessions.md#showing-the-conversation-again)
+- <a id="a-turn-in-the-background"></a>[A turn in the background](sessions.md#a-turn-in-the-background)
+- <a id="usage-in-the-database"></a>[Usage in the database](sessions.md#usage-in-the-database)
+- <a id="the-agent-can-search-the-history"></a>[The agent can search the history](sessions.md#the-agent-can-search-the-history)
+- <a id="sharing-a-session-of-another-project"></a>[Sharing a session of another project](sessions.md#sharing-a-session-of-another-project)

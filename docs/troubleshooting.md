@@ -1,5 +1,5 @@
 ---
-sidebar_position: 7
+sidebar_position: 9
 ---
 
 # Troubleshooting
@@ -98,7 +98,7 @@ Checked against Qwen Code 0.24.5.
 ## Asking the history yourself
 
 When the agent does not find something from an earlier session, check what
-the [history](input-routing.md#the-history-of-sessions) holds, without the
+the [history](sessions.md#the-history-of-sessions) holds, without the
 agent:
 
 - `#sessions` lists this project's sessions, and `#audit <n>` shows one. An
@@ -130,7 +130,7 @@ The tools are `search_history` (`query`, `limit`), `list_sessions` (`limit`),
 `--commands` to see them, which is what `commands = "shared"` gives the
 agent. If this finds it and the agent did not, the agent did not search:
 name the tools in your message, see
-[The agent can search the history](input-routing.md#the-agent-can-search-the-history).
+[The agent can search the history](sessions.md#the-agent-can-search-the-history).
 
 ## Logging the agent's messages
 
