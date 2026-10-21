@@ -417,6 +417,7 @@ fn follow(
         let event = match agent.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => {
+                out.quiet();
                 out.tick();
                 continue;
             }
@@ -1416,6 +1417,27 @@ impl Output {
         if let Some(status) = &mut self.status {
             status.heard = Instant::now();
         }
+    }
+
+    /// The agent went quiet in the middle of a word: shows the word, so the
+    /// answer does not look cut short while the turn goes on.
+    fn quiet(&mut self) {
+        let (Some(wrap), Some(status)) = (&mut self.wrap, &self.status) else {
+            return;
+        };
+        if status.heard.elapsed() < QUIET {
+            return;
+        }
+        let resumed = wrap.resume().to_string();
+        let word = wrap.release();
+        if word.is_empty() {
+            return;
+        }
+        self.mid_line = wrap.mid_line();
+        self.hide();
+        print!("{resumed}{word}");
+        let _ = std::io::stdout().flush();
+        self.show();
     }
 
     fn line(&mut self, line: &str) {

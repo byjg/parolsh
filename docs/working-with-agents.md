@@ -60,7 +60,9 @@ reading, apart from the output of your commands:
   [Showing the conversation again](sessions.md#showing-the-conversation-again)).
 - Code blocks and table rows are not broken, and a list item wraps under its
   own text.
-- Only the word being received is held back, until its end arrives.
+- Only the word being received is held back, until its end arrives. When the
+  agent goes quiet in the middle of a line, the word is shown anyway, so the
+  answer does not look cut short while the turn goes on.
 
 Its markdown is rendered on the fly: `**bold**` in bold, `` `code` `` and code
 blocks in cyan, `#` headings bold and underlined, `-` bullets as `•`, with the

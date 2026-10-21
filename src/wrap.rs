@@ -131,6 +131,15 @@ impl Wrap {
         out
     }
 
+    /// Writes the word held back on the line being written, without ending
+    /// it: the agent went quiet in the middle of the line. What comes next
+    /// goes on right after it.
+    pub fn release(&mut self) -> String {
+        let mut out = String::new();
+        self.write_word(&mut out, true);
+        out
+    }
+
     fn new_line(&mut self) {
         self.column = 0;
         self.lead = 0;
@@ -270,6 +279,20 @@ mod tests {
         assert!(wrap.mid_line());
         assert_eq!(wrap.end(), "\n");
         assert!(!wrap.mid_line());
+    }
+
+    #[test]
+    fn a_released_word_is_written_and_the_rest_goes_on_after_it() {
+        let mut wrap = Wrap::new(40);
+        let mut out = wrap.feed("Shall I sta", true);
+        out.push_str(&wrap.release());
+        assert!(wrap.mid_line());
+        assert_eq!(out.replace(MARK, "✦ "), "✦ Shall I sta");
+        assert_eq!(wrap.release(), "");
+
+        out.push_str(&wrap.feed("rt?", true));
+        out.push_str(&wrap.end());
+        assert_eq!(out.replace(MARK, "✦ "), "✦ Shall I start?\n");
     }
 
     #[test]
