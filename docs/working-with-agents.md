@@ -288,7 +288,8 @@ Several turns can run at once, each sent with `Ctrl+Z`:
   agent.
 - **Leaving stops them.** `#exit` and `Ctrl+D` say what is still running the
   first time, and leave the second time. The same when the agent has
-  [background tasks](#background-tasks-and-the-terminal-title) running.
+  [background tasks](#background-tasks-and-the-terminal-title) or
+  [spells](spells.md#spells-in-the-background) running.
 - **A new conversation** (`#new`, `#cd`, `#agent`, `#resume`) leaves them
   running. Their answer is then shown, not given to the new conversation.
 - In the [history](sessions.md#a-turn-in-the-background), the turn is a

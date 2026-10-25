@@ -104,6 +104,7 @@ already enabled. See [Getting started](docs/getting-started.md).
 - [Input routing](docs/input-routing.md)
 - [Working with agents](docs/working-with-agents.md)
 - [Sessions and history](docs/sessions.md)
+- [Spells](docs/spells.md)
 - [Agents](docs/agents.md)
 - [Projects](docs/projects.md)
 - [Configuration](docs/configuration.md)

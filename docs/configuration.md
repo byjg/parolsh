@@ -236,5 +236,7 @@ environment it was given.
 |---|---|
 | `~/.local/state/parolsh/history` (or `$XDG_STATE_HOME/parolsh/history`) | Input history, last 1000 lines |
 | `~/.local/state/parolsh/history.db` (or `$XDG_STATE_HOME/parolsh/history.db`) | The [history of sessions](sessions.md#the-history-of-sessions) (SQLite) |
+| `~/.config/parolsh/spells/` (or `$XDG_CONFIG_HOME/parolsh/spells/`) | Your [spells](spells.md), one directory each |
+| `~/.local/state/parolsh/run/<pid>/` | While Parolsh runs: the directory of your commands, and the spells in the background, shared with the [spells](spells.md#spells-in-the-background)' server |
 | `/usr/share/doc/parolsh/config.sample.toml` | The commented sample configuration (Linux packages) |
 | `$(brew --prefix)/share/parolsh/config.sample.toml` | The same, installed with Homebrew |

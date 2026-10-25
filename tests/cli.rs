@@ -1010,7 +1010,7 @@ fn a_loaded_conversation_is_not_replayed_and_some_agents_cannot_resume() {
 }
 
 /// The agent gets the history as an MCP server, `parolsh mcp` for this
-/// project, except in a private conversation.
+/// project, except in a private conversation, which only gets the spells.
 #[test]
 fn the_agent_gets_the_history_as_an_mcp_server() {
     let home = fake_agent_home_with(&[]);
@@ -1031,7 +1031,190 @@ fn the_agent_gets_the_history_as_an_mcp_server() {
 
     assert!(screen.contains(&expected), "{screen}");
     let private = &screen[screen.find("Started a private conversation").unwrap()..];
-    assert!(private.contains("\n[]\n"), "{private}");
+    assert!(
+        private.contains(r#"[{"name": "parolsh-spells""#),
+        "{private}"
+    );
+    assert!(!private.contains("parolsh-history"), "{private}");
+}
+
+/// The agent also gets the spells as an MCP server, `parolsh mcp
+/// --spells`, in private conversations too. `#cast` lists them,
+/// and `#cast <name> [args]` asks the agent to cast one.
+#[test]
+fn the_agent_gets_the_spells_as_an_mcp_server_and_cast_asks_it() {
+    let home = fake_agent_home_with(&[]);
+    let spell = home.path().join("parolsh/spells/vs-install-mod");
+    std::fs::create_dir_all(&spell).unwrap();
+    std::fs::write(
+        spell.join("spell.toml"),
+        "description = \"Install a mod\"\ninstructions = \"Copy it.\"\n\
+         args = [{ name = \"file\" }]\n",
+    )
+    .unwrap();
+
+    let screen = run_in(
+        home.path(),
+        "",
+        &[
+            "#new private",
+            "mcp",
+            "#cast",
+            "#cast vs-install-mod ./my mod.zip",
+            "#cast nope",
+        ],
+        "dumb",
+        false,
+    );
+
+    let here = home.path().join("parolsh/run");
+    let expected = format!(
+        r#"[{{"name": "parolsh-spells", "args": ["mcp", "--spells", "--here", "{}/"#,
+        here.display()
+    );
+    assert!(screen.contains(&expected), "{screen}");
+    assert!(
+        screen.contains("  vs-install-mod <file>  Install a mod\n"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Cast the spell `vs-install-mod` with: ./my mod.zip"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parolsh: no spell `nope`, see #cast"),
+        "{screen}"
+    );
+    // What Parolsh shares with the spells' server goes with it.
+    assert_eq!(std::fs::read_dir(&here).unwrap().count(), 0);
+}
+
+/// A spell in the background is in `#jobs`, and leaving or a new
+/// conversation stops it after a warning, with all it started. One that ended is said at the
+/// prompt, once.
+#[test]
+fn spells_in_the_background_are_listed_said_and_stopped_with_the_conversation() {
+    let home = fake_agent_home_with(&[]);
+    // As the spells' server writes them: one running, in its own process
+    // group, and one that ended.
+    std::fs::write(
+        home.path().join("spawn.sh"),
+        r#"jobs=$(echo "$XDG_STATE_HOME"/parolsh/run/*/jobs)
+pid=$(python3 -c 'import subprocess; d = subprocess.DEVNULL; print(subprocess.Popen(["sleep", "60"], start_new_session=True, stdin=d, stdout=d, stderr=d).pid)')
+echo "$pid" > "$XDG_STATE_HOME/pid"
+printf '{"id":1,"spell":"hang","args":["a"],"pgid":%s,"started":0,"exit":null}' "$pid" > "$jobs/1.json"
+printf '{"id":2,"spell":"quick","args":[],"pgid":1,"started":0,"exit":3}' > "$jobs/2.json"
+"#,
+    )
+    .unwrap();
+
+    let screen = run_in(
+        home.path(),
+        "",
+        &[
+            "!sh \"$XDG_STATE_HOME/spawn.sh\"",
+            "#jobs",
+            "#exit",
+            "#new",
+            "#new",
+            "#jobs",
+        ],
+        "dumb",
+        false,
+    );
+
+    assert!(
+        screen.contains("spell job 2 · quick ended · exit 3"),
+        "{screen}"
+    );
+    assert_eq!(screen.matches("quick ended").count(), 1, "{screen}");
+    assert!(
+        screen.contains("spell job 1 · hang a · running "),
+        "{screen}"
+    );
+    assert!(
+        screen.contains(
+            "Still running: spell job 1 · hang a. A new conversation stops it: #new again to go on."
+        ),
+        "{screen}"
+    );
+    assert!(
+        screen
+            .contains("Still running: 1 spell (#jobs). Leaving stops them: #exit again to leave."),
+        "{screen}"
+    );
+    assert_eq!(
+        screen.matches("Started a new conversation.").count(),
+        1,
+        "{screen}"
+    );
+    assert!(screen.contains("No turns in the background."), "{screen}");
+    let pid = std::fs::read_to_string(home.path().join("pid")).unwrap();
+    let stat = format!("/proc/{}/stat", pid.trim());
+    let started = std::time::Instant::now();
+    // Gone, or a zombie until its parent reaps it.
+    while std::fs::read_to_string(&stat).is_ok_and(|stat| !stat.contains(") Z ")) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "still running"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// `parolsh mcp --spells` runs a spell's script where the user's commands
+/// run, as Parolsh's directory says, with its arguments as they are.
+#[test]
+fn parolsh_mcp_casts_a_spell() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let spell = home.path().join("parolsh/spells/where");
+    std::fs::create_dir_all(&spell).unwrap();
+    std::fs::write(
+        spell.join("spell.toml"),
+        "description = \"Where\"\nrun = \"run.sh\"\nargs = [{ name = \"a\" }]\n",
+    )
+    .unwrap();
+    let script = spell.join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\necho \"$1 in $(pwd)\"\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        home.path().join("parolsh/config.toml"),
+        "shell = [\"bash\", \"-c\"]\n",
+    )
+    .unwrap();
+    let here = home.path().join("here");
+    let work = home.path().join("work");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(here.join("cwd"), work.to_str().unwrap()).unwrap();
+
+    let mut server = parolsh()
+        .args(["mcp", "--spells", "--here"])
+        .arg(&here)
+        .env("XDG_CONFIG_HOME", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cast_spell","arguments":{"name":"where","args":["it's $HOME"]}}}"#,
+    ];
+    writeln!(server.stdin.take().unwrap(), "{}", requests.join("\n")).unwrap();
+    let output = server.wait_with_output().unwrap();
+    let replies: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "parolsh-spells");
+    assert_eq!(
+        replies[1]["result"]["content"][0]["text"],
+        format!("exit 0\nit's $HOME in {}\n", work.display())
+    );
 }
 
 /// `parolsh mcp` answers MCP over stdio: the tools, and a search in the

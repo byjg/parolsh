@@ -335,12 +335,14 @@ Lines starting with `#` are Parolsh's own commands; `#help` lists them.
 | `#resume <n>` | Go back to session `n` with its agent, in its directory: the agent remembers that conversation, and what follows is saved in it. Claude, Codex and OpenCode can; an agent that cannot says so. A session of another project is resumed after asking |
 | `#resume <text>` | Go back to the one session of this project that has the text; `#resume all <text>` looks in every project |
 | `#resume agent <text>` | Go back to one of the agent's own conversations, by its title or the start of its id; it is recorded as a session |
+| `#cast` | List your [spells](spells.md): operations kept as a script and its instructions |
+| `#cast <name> [args]` | Ask the agent to cast a spell, with what follows its name; asking in your own words works too. See [Spells](spells.md#asking-for-one) |
 | `#share [n]` | Let the agent of this conversation read session `n` of another project with its history tools; without `n`, what is shared. See [Sharing a session of another project](sessions.md#sharing-a-session-of-another-project) |
 | `#redraw [n]` | Clear the terminal and show the last `n` exchanges of the conversation again (5 without `n`), see [Showing the conversation again](sessions.md#showing-the-conversation-again). `Ctrl+L` does the same |
 | `#copy [n]` | Copy the last answer to the clipboard as the agent wrote it; `n`: an earlier one (2 is the one before). `Alt+C` copies the last. See [Copying an answer](#copying-an-answer) |
 | `#copy code` | Copy the last code block of the last answer |
 | `#raw [n]` | Print the last answer, or an earlier one, without the layout of the screen |
-| `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](working-with-agents.md#turns-in-the-background) |
+| `#jobs` | The agent's turns sent to the background with `Ctrl+Z`, see [Turns in the background](working-with-agents.md#turns-in-the-background), and the [spells in the background](spells.md#spells-in-the-background) |
 | `#fg [n]` | Wait for background turn `n`, or the last one. `Ctrl+C` cancels it, `Ctrl+Z` goes back to the prompt |
 | `#pair <agent>` | Pair with a second agent: your next message is the issue, for both, and it answers what the agent says when it stops, once you agree. See [Pairing two agents](working-with-agents.md#pairing-two-agents) |
 | `#pair <agent> <text>` | Ask the second agent something of its own ("review the tests"): the agent is not sent it, and the second agent starts at once with what the agent answered last |

@@ -91,6 +91,15 @@ set up, secrets included, and gives it to the agent. Read a cloned
 repository's `.parolsh/config.toml` before you start Parolsh in it. See
 [What a project can change](configuration.md#what-a-project-can-change).
 
+## Spells
+
+A [spell](spells.md)'s script runs when the agent calls `cast_spell`, as any
+command the agent runs: the agent asks you first unless you allowed the
+tool. Spells are only read from `~/.config/parolsh/spells/`: a project's
+`.parolsh/` cannot add one, so a cloned repository brings no script for the
+agent to run. They are a server of their own, `parolsh-spells`: allowing
+the read-only `parolsh-history` does not allow them.
+
 ## Looking back
 
 `#audit` lists what ran on your machine, what reached the agent and what the

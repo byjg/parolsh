@@ -4,6 +4,9 @@
 //! (newline-delimited JSON-RPC). It reads the database only, and only the
 //! sessions of one project, with those of other projects that the user gave
 //! this conversation (`#share`): the tools have no way to ask for another.
+//!
+//! The JSON-RPC loop is [`serve_tools`], which the spells' server
+//! (`parolsh mcp --spells`, see `spells.rs`) shares.
 
 use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
 use serde_json::{Value, json};
@@ -56,6 +59,27 @@ pub fn server(db: &Path, scope: Scope) -> Option<McpServer> {
 /// stdin closes.
 pub fn serve(db: &Path, scope: Scope) -> anyhow::Result<()> {
     let history = History::open_read_only(db)?;
+    serve_tools(&HistoryTools {
+        history: &history,
+        scope,
+    })
+}
+
+/// What an MCP server of Parolsh offers: the JSON-RPC around it is the same.
+pub trait Tools {
+    /// The server's name, as the agent shows its tools.
+    fn name(&self) -> &'static str;
+    /// What the agent is told the server is for.
+    fn instructions(&self) -> &'static str;
+    /// The tools, with their input schemas.
+    fn list(&self) -> Value;
+    /// Runs tool `name`, as text for the agent.
+    fn call(&self, name: &str, arguments: &Value) -> anyhow::Result<String>;
+}
+
+/// Serves `tools` on stdin and stdout (newline-delimited JSON-RPC) until
+/// stdin closes.
+pub fn serve_tools(tools: &impl Tools) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -64,7 +88,7 @@ pub fn serve(db: &Path, scope: Scope) -> anyhow::Result<()> {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(&history, scope, &message),
+            Ok(message) => handle(tools, &message),
             Err(e) => Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
         };
         if let Some(reply) = reply {
@@ -76,7 +100,7 @@ pub fn serve(db: &Path, scope: Scope) -> anyhow::Result<()> {
 }
 
 /// The reply to one message; `None` for notifications.
-fn handle(history: &History, scope: Scope, message: &Value) -> Option<Value> {
+pub fn handle(tools: &impl Tools, message: &Value) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -88,17 +112,15 @@ fn handle(history: &History, scope: Scope, message: &Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or(json!("2025-06-18")),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": NAME, "version": version::short()},
-            "instructions": "Earlier Parolsh sessions of this project: what the user asked, \
-                what you answered, the tools you ran, the outputs the user shared. Search \
-                it when the user refers to earlier work, or before redoing something.",
+            "serverInfo": {"name": tools.name(), "version": version::short()},
+            "instructions": tools.instructions(),
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": tools()}),
+        "tools/list" => json!({"tools": tools.list()}),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call(history, scope, name, &arguments) {
+            match tools.call(name, &arguments) {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
                 Err(e) => json!({
                     "content": [{"type": "text", "text": e.to_string()}],
@@ -113,6 +135,32 @@ fn handle(history: &History, scope: Scope, message: &Value) -> Option<Value> {
 
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// The history's tools: the sessions of one project, within `scope`.
+struct HistoryTools<'a> {
+    history: &'a History,
+    scope: Scope<'a>,
+}
+
+impl Tools for HistoryTools<'_> {
+    fn name(&self) -> &'static str {
+        NAME
+    }
+
+    fn instructions(&self) -> &'static str {
+        "Earlier Parolsh sessions of this project: what the user asked, what you \
+         answered, the tools you ran, the outputs the user shared. Search it when the \
+         user refers to earlier work, or before redoing something."
+    }
+
+    fn list(&self) -> Value {
+        tools()
+    }
+
+    fn call(&self, name: &str, arguments: &Value) -> anyhow::Result<String> {
+        call(self.history, self.scope, name, arguments)
+    }
 }
 
 fn tools() -> Value {
@@ -383,8 +431,7 @@ mod tests {
 
     fn request_within(history: &History, scope: Scope, method: &str, params: Value) -> Value {
         handle(
-            history,
-            scope,
+            &HistoryTools { history, scope },
             &json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}),
         )
         .unwrap()
@@ -432,7 +479,11 @@ mod tests {
             ["search_history", "list_sessions", "get_session", "commands"]
         );
         let notification = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        assert!(handle(&history, PRIVATE, &notification).is_none());
+        let tools = HistoryTools {
+            history: &history,
+            scope: PRIVATE,
+        };
+        assert!(handle(&tools, &notification).is_none());
     }
 
     #[test]
