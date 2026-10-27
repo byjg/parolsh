@@ -78,6 +78,15 @@
 # spell_ended = "turn"
 
 
+# The alert when a spell or a turn ends in the background:
+#   bell    the terminal's bell: your terminal decides what it does (default)
+#   off
+#   a sound file, played with pw-play or paplay: "~/sounds/done.mp3"
+# alert = "bell"
+# Seconds: what ends sooner than this has no alert.
+# alert_after = 60
+
+
 # The spinner, in the status line and the terminal title while the agent works:
 #   ring     ○◎◉●◉◎ (default)
 #   dot      ·•●•

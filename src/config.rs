@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::input::Mode;
 use crate::project::STATE_DIR;
@@ -120,6 +121,28 @@ pub enum Spinner {
     Braille,
 }
 
+/// The alert when a spell or a turn ends in the background.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum Alert {
+    Off,
+    /// The terminal's bell.
+    #[default]
+    Bell,
+    /// A sound file, played by `pw-play` or `paplay`.
+    Sound(PathBuf),
+}
+
+impl From<String> for Alert {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "off" => Self::Off,
+            "bell" => Self::Bell,
+            _ => Self::Sound(PathBuf::from(value)),
+        }
+    }
+}
+
 /// What happens when a spell the agent cast in the background ends.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -174,6 +197,9 @@ pub struct Config {
     pub thinking: ThinkingDisplay,
     pub spinner: Spinner,
     pub spell_ended: SpellEnded,
+    pub alert: Alert,
+    /// What ends in the background sooner than this has no alert.
+    pub alert_after: Duration,
     /// Render the answers' markdown on ANSI terminals.
     pub markdown: bool,
     pub links: LinkStyle,
@@ -205,6 +231,8 @@ struct ConfigFile {
     thinking: Option<ThinkingDisplay>,
     spinner: Option<Spinner>,
     spell_ended: Option<SpellEnded>,
+    alert: Option<Alert>,
+    alert_after: Option<u64>,
     markdown: Option<bool>,
     links: Option<LinkStyle>,
     shell_env: Option<ShellEnv>,
@@ -276,6 +304,8 @@ impl ConfigFile {
         self.thinking = over.thinking.or(self.thinking);
         self.spinner = over.spinner.or(self.spinner);
         self.spell_ended = over.spell_ended.or(self.spell_ended);
+        self.alert = over.alert.or(self.alert);
+        self.alert_after = over.alert_after.or(self.alert_after);
         self.markdown = over.markdown.or(self.markdown);
         self.links = over.links.or(self.links);
         self.shell_env = over.shell_env.or(self.shell_env);
@@ -360,6 +390,8 @@ impl Config {
             thinking: file.thinking.unwrap_or_default(),
             spinner: file.spinner.unwrap_or_default(),
             spell_ended: file.spell_ended.unwrap_or_default(),
+            alert: file.alert.unwrap_or_default(),
+            alert_after: Duration::from_secs(file.alert_after.unwrap_or(60)),
             markdown: file.markdown.unwrap_or(true),
             links: file.links.unwrap_or_default(),
             shell_env: file.shell_env.unwrap_or_default(),
@@ -404,6 +436,26 @@ mod tests {
         path
     }
 
+    /// `off` and `bell` are words; anything else is a sound file.
+    #[test]
+    fn alert_is_off_the_bell_or_a_sound_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (text, alert) in [
+            ("alert = \"off\"\n", Alert::Off),
+            ("alert = \"bell\"\n", Alert::Bell),
+            (
+                "alert = \"/usr/share/sounds/done.oga\"\n",
+                Alert::Sound(PathBuf::from("/usr/share/sounds/done.oga")),
+            ),
+        ] {
+            let global = write(tmp.path(), "config.toml", text);
+
+            let config = Config::load_files(Some(&global), None).unwrap();
+
+            assert_eq!(config.alert, alert, "{text}");
+        }
+    }
+
     #[test]
     fn defaults_without_any_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -417,6 +469,8 @@ mod tests {
         assert_eq!(config.thinking, ThinkingDisplay::Status);
         assert_eq!(config.spinner, Spinner::Ring);
         assert_eq!(config.spell_ended, SpellEnded::Turn);
+        assert_eq!(config.alert, Alert::Bell);
+        assert_eq!(config.alert_after, Duration::from_secs(60));
         assert!(config.markdown);
         assert_eq!(config.links, LinkStyle::Both);
         assert_eq!(config.shell_env, ShellEnv::Auto);
@@ -571,6 +625,8 @@ mod tests {
             thinking = "show"
             spinner = "voice"
             spell_ended = "turn-immediately"
+            alert = "~/Downloads/computerbeep_6.mp3"
+            alert_after = 120
             input = "shell"
             markdown = false
             links = "inline"
@@ -585,6 +641,11 @@ mod tests {
         assert_eq!(config.thinking, ThinkingDisplay::Show);
         assert_eq!(config.spinner, Spinner::Voice);
         assert_eq!(config.spell_ended, SpellEnded::TurnImmediately);
+        assert_eq!(
+            config.alert,
+            Alert::Sound(PathBuf::from("~/Downloads/computerbeep_6.mp3"))
+        );
+        assert_eq!(config.alert_after, Duration::from_secs(120));
         assert_eq!(config.input, Mode::Shell);
         assert!(!config.markdown);
         assert_eq!(config.links, LinkStyle::Inline);

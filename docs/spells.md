@@ -184,6 +184,10 @@ spell job 1 · vs-install-mod vsinstrumentsredux_2.2.1.zip ended · exit 0 · 2:
   - `turn-immediately`: at once, even while you type: what you typed comes
     back at the next prompt;
   - `tell`: with your next message.
+
+  A spell that ran 60 s or more also rings the terminal's bell, or plays
+  your sound: `alert` and `alert_after` in
+  [the configuration](configuration.md#keys).
 - **`#jobs`** lists the spells still running, with the turns in the
   background, and the prompt counts them: `1 job`.
 - **They belong to the conversation.** Only its agent can follow them, so

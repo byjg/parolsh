@@ -255,7 +255,9 @@ two conversations:
   after its last tool call) and gives it to the agent you are talking to,
   with your request, along with your next message. Until then that agent
   does not know the request exists, and it never sees the work behind the
-  answer: the files read, the commands run.
+  answer: the files read, the commands run. A turn that ran 60 s or more
+  also rings the terminal's bell, or plays your sound: `alert` and
+  `alert_after` in [Keys](configuration.md#keys).
 - What happens after the copy is not shared the other way either: the turn
   in the background knows nothing of what you ask meanwhile.
 

@@ -25,8 +25,8 @@ use crate::pair::{self, Brief, Gate, Pair};
 use crate::title::Title;
 use crate::turn::Ended;
 use crate::{
-    clipboard, config, hints, mcp, mention, project, replay, setup, shell, shellenv, spells, turn,
-    ui, version,
+    alert, clipboard, config, hints, mcp, mention, project, replay, setup, shell, shellenv, spells,
+    turn, ui, version,
 };
 use agent_client_protocol::schema::v1::McpServer;
 
@@ -421,6 +421,7 @@ impl App {
                 while !stop.load(Ordering::SeqCst) {
                     for job in self.here.iter().flat_map(spells::Here::take_ended) {
                         let _ = self.printer.print(spell_ended(&job));
+                        alert::ended(&self.config.alert, self.config.alert_after, job.elapsed());
                         if self.config.spell_ended != SpellEnded::Tell {
                             self.interrupt.store(true, Ordering::SeqCst);
                         }
@@ -1807,6 +1808,7 @@ impl App {
             .collect();
         for job in &ended {
             println!("{}", spell_ended(job));
+            alert::ended(&self.config.alert, self.config.alert_after, job.elapsed());
         }
         self.tell_spells_ended(&ended);
     }
@@ -1866,6 +1868,11 @@ impl App {
             return;
         };
         println!("{}", job.label(jobs::outcome(&ended)));
+        alert::ended(
+            &self.config.alert,
+            self.config.alert_after,
+            job.turn().started().elapsed(),
+        );
         if let Ended::Failed(why) | Ended::AgentStopped(why) = &ended {
             eprintln!("parolsh: {why}");
         }

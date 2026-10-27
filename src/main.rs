@@ -1,4 +1,5 @@
 mod acp;
+mod alert;
 mod app;
 mod audit;
 mod clipboard;
