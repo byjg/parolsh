@@ -333,6 +333,7 @@ impl App {
             ui::report_dir(&self.shell_cwd);
             if let Some(title) = &self.title {
                 title.set_place(self.place());
+                title.set_spinner(self.config.spinner);
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
             }
             // The agent may have changed: Tab completes its own commands.
@@ -474,6 +475,7 @@ impl App {
             thinking: self.config.thinking,
             markdown: self.config.markdown,
             links: self.config.links,
+            spinner: self.config.spinner,
         }
     }
 

@@ -78,6 +78,16 @@
 # spell_ended = "turn"
 
 
+# The spinner, in the status line and the terminal title while the agent works:
+#   ring     ○◎◉●◉◎ (default)
+#   dot      ·•●•
+#   voice    ▁▃▅▇▅▃
+#   diamond  ◇◈◆◈
+#   pie      ○◔◑◕●
+#   braille  ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏
+# spinner = "ring"
+
+
 # How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.
 #   parolsh   the agent, the directory and ✦ or ❯ (default)
 #   starship  your Starship prompt (~/.config/starship.toml), on ANSI terminals

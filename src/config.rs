@@ -101,6 +101,25 @@ pub enum Commands {
     Off,
 }
 
+/// How the spinner looks, in the status line and the terminal title.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Spinner {
+    /// `○◎◉●◉◎`
+    #[default]
+    Ring,
+    /// `·•●•`
+    Dot,
+    /// `▁▃▅▇▅▃`
+    Voice,
+    /// `◇◈◆◈`
+    Diamond,
+    /// `○◔◑◕●`
+    Pie,
+    /// `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`
+    Braille,
+}
+
 /// What happens when a spell the agent cast in the background ends.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -153,6 +172,7 @@ pub struct Config {
     /// Where plain text goes when Parolsh starts.
     pub input: Mode,
     pub thinking: ThinkingDisplay,
+    pub spinner: Spinner,
     pub spell_ended: SpellEnded,
     /// Render the answers' markdown on ANSI terminals.
     pub markdown: bool,
@@ -183,6 +203,7 @@ struct ConfigFile {
     prompt: Option<PromptStyle>,
     input: Option<Mode>,
     thinking: Option<ThinkingDisplay>,
+    spinner: Option<Spinner>,
     spell_ended: Option<SpellEnded>,
     markdown: Option<bool>,
     links: Option<LinkStyle>,
@@ -253,6 +274,7 @@ impl ConfigFile {
         self.prompt = over.prompt.or(self.prompt);
         self.input = over.input.or(self.input);
         self.thinking = over.thinking.or(self.thinking);
+        self.spinner = over.spinner.or(self.spinner);
         self.spell_ended = over.spell_ended.or(self.spell_ended);
         self.markdown = over.markdown.or(self.markdown);
         self.links = over.links.or(self.links);
@@ -336,6 +358,7 @@ impl Config {
             prompt: file.prompt.unwrap_or_default(),
             input: file.input.unwrap_or_default(),
             thinking: file.thinking.unwrap_or_default(),
+            spinner: file.spinner.unwrap_or_default(),
             spell_ended: file.spell_ended.unwrap_or_default(),
             markdown: file.markdown.unwrap_or(true),
             links: file.links.unwrap_or_default(),
@@ -392,6 +415,7 @@ mod tests {
         assert_eq!(config.prompt, PromptStyle::Parolsh);
         assert_eq!(config.input, Mode::Agent);
         assert_eq!(config.thinking, ThinkingDisplay::Status);
+        assert_eq!(config.spinner, Spinner::Ring);
         assert_eq!(config.spell_ended, SpellEnded::Turn);
         assert!(config.markdown);
         assert_eq!(config.links, LinkStyle::Both);
@@ -545,6 +569,7 @@ mod tests {
             "project.toml",
             r#"
             thinking = "show"
+            spinner = "voice"
             spell_ended = "turn-immediately"
             input = "shell"
             markdown = false
@@ -558,6 +583,7 @@ mod tests {
         let config = Config::load_files(Some(&global), Some(&project)).unwrap();
 
         assert_eq!(config.thinking, ThinkingDisplay::Show);
+        assert_eq!(config.spinner, Spinner::Voice);
         assert_eq!(config.spell_ended, SpellEnded::TurnImmediately);
         assert_eq!(config.input, Mode::Shell);
         assert!(!config.markdown);

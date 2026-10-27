@@ -84,8 +84,11 @@ instead of adding lines:
 
 ```text
 [claude] ~/projects/wallet ✦ why is the API container restarting?
-⠹ Running: Terminal (9s) · 12s
+◉ Running: Terminal (9s) · 12s
 ```
+
+The spinner's look is the `spinner` setting (see
+[Keys](configuration.md#keys)).
 
 Tool calls only update that line: `Running: <title> (8s)` with the time that
 tool has taken, `2 tools running` when there are more, `Failed: <title>` when
@@ -226,7 +229,7 @@ and the turn's answer comes when it is done.
 
 ```text
 [claude] ~/projects/wallet ✦ compare the code with version 0.6.0
-⠹ Running: Read src/client.rs (2s) · 12s                         (Ctrl+Z)
+◉ Running: Read src/client.rs (2s) · 12s                         (Ctrl+Z)
 [1] in the background: compare the code with version 0.6.0
 [claude] ~/projects/wallet ✦ what does the retry test check?       1 job
 ✦ It checks that a timeout is retried three times, with a longer wait
@@ -475,7 +478,7 @@ status line of a turn counts them too:
 
 ```text
 [claude] ~/projects/wallet ✦                                ⧗ 1 bg · 0:42
-⠹ Thinking · 4s · 1 bg
+◉ Thinking · 4s · 1 bg
 ```
 
 On an ANSI terminal, Parolsh also sets the terminal's title, so you can follow
@@ -484,8 +487,8 @@ the agent from another tab or window:
 ```text
 parolsh · ~/…/projects/wallet              before the agent names the conversation
 parolsh · Fix the batch script             the conversation's title, from the agent
-⠹ parolsh · Fix the batch script           a turn is running
-⠹ 2 bg · parolsh · Fix the batch script    background tasks are running
+◉ parolsh · Fix the batch script           a turn is running
+◉ 2 bg · parolsh · Fix the batch script    background tasks are running
 ```
 
 - The conversation's title is the agent's own (Claude and Codex send one;

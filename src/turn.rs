@@ -15,7 +15,7 @@ use crate::acp::{
     AgentHandle, AgentSession, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage,
 };
 use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
-use crate::config::{LinkStyle, ThinkingDisplay};
+use crate::config::{LinkStyle, Spinner, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::jobs::Job;
 use crate::markdown::Markdown;
@@ -78,7 +78,12 @@ pub struct Display {
     /// Render markdown (on ANSI terminals only).
     pub markdown: bool,
     pub links: LinkStyle,
+    pub spinner: Spinner,
 }
+
+/// The status line is redrawn every 100 ms while the agent is silent; its
+/// spinner moves on every third time, about 300 ms per frame.
+const TICKS_PER_FRAME: usize = 3;
 
 /// How long the agent has to confirm a cancel before Parolsh stops waiting.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -360,7 +365,7 @@ fn follow(
     BACKGROUND.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
-    let mut out = Output::new(ansi, display.thinking, markdown);
+    let mut out = Output::new(ansi, display.thinking, display.spinner, markdown);
     if agent.abandoned().is_some() {
         out.pin("Waiting for the previous turn to stop…");
     }
@@ -1155,6 +1160,7 @@ struct Output {
     mid_line: bool,
     status: Option<Status>,
     thinking: ThinkingDisplay,
+    spinner: Spinner,
     ansi: bool,
     /// The last thing printed was reasoning (`thinking = "show"`).
     in_thought: bool,
@@ -1278,10 +1284,16 @@ impl Status {
 }
 
 impl Output {
-    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: Option<Markdown>) -> Self {
+    fn new(
+        ansi: bool,
+        thinking: ThinkingDisplay,
+        spinner: Spinner,
+        markdown: Option<Markdown>,
+    ) -> Self {
         Self {
             markdown,
             thinking,
+            spinner,
             ansi,
             in_thought: false,
             mid_line: false,
@@ -1509,7 +1521,7 @@ impl Output {
                 None => status.activity(),
             };
             let line = ui::status(
-                status.frame,
+                ui::spinner(self.spinner, status.frame / TICKS_PER_FRAME),
                 &activity,
                 status.started.elapsed(),
                 status.background,

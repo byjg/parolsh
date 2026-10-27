@@ -84,7 +84,7 @@ pub fn answer(record: &Record, display: Display, ansi: bool, width: usize) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LinkStyle, ThinkingDisplay};
+    use crate::config::{LinkStyle, Spinner, ThinkingDisplay};
     use serde_json::json;
     use std::time::Duration;
 
@@ -147,6 +147,7 @@ mod tests {
             thinking: ThinkingDisplay::Status,
             markdown: true,
             links: LinkStyle::Both,
+            spinner: Spinner::Ring,
         }
     }
 
