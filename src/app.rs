@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{ActivityWatch, AgentHandle, AgentSession, Block, ForkOf, Forks, Replayed, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
-use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
+use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle, SpellEnded};
 use crate::history::{Found, History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::jobs::{self, Job};
@@ -150,6 +150,12 @@ pub struct App {
     /// What background turns answered, for the agent with the next message:
     /// its conversation was copied before them.
     handover: Vec<String>,
+    /// A spell ended and the agent is to be told in a turn of its own
+    /// (`spell_ended`), not with your next message.
+    spell_turn: bool,
+    /// What was on the prompt's line when something else ended it: it
+    /// comes back with the next prompt.
+    typed: String,
     /// Leaving was refused once, because something is still running.
     leaving: bool,
     /// The token of this conversation's history server: `#share` gives it
@@ -262,6 +268,8 @@ impl App {
             conversation: 0,
             private: false,
             handover: Vec::new(),
+            spell_turn: false,
+            typed: String::new(),
             leaving: false,
             share_token: RefCell::default(),
             answers: VecDeque::new(),
@@ -346,6 +354,7 @@ impl App {
             }
             self.attend_jobs();
             self.attend_spells();
+            self.spell_turn();
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
                 // A key bound to a command (Ctrl+L, Alt+C) is a line like any
@@ -361,6 +370,7 @@ impl App {
                         Signal::Success(line) => line,
                         _ => continue,
                     };
+                    self.typed.clear();
                     // Only the line right after the warning goes on.
                     self.may_stop = std::mem::take(&mut self.warned);
                     match self.handle(route(&line, self.mode.get())) {
@@ -369,7 +379,9 @@ impl App {
                         Flow::Continue => self.leaving = false,
                     }
                 }
-                Signal::CtrlC => continue,
+                // A background turn or a spell ended the prompt.
+                Signal::ExternalBreak(typed) => self.typed = typed,
+                Signal::CtrlC => self.typed.clear(),
                 Signal::CtrlD if self.may_leave() => return Ok(()),
                 _ => continue,
             }
@@ -401,12 +413,16 @@ impl App {
                     &mut self.jobs,
                 )
             });
-            // A spell that ends while you type is said above the prompt.
+            // A spell that ends while you type is said above the prompt,
+            // which ends for the agent to be told in a turn of its own.
             let spells = scope.spawn(|| {
                 let mut ended = Vec::new();
                 while !stop.load(Ordering::SeqCst) {
                     for job in self.here.iter().flat_map(spells::Here::take_ended) {
                         let _ = self.printer.print(spell_ended(&job));
+                        if self.config.spell_ended != SpellEnded::Tell {
+                            self.interrupt.store(true, Ordering::SeqCst);
+                        }
                         ended.push(job);
                     }
                     std::thread::sleep(Duration::from_millis(250));
@@ -418,18 +434,18 @@ impl App {
             let ended = spells.join().unwrap_or_default();
             (signal, watcher.join().unwrap_or_default(), ended)
         });
+        let job = self.jobs.iter().any(Job::wants_attention) || self.tells_in_turn(&ended);
         self.tell_spells_ended(&ended);
         // A question that came with the Enter key would break the next prompt.
         self.interrupt.store(false, Ordering::SeqCst);
 
         let late = std::iter::from_fn(|| self.printer.get_line());
         let lines: Vec<String> = late.chain(watched.lines).collect();
-        let job = self.jobs.iter().any(Job::wants_attention);
         if !lines.is_empty() || watched.request.is_some() || watched.stopped {
             // Below the line the prompt was on.
             println!();
         } else if job && ui::is_ansi() {
-            // Only a background turn made the prompt return: its line goes,
+            // Only a background turn or a spell made the prompt return: its line goes,
             // and what was typed comes back with the next prompt.
             print!("{}", ui::CLEAR_LINE);
         } else if job {
@@ -1465,6 +1481,7 @@ impl App {
         );
         // What background turns answered since the last message comes first.
         let told = std::mem::take(&mut self.handover);
+        self.spell_turn = false;
         let mut blocks: Vec<Block> = told.iter().cloned().map(Block::Text).collect();
         blocks.extend(shared.into_iter().map(Block::Text));
         blocks.extend(files.into_iter().map(Block::File));
@@ -1793,15 +1810,23 @@ impl App {
     }
 
     fn tell_spells_ended(&mut self, ended: &[spells::JobFile]) {
-        for job in ended {
-            self.handover.push(format!(
-                "For your information only: do not answer this or comment on it, unless I \
-                 ask about it.\n\n{}, which you cast in the background, ended: {}. \
-                 spell_job {} returns its output.",
-                job.label(),
-                job.outcome(),
-                job.id
-            ));
+        self.spell_turn |= self.tells_in_turn(ended);
+        self.handover.extend(ended.iter().map(spell_notice));
+    }
+
+    /// Whether the agent is told of the spells `ended` in a turn of its own.
+    fn tells_in_turn(&self, ended: &[spells::JobFile]) -> bool {
+        !ended.is_empty() && self.config.spell_ended != SpellEnded::Tell
+    }
+
+    /// The turn that tells the agent the spells that ended: unless you are
+    /// typing, with `turn`, then they go with your next message.
+    fn spell_turn(&mut self) {
+        if !self.spell_turn || self.agent.is_none() {
+            return;
+        }
+        if turn_now(self.config.spell_ended, &self.typed) {
+            self.last_status = self.ask(SPELL_TURN.to_string());
         }
     }
 
@@ -2395,6 +2420,32 @@ fn handover(request: &str, answer: &str) -> String {
     )
 }
 
+/// What the agent is told of a spell it cast that ended in the background.
+fn spell_notice(job: &spells::JobFile) -> String {
+    format!(
+        "{}, which you cast in the background, ended: {}. Do what the instructions of spell \
+         {} say for when it ends.\n\nIts output:\n{}",
+        job.label(),
+        job.outcome(),
+        job.spell,
+        job.output
+    )
+}
+
+/// Whether a spell that ended is told in a turn of its own now, with
+/// `typed` on the prompt's line.
+fn turn_now(spell_ended: SpellEnded, typed: &str) -> bool {
+    match spell_ended {
+        SpellEnded::Tell => false,
+        SpellEnded::Turn => typed.trim().is_empty(),
+        SpellEnded::TurnImmediately => true,
+    }
+}
+
+/// The message of the turn that tells the agent a spell ended: what ended
+/// comes before it.
+const SPELL_TURN: &str = "parolsh: a spell you cast in the background ended, as said above.";
+
 /// As much as a `!+` output keeps.
 const HANDOVER_LIMIT: usize = 16 * 1024;
 
@@ -2684,6 +2735,40 @@ mod tests {
         assert!(answer.ends_with("é the end"));
         assert!(answer.len() <= HANDOVER_LIMIT + "(the end of it)\n".len());
         assert!(!cut.contains("start"));
+    }
+
+    /// The agent is told what ended, how, and what it wrote, and to go on
+    /// as the spell says: not to keep quiet.
+    #[test]
+    fn a_spell_that_ended_is_told_with_its_output() {
+        let job = spells::JobFile {
+            id: 2,
+            spell: "build-all-php".to_string(),
+            args: vec!["7.0".to_string(), "fresh".to_string()],
+            pgid: 0,
+            started: 0,
+            exit: Some(1),
+            output: "Stopping due to failure in php-gluo\n".to_string(),
+        };
+
+        assert_eq!(
+            spell_notice(&job),
+            "spell job 2 · build-all-php 7.0 fresh, which you cast in the background, ended: \
+             exit 1. Do what the instructions of spell build-all-php say for when it ends.\n\n\
+             Its output:\nStopping due to failure in php-gluo\n"
+        );
+    }
+
+    /// `tell` waits for your next message; `turn` does not, unless you are
+    /// typing; `turn-immediately` does not wait at all.
+    #[test]
+    fn a_spell_that_ended_is_told_in_a_turn_as_spell_ended_says() {
+        assert!(!turn_now(SpellEnded::Tell, ""));
+        assert!(turn_now(SpellEnded::Turn, ""));
+        assert!(turn_now(SpellEnded::Turn, "  "));
+        assert!(!turn_now(SpellEnded::Turn, "git sta"));
+        assert!(turn_now(SpellEnded::TurnImmediately, ""));
+        assert!(turn_now(SpellEnded::TurnImmediately, "git sta"));
     }
 
     /// Tab completes the `#` commands `#help` lists, no more, no fewer.

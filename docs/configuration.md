@@ -39,8 +39,8 @@ Parolsh looks:
   `~/.bashrc` set up, and gives it to the agent (see
   [Shell environment](#shell-environment)). It runs your files, not the
   project's.
-- `default_agent`, `input`, `prompt`, `thinking`, `markdown`, `links`,
-  `audit_entries`, `redraw_exchanges`.
+- `default_agent`, `input`, `prompt`, `thinking`, `spell_ended`, `markdown`,
+  `links`, `audit_entries`, `redraw_exchanges`.
 
 A project can only refer to agents defined in the global file: it cannot add
 one. A project file that sets a global-only key is reported as an error and
@@ -140,6 +140,7 @@ the agent in use (here `qwen`, which the global file configures) until
 | `history_days` | `90` | Days an idle session stays in the [history of sessions](sessions.md#the-history-of-sessions). `0` saves nothing. Global only. |
 | `commands` | `"private"` | The lines of your `!commands` (never their output) in the history: `private` (saved for you: `#redraw`, `#resume` and `#audit <n>` show them; the agent's tools do not return them), `shared` (returned to the agent too), `off` (not saved). Global only. `save_commands = true` or `false`, from 0.6.0, still means `shared` or `off`. See [The history of sessions](sessions.md#the-history-of-sessions). |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
+| `spell_ended` | `"turn"` | When the agent is told that a spell it cast in the background ended: `turn` (at once, in a turn of its own, unless you are typing: then with your next message), `turn-immediately` (at once, even while you type: what you typed comes back), `tell` (with your next message). See [Spells in the background](spells.md#spells-in-the-background). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
 plain `bash -c`.

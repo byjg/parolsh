@@ -70,6 +70,14 @@
 # thinking = "status"
 
 
+# When the agent is told that a spell it cast in the background ended:
+#   turn              at once, in a turn of its own, unless you are typing:
+#                     then with your next message (default)
+#   turn-immediately  at once, even while you type: what you typed comes back
+#   tell              with your next message
+# spell_ended = "turn"
+
+
 # How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.
 #   parolsh   the agent, the directory and ✦ or ❯ (default)
 #   starship  your Starship prompt (~/.config/starship.toml), on ANSI terminals

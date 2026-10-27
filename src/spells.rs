@@ -207,6 +207,9 @@ pub struct JobFile {
     pub started: u64,
     /// Set when it ended, once its output is all read.
     pub exit: Option<i32>,
+    /// The end of its output, set with `exit`.
+    #[serde(default)]
+    pub output: String,
 }
 
 impl JobFile {
@@ -454,6 +457,7 @@ impl SpellTools {
             pgid: captive.pgid(),
             started,
             exit: None,
+            output: String::new(),
         };
         let mut jobs = self.jobs.lock().expect("jobs lock");
         // After this server's jobs too: Parolsh removes the file of one it
@@ -469,6 +473,7 @@ impl SpellTools {
             let mut file = file.clone();
             std::thread::spawn(move || {
                 file.exit = ended.wait(None);
+                file.output = shown(&ended.output());
                 let opened = std::fs::OpenOptions::new()
                     .write(true)
                     .truncate(true)
@@ -486,9 +491,8 @@ impl SpellTools {
         });
         Ok(format!(
             "Still running after {} s: it goes on in the background as job {}. \
-             spell_job {} shows how it goes and its output, stop_spell {} stops it. The \
-             user sees at their prompt when it ends, and you are told with their next \
-             message.\nOutput so far:\n{}",
+             spell_job {} shows how it goes and its output, stop_spell {} stops it. Parolsh \
+             tells you when it ends, with its output.\nOutput so far:\n{}",
             self.wait.as_secs(),
             file.id,
             file.id,
@@ -530,12 +534,19 @@ impl Drop for SpellTools {
 
 /// What `cast_spell` returns of a script that ended.
 fn result(code: i32, captured: &shell::Captured) -> String {
-    let mut out = format!("exit {code}\n");
-    if captured.truncated {
-        out.push_str(&format!("(only the last {} KB)\n", OUTPUT_LIMIT / 1024));
+    format!("exit {code}\n{}", shown(captured))
+}
+
+/// The output of a script, saying when it is only the end of it.
+fn shown(captured: &shell::Captured) -> String {
+    match captured.truncated {
+        true => format!(
+            "(only the last {} KB)\n{}",
+            OUTPUT_LIMIT / 1024,
+            captured.text
+        ),
+        false => captured.text.clone(),
     }
-    out.push_str(&captured.text);
-    out
 }
 
 impl mcp::Tools for SpellTools {
@@ -721,12 +732,8 @@ impl mcp::Tools for SpellTools {
                             .iter()
                             .find(|job| job.id == id)
                             .ok_or_else(|| anyhow::anyhow!("no spell job {id} here"))?;
-                        let captured = job.captive.output();
                         out.push_str(&format!("{}\n", Self::status(job)));
-                        if captured.truncated {
-                            out.push_str(&format!("(only the last {} KB)\n", OUTPUT_LIMIT / 1024));
-                        }
-                        out.push_str(&captured.text);
+                        out.push_str(&shown(&job.captive.output()));
                     }
                 }
             }
@@ -1075,6 +1082,7 @@ instructions = "Check the version first.\n"
         let ended = here.take_ended();
         assert_eq!(ended.len(), 1);
         assert_eq!(ended[0].exit, Some(0));
+        assert_eq!(ended[0].output, "started mod.zip\ndone\n");
         assert!(here.take_ended().is_empty());
         let job = tools.call("spell_job", &json!({"job": 1})).unwrap();
         assert_eq!(

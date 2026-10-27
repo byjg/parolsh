@@ -173,11 +173,17 @@ spell job 1 · vs-install-mod vsinstrumentsredux_2.2.1.zip ended · exit 0 · 2:
 ```
 
 - **Ask how it goes**, or to stop it: the agent has `spell_job` and
-  `stop_spell`. Reports come when you ask: between turns, the agent cannot
-  speak by itself.
+  `stop_spell`.
 - **When it ends**, Parolsh says so at the prompt, also while you type, and
-  tells the agent with your next message: it can then read the output with
-  `spell_job`.
+  tells the agent how it ended, with the end of its output: the agent then
+  does what the spell's instructions say for its end (reports, offers what
+  to do on a failure). `spell_ended` in the
+  [configuration](configuration.md#keys) says when:
+  - `turn` (default): at once, in a turn of its own, unless you are typing:
+    then with your next message;
+  - `turn-immediately`: at once, even while you type: what you typed comes
+    back at the next prompt;
+  - `tell`: with your next message.
 - **`#jobs`** lists the spells still running, with the turns in the
   background, and the prompt counts them: `1 job`.
 - **They belong to the conversation.** Only its agent can follow them, so
