@@ -86,6 +86,9 @@ pub struct App {
     /// Where shell commands run: `cwd` until a command ends in another
     /// directory (`cd`), and again after `#cd`.
     shell_cwd: PathBuf,
+    /// Where the agent was last told your prompt is, when not in its own
+    /// directory: it is told again when that changes.
+    told_dir: Option<PathBuf>,
     /// What your shell commands changed in their environment (`export`,
     /// `unset`, `source`), applied to the next ones. In memory only, and not
     /// the agent's.
@@ -243,6 +246,7 @@ impl App {
             completion_agent_sessions: Arc::default(),
             mode: SharedMode::default(),
             shell_cwd: cwd.clone(),
+            told_dir: None,
             shell_changes: shell::Changes::default(),
             cwd,
             project_root,
@@ -1159,6 +1163,7 @@ impl App {
         self.conversation += 1;
         self.private = private;
         self.handover.clear();
+        self.told_dir = None;
     }
 
     /// A new conversation: a new session in the history, unless private.
@@ -1478,13 +1483,24 @@ impl App {
             true => text.clone(),
             false => mention::in_full(&text, &self.shell_cwd, home.as_deref()),
         };
+        // "Here" is where your prompt is: the agent is told when it moves.
+        let prompt_dir = (self.shell_cwd != self.cwd).then(|| self.shell_cwd.clone());
+        if prompt_dir != self.told_dir {
+            self.handover
+                .push(prompt_dir_note(prompt_dir.as_deref(), &self.cwd));
+            self.told_dir = prompt_dir;
+        }
+        // What Parolsh tells the agent since the last message comes first.
+        let told = std::mem::take(&mut self.handover);
+        self.spell_turn = false;
+        for note in &told {
+            self.audit
+                .add(Record::new(Actor::Parolsh, Kind::Note, note).meta(json!({"agent": name})));
+        }
         let message = self.audit.add(
             Record::new(Actor::User, Kind::Message, text.clone())
                 .meta(json!({"agent": name, "files": files.len()})),
         );
-        // What background turns answered since the last message comes first.
-        let told = std::mem::take(&mut self.handover);
-        self.spell_turn = false;
         let mut blocks: Vec<Block> = told.iter().cloned().map(Block::Text).collect();
         blocks.extend(shared.into_iter().map(Block::Text));
         blocks.extend(files.into_iter().map(Block::File));
@@ -2429,6 +2445,23 @@ fn handover(request: &str, answer: &str) -> String {
     )
 }
 
+/// What the agent is told of where your prompt is: `prompt_dir`, or its
+/// own directory `cwd` again.
+fn prompt_dir_note(prompt_dir: Option<&Path>, cwd: &Path) -> String {
+    match prompt_dir {
+        Some(dir) => format!(
+            "My prompt is now in {}, and your directory is still {}. When I say \"here\", \
+             or name a file without its path, I mean my prompt's directory.",
+            dir.display(),
+            cwd.display()
+        ),
+        None => format!(
+            "My prompt is back in your directory, {}: \"here\" is your directory again.",
+            cwd.display()
+        ),
+    }
+}
+
 /// What the agent is told of a spell it cast that ended in the background.
 fn spell_notice(job: &spells::JobFile) -> String {
     format!(
@@ -2765,6 +2798,24 @@ mod tests {
             "spell job 2 · build-all-php 7.0 fresh, which you cast in the background, ended: \
              exit 1. Do what the instructions of spell build-all-php say for when it ends.\n\n\
              Its output:\nStopping due to failure in php-gluo\n"
+        );
+    }
+
+    /// The agent is told where your prompt went, and when it came back.
+    #[test]
+    fn the_agent_is_told_where_your_prompt_is() {
+        let cwd = Path::new("/home/me/project");
+
+        assert_eq!(
+            prompt_dir_note(Some(Path::new("/home/me/Downloads")), cwd),
+            "My prompt is now in /home/me/Downloads, and your directory is still \
+             /home/me/project. When I say \"here\", or name a file without its path, I mean \
+             my prompt's directory."
+        );
+        assert_eq!(
+            prompt_dir_note(None, cwd),
+            "My prompt is back in your directory, /home/me/project: \"here\" is your \
+             directory again."
         );
     }
 

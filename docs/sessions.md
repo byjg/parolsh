@@ -34,7 +34,7 @@ answered.
 | `USER` | `!command`, `!+command` and `!bash` with their exit code, your messages (their first line) with the agent they went to, `#` commands (all but `#help`, `#exit`, `#audit`, `#sessions`, `#redraw`, `#jobs`, `#fg`, `#copy` and `#raw`), and your answers to the agent's questions |
 | `SHARED` | `!+` output sent with a message, and its size |
 | `AGENT` | Tool calls, with their kind, the files the agent names and how they ended; permission requests and questions |
-| `PAROLSH` | How each turn ended, a cancel the agent did not confirm, an agent that stopped |
+| `PAROLSH` | How each turn ended, a cancel the agent did not confirm, an agent that stopped, and the notes Parolsh sent with a message (`note → claude: …`): a background turn's answer, a spell that ended, where your prompt is |
 
 It keeps titles and commands only, the first line of each and at most 200
 characters: outputs and answers stay in the scrollback. It is in memory, and

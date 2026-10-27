@@ -269,6 +269,11 @@ The link is `infra/deploy.yaml`. The agent would read the word `@deploy.yaml`
 from its own directory, so it gets it in full, `@/home/you/projects/wallet/infra/deploy.yaml`,
 while the history keeps what you typed.
 
+The agent is also told where your prompt is, with your first message after
+the `cd`, so that "here" means the prompt's directory: "My prompt is now in
+…/infra, and your directory is still …/wallet". Once more when you come back
+to its directory. It is not printed: `#audit` shows it, as a `PAROLSH` note.
+
 `@words` that name nothing (`@team`, an email address) are only text, and
 punctuation right after a path (`@notes.txt.`) is not part of it. `#audit`
 shows how many files a message linked.

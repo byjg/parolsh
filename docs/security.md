@@ -46,9 +46,13 @@ What you send, and what Parolsh passes on for you:
   command, its directory and its exit code;
 - each `@path` you mention, as a link to the file, which the agent then
   reads itself (see [Mentioning files](input-routing.md#mentioning-files));
-- the current directory, when a conversation starts;
+- the current directory, when a conversation starts, and the directory your
+  prompt is in, with your next message, when a `cd` moved it away from the
+  agent's (see [Mentioning files](input-routing.md#mentioning-files));
 - after a turn [sent to the background](working-with-agents.md#turns-in-the-background)
   ends, its request and the last 16 KB of its answer, with your next message;
+- after a [spell in the background](spells.md#spells-in-the-background) ends,
+  its exit code and the last 16 KB of its output;
 - while you are [pairing](working-with-agents.md#pairing-two-agents), the
   issue and what the agent wrote after its last tool call go to the second
   agent each time the agent stops, without asking: the second agent may be of
