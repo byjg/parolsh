@@ -489,10 +489,19 @@ impl SpellTools {
             started: Instant::now() - self.wait,
             captive: captive.clone(),
         });
+        // Only Parolsh watches its end: another client asks.
+        let end = match self.here {
+            Some(_) => "Parolsh tells you when it ends, with its output.".to_string(),
+            None => format!(
+                "Nothing tells you when it ends: check it with spell_job {} when the user \
+                 asks, or before you rely on its result.",
+                file.id
+            ),
+        };
         Ok(format!(
             "Still running after {} s: it goes on in the background as job {}. \
-             spell_job {} shows how it goes and its output, stop_spell {} stops it. Parolsh \
-             tells you when it ends, with its output.\nOutput so far:\n{}",
+             spell_job {} shows how it goes and its output, stop_spell {} stops it. \
+             {end}\nOutput so far:\n{}",
             self.wait.as_secs(),
             file.id,
             file.id,
@@ -1072,6 +1081,10 @@ instructions = "Check the version first.\n"
             out.starts_with("Still running after 0 s: it goes on in the background as job 1."),
             "{out}"
         );
+        assert!(
+            out.contains("Parolsh tells you when it ends, with its output.\n"),
+            "{out}"
+        );
         assert!(out.ends_with("Output so far:\nstarted mod.zip\n"), "{out}");
         let running = here.running();
         assert_eq!(running.len(), 1);
@@ -1097,6 +1110,31 @@ instructions = "Check the version first.\n"
         );
         let all = tools.call("spell_job", &json!({})).unwrap();
         assert_eq!(all, "spell job 1 · slow mod.zip · ended: exit 0\n");
+    }
+
+    /// Without Parolsh (Claude Code, Codex), nothing watches a job's end:
+    /// the agent is told to check it, not to wait for a report.
+    #[test]
+    fn without_parolsh_the_agent_checks_a_job_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        spell(
+            dir.path(),
+            "slow",
+            "description = \"Slow\"\nrun = \"run.sh\"\n",
+            Some("#!/bin/sh\necho started\nsleep 1\n"),
+        );
+        let mut tools = tools(dir.path(), None);
+        tools.wait = Duration::from_millis(300);
+
+        let out = cast(&tools, "slow", json!([])).unwrap();
+
+        assert!(
+            out.contains(
+                "stop_spell 1 stops it. Nothing tells you when it ends: check it with \
+                 spell_job 1 when the user asks, or before you rely on its result.\n"
+            ),
+            "{out}"
+        );
     }
 
     /// Parolsh forgets a job once it said it ended, but the server still
