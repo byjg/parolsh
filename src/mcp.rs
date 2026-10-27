@@ -11,7 +11,7 @@
 use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::history::History;
 use crate::version;
@@ -36,7 +36,7 @@ pub struct Scope<'a> {
 /// The MCP server Parolsh gives the agent: this program, reading `db` within
 /// `scope`. `None` when Parolsh cannot tell where its own program is.
 pub fn server(db: &Path, scope: Scope) -> Option<McpServer> {
-    let program = std::env::current_exe().ok()?;
+    let program = program()?;
     let mut args = vec![
         "mcp".to_string(),
         "--db".to_string(),
@@ -53,6 +53,29 @@ pub fn server(db: &Path, scope: Scope) -> Option<McpServer> {
     Some(McpServer::Stdio(
         McpServerStdio::new(NAME, program).args(args),
     ))
+}
+
+/// The program the agent runs for Parolsh's servers: this one, the build that
+/// is running. `None` when Parolsh cannot tell where it is.
+pub fn program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(running(exe, std::process::id()))
+}
+
+/// On Linux, once the file of a running program is replaced (a rebuild, an
+/// upgrade), its path ends in ` (deleted)`: the agent could not start it. The
+/// new file at that place is used, or, when there is none, the old one, which
+/// Linux keeps for process `pid` until it ends.
+fn running(exe: PathBuf, pid: u32) -> PathBuf {
+    let Some(path) = exe.to_str().and_then(|exe| exe.strip_suffix(" (deleted)")) else {
+        return exe;
+    };
+    let replaced = PathBuf::from(path);
+    if replaced.is_file() {
+        replaced
+    } else {
+        PathBuf::from(format!("/proc/{pid}/exe"))
+    }
 }
 
 /// Serves the history in `db`, within `scope`, on stdin and stdout until
@@ -374,6 +397,24 @@ fn call(history: &History, scope: Scope, name: &str, arguments: &Value) -> anyho
 mod tests {
     use super::*;
     use crate::history::SessionStart;
+
+    /// A rebuild or an upgrade replaces the file Parolsh runs from: the agent
+    /// gets a program it can start.
+    #[test]
+    fn a_replaced_program_is_found_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = dir.path().join("parolsh");
+        std::fs::write(&built, "").unwrap();
+        let deleted = |path: &Path| PathBuf::from(format!("{} (deleted)", path.display()));
+
+        // As it runs: the same path.
+        assert_eq!(running(built.clone(), 42), built);
+        // Replaced by a new build at the same place: the new one.
+        assert_eq!(running(deleted(&built), 42), built);
+        // Removed with nothing in its place: the old one, kept for the process.
+        let gone = dir.path().join("gone");
+        assert_eq!(running(deleted(&gone), 42), PathBuf::from("/proc/42/exe"));
+    }
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

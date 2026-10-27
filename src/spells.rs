@@ -364,7 +364,7 @@ fn add_job(here: &Path, mut job: JobFile, last: u32) -> std::io::Result<u32> {
 /// The MCP server Parolsh gives the agent: this program, sharing `here` with
 /// Parolsh. `None` when Parolsh cannot tell where its own program is.
 pub fn server(here: Option<&Path>) -> Option<McpServer> {
-    let program = std::env::current_exe().ok()?;
+    let program = mcp::program()?;
     let mut args = vec!["mcp".to_string(), "--spells".to_string()];
     if let Some(here) = here {
         args.extend(["--here".to_string(), here.display().to_string()]);
