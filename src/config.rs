@@ -101,6 +101,21 @@ pub enum Commands {
     Off,
 }
 
+/// What happens when a spell the agent cast in the background ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpellEnded {
+    /// The agent is told with your next message.
+    Tell,
+    /// The agent is told at once, in a turn of its own, unless you are
+    /// typing: then with your next message.
+    #[default]
+    Turn,
+    /// The agent is told at once, in a turn of its own, even while you
+    /// type: what you typed comes back after it.
+    TurnImmediately,
+}
+
 /// How the input prompt is drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,6 +153,7 @@ pub struct Config {
     /// Where plain text goes when Parolsh starts.
     pub input: Mode,
     pub thinking: ThinkingDisplay,
+    pub spell_ended: SpellEnded,
     /// Render the answers' markdown on ANSI terminals.
     pub markdown: bool,
     pub links: LinkStyle,
@@ -167,6 +183,7 @@ struct ConfigFile {
     prompt: Option<PromptStyle>,
     input: Option<Mode>,
     thinking: Option<ThinkingDisplay>,
+    spell_ended: Option<SpellEnded>,
     markdown: Option<bool>,
     links: Option<LinkStyle>,
     shell_env: Option<ShellEnv>,
@@ -236,6 +253,7 @@ impl ConfigFile {
         self.prompt = over.prompt.or(self.prompt);
         self.input = over.input.or(self.input);
         self.thinking = over.thinking.or(self.thinking);
+        self.spell_ended = over.spell_ended.or(self.spell_ended);
         self.markdown = over.markdown.or(self.markdown);
         self.links = over.links.or(self.links);
         self.shell_env = over.shell_env.or(self.shell_env);
@@ -318,6 +336,7 @@ impl Config {
             prompt: file.prompt.unwrap_or_default(),
             input: file.input.unwrap_or_default(),
             thinking: file.thinking.unwrap_or_default(),
+            spell_ended: file.spell_ended.unwrap_or_default(),
             markdown: file.markdown.unwrap_or(true),
             links: file.links.unwrap_or_default(),
             shell_env: file.shell_env.unwrap_or_default(),
@@ -373,6 +392,7 @@ mod tests {
         assert_eq!(config.prompt, PromptStyle::Parolsh);
         assert_eq!(config.input, Mode::Agent);
         assert_eq!(config.thinking, ThinkingDisplay::Status);
+        assert_eq!(config.spell_ended, SpellEnded::Turn);
         assert!(config.markdown);
         assert_eq!(config.links, LinkStyle::Both);
         assert_eq!(config.shell_env, ShellEnv::Auto);
@@ -525,6 +545,7 @@ mod tests {
             "project.toml",
             r#"
             thinking = "show"
+            spell_ended = "turn-immediately"
             input = "shell"
             markdown = false
             links = "inline"
@@ -537,6 +558,7 @@ mod tests {
         let config = Config::load_files(Some(&global), Some(&project)).unwrap();
 
         assert_eq!(config.thinking, ThinkingDisplay::Show);
+        assert_eq!(config.spell_ended, SpellEnded::TurnImmediately);
         assert_eq!(config.input, Mode::Shell);
         assert!(!config.markdown);
         assert_eq!(config.links, LinkStyle::Inline);

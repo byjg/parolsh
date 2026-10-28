@@ -11,9 +11,9 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -368,6 +368,130 @@ pub fn run_shared(
         truncated: false,
     });
     Ok((code, tail, report.left(changes)))
+}
+
+/// A spell's script: `program` with `args`, each its own argument, never
+/// put into a shell line, run by the configured shell in `cwd` with `env`
+/// added, as `"$0" "$@"`. Its input is empty, and its stdout and stderr,
+/// together, are kept, the last `limit` bytes, and printed nowhere. Only
+/// the program is captured, as with [`run_shared`]: an interactive bash
+/// without a terminal says it has no job control, and that is not the
+/// program's output. It runs in a session of its own, without the terminal,
+/// whose process group [`Captive::stop`] ends with all it started.
+pub fn start_captured(
+    shell: &[String],
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    limit: usize,
+) -> std::io::Result<Captive> {
+    let (out_read, out_write) = std::io::pipe()?;
+    let mut command = self::command(shell, r#""$0" "$@" >&3 2>&3 3>&-"#, cwd);
+    command
+        .arg(program)
+        .args(args)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // A session of its own, without Parolsh's terminal: in a process group
+    // of that terminal, an interactive bash taking it for its job control
+    // would be stopped (SIGTTOU). The session leader's process group is its
+    // pid, as with `process_group(0)`.
+    // SAFETY: between fork and exec only setsid runs, which is
+    // async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    pass_fds(&mut command, vec![(out_write.as_raw_fd(), 3)]);
+
+    let tail = Arc::new(Mutex::new(Tail::new(limit)));
+    let (done_tx, done_rx) = mpsc::channel();
+    copy(out_read, std::io::sink(), tail.clone(), done_tx);
+    let mut child = command.spawn()?;
+    // Ours, so the read ends when the program's does.
+    drop(out_write);
+    let pgid = child.id() as i32;
+    let exit = Arc::new((Mutex::new(None), Condvar::new()));
+    let ended = exit.clone();
+    std::thread::spawn(move || {
+        let code = child.wait().map_or(1, exit_code);
+        // A background process started by the program may keep the pipe
+        // open: do not wait for it.
+        let _ = done_rx.recv_timeout(Duration::from_secs(1));
+        let (code_lock, changed) = &*ended;
+        if let Ok(mut slot) = code_lock.lock() {
+            *slot = Some(code);
+        }
+        changed.notify_all();
+    });
+    Ok(Captive { pgid, tail, exit })
+}
+
+/// A program started by [`start_captured`], running or ended.
+pub struct Captive {
+    pgid: i32,
+    tail: Arc<Mutex<Tail>>,
+    exit: Arc<(Mutex<Option<i32>>, Condvar)>,
+}
+
+impl Captive {
+    /// Its process group, the program's and what it started.
+    pub fn pgid(&self) -> i32 {
+        self.pgid
+    }
+
+    /// Its exit code, waiting at most `timeout` for it (for ever with
+    /// `None`); `None` while it runs.
+    pub fn wait(&self, timeout: Option<Duration>) -> Option<i32> {
+        let (lock, changed) = &*self.exit;
+        let slot = lock.lock().ok()?;
+        let slot = match timeout {
+            Some(timeout) => {
+                changed
+                    .wait_timeout_while(slot, timeout, |code| code.is_none())
+                    .ok()?
+                    .0
+            }
+            None => changed.wait_while(slot, |code| code.is_none()).ok()?,
+        };
+        *slot
+    }
+
+    /// What it printed so far, the end of it.
+    pub fn output(&self) -> Captured {
+        self.tail
+            .lock()
+            .map(|tail| tail.captured())
+            .unwrap_or(Captured {
+                text: String::new(),
+                truncated: false,
+            })
+    }
+
+    /// Ends its process group: SIGTERM, then SIGKILL to what is left after
+    /// `grace`. Returns its exit code.
+    pub fn stop(&self, grace: Duration) -> Option<i32> {
+        stop_group(self.pgid);
+        self.wait(Some(grace)).or_else(|| {
+            let _ = killpg(Pid::from_raw(self.pgid), Signal::SIGKILL);
+            self.wait(Some(Duration::from_secs(1)))
+        })
+    }
+}
+
+/// Sends SIGTERM to process group `pgid`, when it is still there.
+pub fn stop_group(pgid: i32) {
+    let _ = killpg(Pid::from_raw(pgid), Signal::SIGTERM);
+}
+
+/// Whether process group `pgid` still has a process.
+pub fn group_alive(pgid: i32) -> bool {
+    killpg(Pid::from_raw(pgid), None) != Err(Errno::ESRCH)
 }
 
 /// Runs `command` as the terminal's foreground job. `start` runs right

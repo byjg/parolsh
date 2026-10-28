@@ -18,6 +18,7 @@ mod replay;
 mod setup;
 mod shell;
 mod shellenv;
+mod spells;
 mod title;
 mod turn;
 mod ui;
@@ -77,21 +78,28 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Tool {
     /// The history of sessions as an MCP server on stdio, read-only, for the
-    /// agent: Parolsh gives it to the agent itself
+    /// agent, or with `--spells` the user's spells: Parolsh gives them to
+    /// the agent itself
     #[command(hide = true)]
     Mcp {
         /// The history database
-        #[arg(long)]
-        db: std::path::PathBuf,
+        #[arg(long, required_unless_present = "spells")]
+        db: Option<std::path::PathBuf>,
         /// Only the sessions of this project
-        #[arg(long)]
-        project: String,
+        #[arg(long, required_unless_present = "spells")]
+        project: Option<String>,
         /// Also return the plain `!command` lines (`commands = "shared"`)
         #[arg(long)]
         commands: bool,
         /// The conversation's token: also the sessions shared under it
         #[arg(long)]
         shares: Option<String>,
+        /// Serve the spells instead of the history
+        #[arg(long, conflicts_with_all = ["db", "project", "commands", "shares"])]
+        spells: bool,
+        /// The file where Parolsh keeps the directory of the user's commands
+        #[arg(long, requires = "spells")]
+        here: Option<std::path::PathBuf>,
     },
 }
 
@@ -103,14 +111,26 @@ fn main() -> ExitCode {
         project,
         commands,
         shares,
+        spells,
+        here,
     }) = cli.tool
     {
-        let scope = mcp::Scope {
-            project: &project,
-            commands,
-            shares: shares.as_deref(),
+        let served = match (db, project) {
+            (Some(db), Some(project)) if !spells => {
+                let scope = mcp::Scope {
+                    project: &project,
+                    commands,
+                    shares: shares.as_deref(),
+                };
+                mcp::serve(&db, scope)
+            }
+            // Global only, as the shell: a project cannot choose it.
+            _ => config::Config::load(None).and_then(|config| {
+                let dir = spells::dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+                mcp::serve_tools(&spells::SpellTools::new(dir, config.shell, here))
+            }),
         };
-        return match mcp::serve(&db, scope) {
+        return match served {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("parolsh mcp: {e:#}");

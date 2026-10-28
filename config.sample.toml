@@ -17,6 +17,10 @@
 # still set an agent's `mode` and `options`, its permissions included.
 # Full reference: docs/configuration.md and docs/agents.md, or
 # https://opensource.byjg.com/docs/ai/parolsh
+#
+# Spells, your recurring operations as a script and its instructions, are
+# not in this file: each is a directory in ~/.config/parolsh/spells/ with a
+# spell.toml (docs/spells.md). `#cast` lists them.
 
 
 # --- Shell ------------------------------------------------------------------
@@ -64,6 +68,14 @@
 #   hidden  only "Thinking" in the status line
 #   show    printed dim, before the answer
 # thinking = "status"
+
+
+# When the agent is told that a spell it cast in the background ended:
+#   turn              at once, in a turn of its own, unless you are typing:
+#                     then with your next message (default)
+#   turn-immediately  at once, even while you type: what you typed comes back
+#   tell              with your next message
+# spell_ended = "turn"
 
 
 # How the input prompt looks. `#prompt <name>` switches until you leave Parolsh.

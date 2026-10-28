@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{ActivityWatch, AgentHandle, AgentSession, Block, ForkOf, Forks, Replayed, Start};
 use crate::audit::{self, Actor, Audit, Kind, Record};
 use crate::complete::ShellCompleter;
-use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle};
+use crate::config::{Agent, Commands, Config, OptionValue, PromptStyle, SpellEnded};
 use crate::history::{Found, History, Session, SessionStart};
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::jobs::{self, Job};
@@ -25,8 +25,8 @@ use crate::pair::{self, Brief, Gate, Pair};
 use crate::title::Title;
 use crate::turn::Ended;
 use crate::{
-    clipboard, config, hints, mcp, mention, project, replay, setup, shell, shellenv, turn, ui,
-    version,
+    clipboard, config, hints, mcp, mention, project, replay, setup, shell, shellenv, spells, turn,
+    ui, version,
 };
 use agent_client_protocol::schema::v1::McpServer;
 
@@ -64,11 +64,13 @@ Control commands:
   #resume <text>  go back to the one session that has the text (all <text>: in any project)
   #resume agent <text>  go back to one of the agent's own conversations, by its title or id
   #share [n]      let this conversation's agent read session n of another project
+  #cast           list your spells: operations, as a script and its instructions
+  #cast <name> [args]  ask the agent to cast a spell (or ask in your own words)
   #redraw [n]     clear the terminal and show the last n exchanges again (Ctrl+L)
   #copy [n]       copy the last answer as the agent wrote it (Alt+C); n: an earlier one
   #copy code      copy the last code block of the last answer
   #raw [n]        print it without the layout, to select it with the mouse
-  #jobs           the turns sent to the background (Ctrl+Z during a turn)
+  #jobs           the turns sent to the background (Ctrl+Z during a turn), and the spells
   #fg [n]         wait for background turn n, or the last one (Ctrl+C cancels it)
   #pair <agent>   pair with a second agent: your next message is the issue, for both, and
                   it answers what the agent says when it stops, once you agree
@@ -126,6 +128,14 @@ pub struct App {
     /// The history database, when there is one: the agent gets it as an MCP
     /// server.
     history_db: Option<PathBuf>,
+    /// What the spells' server shares with Parolsh: where your commands
+    /// run, and the spells in the background.
+    here: Option<spells::Here>,
+    /// The last line warned that it stops the spells in the background: the
+    /// next one that would, does.
+    warned: bool,
+    /// This line may stop them: the one before warned.
+    may_stop: bool,
     /// The session to go back to once the banner is printed.
     resume: Option<Resume>,
     /// Turns sent to the background with Ctrl+Z, until they are reported.
@@ -140,6 +150,12 @@ pub struct App {
     /// What background turns answered, for the agent with the next message:
     /// its conversation was copied before them.
     handover: Vec<String>,
+    /// A spell ended and the agent is to be told in a turn of its own
+    /// (`spell_ended`), not with your next message.
+    spell_turn: bool,
+    /// What was on the prompt's line when something else ended it: it
+    /// comes back with the next prompt.
+    typed: String,
     /// Leaving was refused once, because something is still running.
     leaving: bool,
     /// The token of this conversation's history server: `#share` gives it
@@ -219,6 +235,7 @@ impl App {
                 )),
             }
         }
+        let here = state_dir().and_then(|dir| spells::Here::create(&dir.join("run"), &cwd));
         let mut app = Self {
             completion_cwd: Arc::new(Mutex::new(cwd.clone())),
             completion_agent: Arc::default(),
@@ -242,12 +259,17 @@ impl App {
             interrupt: Arc::new(AtomicBool::new(false)),
             title: None,
             history_db,
+            here,
+            warned: false,
+            may_stop: false,
             resume,
             jobs: Vec::new(),
             next_job: 1,
             conversation: 0,
             private: false,
             handover: Vec::new(),
+            spell_turn: false,
+            typed: String::new(),
             leaving: false,
             share_token: RefCell::default(),
             answers: VecDeque::new(),
@@ -331,6 +353,8 @@ impl App {
                 }
             }
             self.attend_jobs();
+            self.attend_spells();
+            self.spell_turn();
             let prompt = self.prompt();
             match self.read_line(&mut editor, &prompt)? {
                 // A key bound to a command (Ctrl+L, Alt+C) is a line like any
@@ -346,13 +370,18 @@ impl App {
                         Signal::Success(line) => line,
                         _ => continue,
                     };
+                    self.typed.clear();
+                    // Only the line right after the warning goes on.
+                    self.may_stop = std::mem::take(&mut self.warned);
                     match self.handle(route(&line, self.mode.get())) {
                         Flow::Exit if self.may_leave() => return Ok(()),
                         Flow::Exit => {}
                         Flow::Continue => self.leaving = false,
                     }
                 }
-                Signal::CtrlC => continue,
+                // A background turn or a spell ended the prompt.
+                Signal::ExternalBreak(typed) => self.typed = typed,
+                Signal::CtrlC => self.typed.clear(),
                 Signal::CtrlD if self.may_leave() => return Ok(()),
                 _ => continue,
             }
@@ -369,7 +398,7 @@ impl App {
         let stop = AtomicBool::new(false);
         let repaint_signal = editor.repaint_signal();
         let repaint = move || repaint_signal.request_repaint();
-        let (signal, watched) = std::thread::scope(|scope| {
+        let (signal, watched, ended) = std::thread::scope(|scope| {
             let watcher = scope.spawn(|| {
                 turn::watch(
                     agent,
@@ -384,21 +413,39 @@ impl App {
                     &mut self.jobs,
                 )
             });
+            // A spell that ends while you type is said above the prompt,
+            // which ends for the agent to be told in a turn of its own.
+            let spells = scope.spawn(|| {
+                let mut ended = Vec::new();
+                while !stop.load(Ordering::SeqCst) {
+                    for job in self.here.iter().flat_map(spells::Here::take_ended) {
+                        let _ = self.printer.print(spell_ended(&job));
+                        if self.config.spell_ended != SpellEnded::Tell {
+                            self.interrupt.store(true, Ordering::SeqCst);
+                        }
+                        ended.push(job);
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                ended
+            });
             let signal = editor.read_line(prompt);
             stop.store(true, Ordering::SeqCst);
-            (signal, watcher.join().unwrap_or_default())
+            let ended = spells.join().unwrap_or_default();
+            (signal, watcher.join().unwrap_or_default(), ended)
         });
+        let job = self.jobs.iter().any(Job::wants_attention) || self.tells_in_turn(&ended);
+        self.tell_spells_ended(&ended);
         // A question that came with the Enter key would break the next prompt.
         self.interrupt.store(false, Ordering::SeqCst);
 
         let late = std::iter::from_fn(|| self.printer.get_line());
         let lines: Vec<String> = late.chain(watched.lines).collect();
-        let job = self.jobs.iter().any(Job::wants_attention);
         if !lines.is_empty() || watched.request.is_some() || watched.stopped {
             // Below the line the prompt was on.
             println!();
         } else if job && ui::is_ansi() {
-            // Only a background turn made the prompt return: its line goes,
+            // Only a background turn or a spell made the prompt return: its line goes,
             // and what was typed comes back with the next prompt.
             print!("{}", ui::CLEAR_LINE);
         } else if job {
@@ -515,7 +562,7 @@ impl App {
         if fell_back {
             self.prompt_override = Some(PromptStyle::Parolsh);
         }
-        let prompt = prompt.with_jobs(self.jobs.len());
+        let prompt = prompt.with_jobs(self.jobs.len() + self.running_spells().len());
         match &self.agent {
             Some(agent) => prompt.with_background(agent.activity(), ansi),
             None => prompt,
@@ -1102,6 +1149,10 @@ impl App {
     /// and the second agent paired in the one before stops now.
     fn next_conversation(&mut self, private: bool) {
         self.end_pair("the conversation is another one");
+        // Only that conversation's agent could follow them.
+        if let Some(here) = &self.here {
+            here.stop_running();
+        }
         self.conversation += 1;
         self.private = private;
         self.handover.clear();
@@ -1164,6 +1215,14 @@ impl App {
 
     /// Runs a `#command`. Returns its status, or `None` to leave Parolsh.
     fn control(&mut self, name: &str, args: &str) -> Option<i32> {
+        let switches = match name {
+            "new" | "cd" | "resume" => true,
+            "agent" => !matches!(args, "" | "list"),
+            _ => false,
+        };
+        if switches && !self.may_stop_spells(&format!("#{name}")) {
+            return Some(1);
+        }
         let result = match name {
             "help" => {
                 println!("{HELP}");
@@ -1180,6 +1239,8 @@ impl App {
             "prompt" => self.prompt_command(args),
             "config" => self.config_command(args),
             "share" => self.share_command(args),
+            // Recorded as the message it sends.
+            "cast" => return Some(self.cast_command(args)),
             "options" => self.options_command(args),
             "pair" => self.pair_command(args),
             "decide" => self.decide_command(args),
@@ -1249,6 +1310,7 @@ impl App {
             agent: self.completion_agent.clone(),
             sessions: self.completion_sessions.clone(),
             agent_sessions: self.completion_agent_sessions.clone(),
+            spells: spells::dir(),
         };
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
@@ -1335,6 +1397,9 @@ impl App {
     fn move_shell(&mut self, dir: Option<PathBuf>) {
         if let Some(dir) = dir {
             *self.completion_cwd.lock().expect("cwd lock") = dir.clone();
+            if let Some(here) = &self.here {
+                here.set(&dir);
+            }
             self.shell_cwd = dir;
         }
     }
@@ -1416,6 +1481,7 @@ impl App {
         );
         // What background turns answered since the last message comes first.
         let told = std::mem::take(&mut self.handover);
+        self.spell_turn = false;
         let mut blocks: Vec<Block> = told.iter().cloned().map(Block::Text).collect();
         blocks.extend(shared.into_iter().map(Block::Text));
         blocks.extend(files.into_iter().map(Block::File));
@@ -1686,7 +1752,7 @@ impl App {
         println!("{}", job.label("in the background"));
         self.jobs.push(job);
 
-        let mcp = self.history_server(self.private);
+        let mcp = self.servers(self.private);
         let agent = self
             .active_agent()
             .map(|agent| AgentHandle::start_with(agent, self.cwd.clone(), mcp, start.clone()));
@@ -1727,6 +1793,66 @@ impl App {
             let job = self.jobs.remove(done);
             self.report(job);
         }
+    }
+
+    /// Says the spells that ended in the background, and tells the agent
+    /// with the next message.
+    fn attend_spells(&mut self) {
+        let ended: Vec<spells::JobFile> = self
+            .here
+            .iter()
+            .flat_map(spells::Here::take_ended)
+            .collect();
+        for job in &ended {
+            println!("{}", spell_ended(job));
+        }
+        self.tell_spells_ended(&ended);
+    }
+
+    fn tell_spells_ended(&mut self, ended: &[spells::JobFile]) {
+        self.spell_turn |= self.tells_in_turn(ended);
+        self.handover.extend(ended.iter().map(spell_notice));
+    }
+
+    /// Whether the agent is told of the spells `ended` in a turn of its own.
+    fn tells_in_turn(&self, ended: &[spells::JobFile]) -> bool {
+        !ended.is_empty() && self.config.spell_ended != SpellEnded::Tell
+    }
+
+    /// The turn that tells the agent the spells that ended: unless you are
+    /// typing, with `turn`, then they go with your next message.
+    fn spell_turn(&mut self) {
+        if !self.spell_turn || self.agent.is_none() {
+            return;
+        }
+        if turn_now(self.config.spell_ended, &self.typed) {
+            self.last_status = self.ask(SPELL_TURN.to_string());
+        }
+    }
+
+    fn running_spells(&self) -> Vec<spells::JobFile> {
+        self.here
+            .as_ref()
+            .map(spells::Here::running)
+            .unwrap_or_default()
+    }
+
+    /// Before a command that ends the conversation, and with it the spells
+    /// it runs in the background: the first time, it says so and does not
+    /// go on; the same again right after, it does.
+    fn may_stop_spells(&mut self, command: &str) -> bool {
+        let running = self.running_spells();
+        if running.is_empty() || self.may_stop {
+            return true;
+        }
+        self.warned = true;
+        let labels: Vec<String> = running.iter().map(spells::JobFile::label).collect();
+        println!(
+            "Still running: {}. A new conversation stops {}: {command} again to go on.",
+            labels.join(", "),
+            if running.len() == 1 { "it" } else { "them" }
+        );
+        false
     }
 
     /// A background turn ended: shows its answer, puts its entries at the
@@ -1854,10 +1980,15 @@ impl App {
         Ok(())
     }
 
-    /// `#jobs`: the turns in the background.
+    /// `#jobs`: the spells and the turns in the background.
     fn jobs_command(&mut self) {
-        if self.jobs.is_empty() {
+        let spells = self.running_spells();
+        if self.jobs.is_empty() && spells.is_empty() {
             println!("No turns in the background. Ctrl+Z sends the running one there.");
+        }
+        for job in &spells {
+            let line = format!("{} · running {}", job.label(), ui::clock(job.elapsed()));
+            println!("{}", audit::excerpt(&line, ui::width()));
         }
         for job in &mut self.jobs {
             job.poll(&mut self.audit);
@@ -1944,7 +2075,8 @@ impl App {
             .agent
             .as_ref()
             .map_or(0, |agent| agent.activity().get().tasks);
-        if self.leaving || (jobs == 0 && tasks == 0) {
+        let spells = self.running_spells().len();
+        if self.leaving || (jobs == 0 && tasks == 0 && spells == 0) {
             return true;
         }
         self.leaving = true;
@@ -1964,6 +2096,7 @@ impl App {
                 "background task of the agent",
                 "background tasks of the agent",
             ),
+            count(spells, "spell (#jobs)", "spells (#jobs)"),
         ]
         .into_iter()
         .flatten()
@@ -2013,17 +2146,27 @@ impl App {
     }
 
     /// The MCP servers the agent gets in a conversation: the history of this
-    /// project, unless the conversation is private or there is no history.
+    /// project, unless the conversation is private or there is no history,
+    /// and the spells.
     ///
     /// A new conversation: its server gets a token of its own, under which
     /// `#share` gives it sessions of other projects.
     fn mcp_servers(&self, private: bool) -> Vec<McpServer> {
         self.share_token.replace(new_token());
-        self.history_server(private)
+        self.servers(private)
     }
 
-    /// The history's server for a conversation that goes on in another
-    /// agent process: what was shared with it stays.
+    /// The servers for a conversation that goes on in another agent
+    /// process: what was shared with it stays.
+    fn servers(&self, private: bool) -> Vec<McpServer> {
+        let mut servers = self.history_server(private);
+        // Always, private conversations too: spells have nothing to do with
+        // history, and without one yet, `list_spells` tells the agent how to
+        // save the first.
+        servers.extend(spells::server(self.here.as_ref().map(spells::Here::path)));
+        servers
+    }
+
     fn history_server(&self, private: bool) -> Vec<McpServer> {
         let server = match &self.history_db {
             Some(db) if !private => {
@@ -2042,6 +2185,44 @@ impl App {
             self.share_token.borrow_mut().clear();
         }
         server.into_iter().collect()
+    }
+
+    /// `#cast`: lists the spells. `#cast <name> [args]`: asks the agent to
+    /// cast one, with what you typed after its name, so that it follows the
+    /// spell's instructions as when you ask in your own words.
+    fn cast_command(&mut self, args: &str) -> i32 {
+        let dir = spells::dir().unwrap_or_default();
+        let (found, problems) = spells::load(&dir);
+        for problem in &problems {
+            eprintln!("parolsh: {problem}");
+        }
+        let Some((name, rest)) = Some(args.trim())
+            .filter(|args| !args.is_empty())
+            .map(|args| args.split_once(char::is_whitespace).unwrap_or((args, "")))
+        else {
+            if found.is_empty() {
+                println!(
+                    "No spells in {}. Ask the agent to save what you just did as a spell.",
+                    ui::short_path(&dir, home().as_deref())
+                );
+            }
+            let width = found.iter().map(|spell| spell.usage().len()).max();
+            for spell in &found {
+                let usage = spell.usage();
+                let width = width.unwrap_or_default();
+                println!("  {usage:width$}  {}", spell.description);
+            }
+            return i32::from(!problems.is_empty());
+        };
+        if !found.iter().any(|spell| spell.name == name) {
+            eprintln!("parolsh: no spell `{name}`, see #cast");
+            return 1;
+        }
+        let rest = rest.trim();
+        self.converse(match rest.is_empty() {
+            true => format!("Cast the spell `{name}`."),
+            false => format!("Cast the spell `{name}` with: {rest}"),
+        })
     }
 
     /// `#share [n]`: gives the agent of this conversation session `n` of
@@ -2211,6 +2392,16 @@ impl Shared {
 const PRINTER_LINES: usize = 64;
 
 /// Where to go when no agent is configured.
+/// The line that says a spell in the background ended.
+fn spell_ended(job: &spells::JobFile) -> String {
+    format!(
+        "{} ended · {} · {}",
+        job.label(),
+        job.outcome(),
+        ui::clock(job.elapsed())
+    )
+}
+
 /// What the agent is told of a background turn that ended, with the next
 /// message: its conversation is a copy made before it. At most the last
 /// `HANDOVER_LIMIT` bytes of the answer.
@@ -2228,6 +2419,32 @@ fn handover(request: &str, answer: &str) -> String {
         &answer[start..]
     )
 }
+
+/// What the agent is told of a spell it cast that ended in the background.
+fn spell_notice(job: &spells::JobFile) -> String {
+    format!(
+        "{}, which you cast in the background, ended: {}. Do what the instructions of spell \
+         {} say for when it ends.\n\nIts output:\n{}",
+        job.label(),
+        job.outcome(),
+        job.spell,
+        job.output
+    )
+}
+
+/// Whether a spell that ended is told in a turn of its own now, with
+/// `typed` on the prompt's line.
+fn turn_now(spell_ended: SpellEnded, typed: &str) -> bool {
+    match spell_ended {
+        SpellEnded::Tell => false,
+        SpellEnded::Turn => typed.trim().is_empty(),
+        SpellEnded::TurnImmediately => true,
+    }
+}
+
+/// The message of the turn that tells the agent a spell ended: what ended
+/// comes before it.
+const SPELL_TURN: &str = "parolsh: a spell you cast in the background ended, as said above.";
 
 /// As much as a `!+` output keeps.
 const HANDOVER_LIMIT: usize = 16 * 1024;
@@ -2518,6 +2735,40 @@ mod tests {
         assert!(answer.ends_with("é the end"));
         assert!(answer.len() <= HANDOVER_LIMIT + "(the end of it)\n".len());
         assert!(!cut.contains("start"));
+    }
+
+    /// The agent is told what ended, how, and what it wrote, and to go on
+    /// as the spell says: not to keep quiet.
+    #[test]
+    fn a_spell_that_ended_is_told_with_its_output() {
+        let job = spells::JobFile {
+            id: 2,
+            spell: "build-all-php".to_string(),
+            args: vec!["7.0".to_string(), "fresh".to_string()],
+            pgid: 0,
+            started: 0,
+            exit: Some(1),
+            output: "Stopping due to failure in php-gluo\n".to_string(),
+        };
+
+        assert_eq!(
+            spell_notice(&job),
+            "spell job 2 · build-all-php 7.0 fresh, which you cast in the background, ended: \
+             exit 1. Do what the instructions of spell build-all-php say for when it ends.\n\n\
+             Its output:\nStopping due to failure in php-gluo\n"
+        );
+    }
+
+    /// `tell` waits for your next message; `turn` does not, unless you are
+    /// typing; `turn-immediately` does not wait at all.
+    #[test]
+    fn a_spell_that_ended_is_told_in_a_turn_as_spell_ended_says() {
+        assert!(!turn_now(SpellEnded::Tell, ""));
+        assert!(turn_now(SpellEnded::Turn, ""));
+        assert!(turn_now(SpellEnded::Turn, "  "));
+        assert!(!turn_now(SpellEnded::Turn, "git sta"));
+        assert!(turn_now(SpellEnded::TurnImmediately, ""));
+        assert!(turn_now(SpellEnded::TurnImmediately, "git sta"));
     }
 
     /// Tab completes the `#` commands `#help` lists, no more, no fewer.

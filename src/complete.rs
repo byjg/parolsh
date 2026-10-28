@@ -16,6 +16,7 @@ use crate::acp::{ActivityWatch, AgentCommand};
 use crate::history::History;
 use crate::input::{Input, Mode, SharedMode, route};
 use crate::shellenv::{self, is_executable};
+use crate::spells;
 
 /// Asks bash-completion for the arguments of a command line, see the script.
 const BASH_SCRIPT: &str = include_str!("complete.bash");
@@ -31,9 +32,10 @@ const SEPARATORS: &str = "|;&()<>";
 const SPECIAL: &str = " '\"\\()&;|<>$`!*?[]{}#";
 
 /// The `#` commands, as `#help` lists them.
-pub const CONTROL_COMMANDS: [&str; 21] = [
+pub const CONTROL_COMMANDS: [&str; 22] = [
     "help", "new", "cd", "agent", "config", "options", "project", "prompt", "audit", "sessions",
-    "forget", "resume", "share", "redraw", "jobs", "fg", "pair", "decide", "copy", "raw", "exit",
+    "forget", "resume", "share", "cast", "redraw", "jobs", "fg", "pair", "decide", "copy", "raw",
+    "exit",
 ];
 
 pub struct ShellCompleter {
@@ -53,6 +55,8 @@ pub struct ShellCompleter {
     /// The agent's own conversations, as it last listed them (`#sessions
     /// agent`): the start of the id, and what says which one it is.
     pub agent_sessions: Arc<Mutex<Vec<(String, String)>>>,
+    /// Where the spells are, for `#cast`.
+    pub spells: Option<PathBuf>,
 }
 
 impl Completer for ShellCompleter {
@@ -68,12 +72,16 @@ impl Completer for ShellCompleter {
         }
         if let Some(typed) = agent_session(line, pos) {
             let listed = self.agent_sessions.lock().expect("sessions lock").clone();
-            return CompletionResult::fresh(agent_sessions_from(&listed, typed, pos));
+            return CompletionResult::fresh(agent_starting_with(&listed, typed, pos));
+        }
+        if let Some(typed) = spell_name(line, pos) {
+            let spells = self.spells.as_deref().map(spells::listed);
+            return CompletionResult::fresh(starting_with(&spells.unwrap_or_default(), typed, pos));
         }
         if let Some(typed) = session_number(line, pos) {
             let place = self.sessions.lock().expect("sessions lock").clone();
             let sessions = place.map(|(db, project)| saved_sessions(&db, &project));
-            let found = sessions_from(&sessions.unwrap_or_default(), typed, pos);
+            let found = starting_with(&sessions.unwrap_or_default(), typed, pos);
             return CompletionResult::fresh(found);
         }
         let found = completions(line, pos, mode, &cwd, || {
@@ -104,6 +112,15 @@ fn session_number(line: &str, pos: usize) -> Option<&str> {
     (SESSION_COMMANDS.contains(&name) && number).then_some(typed)
 }
 
+/// What is typed of a spell's name after `#cast`, with the cursor at `pos`
+/// in it: the arguments that follow it complete nothing.
+fn spell_name(line: &str, pos: usize) -> Option<&str> {
+    let line = line.get(..pos)?;
+    let rest = line.trim_start().strip_prefix("#cast")?;
+    let typed = rest.strip_prefix(char::is_whitespace)?.trim_start();
+    (!typed.contains(char::is_whitespace)).then_some(typed)
+}
+
 /// What is typed after `#resume agent `, with the cursor at `pos` in it:
 /// part of the title or of the id of one of the agent's own conversations.
 fn agent_session(line: &str, pos: usize) -> Option<&str> {
@@ -117,7 +134,7 @@ fn agent_session(line: &str, pos: usize) -> Option<&str> {
 /// The agent's conversations that `typed` is in the title of, or starts the
 /// id of: each completes to its id, which two with the same title do not
 /// share, with its date and title beside it.
-fn agent_sessions_from(listed: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
+fn agent_starting_with(listed: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
     let wanted = typed.to_lowercase();
     listed
         .iter()
@@ -152,10 +169,11 @@ fn one_line(text: &str) -> String {
     line.chars().take(60).collect()
 }
 
-/// The sessions whose number starts with `typed`, to replace it before
-/// `pos`: a list to pick from, instead of a number to type right.
-fn sessions_from(sessions: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
-    sessions
+/// The sessions whose number starts with `typed`, or the spells whose name
+/// does, to replace it before `pos`: a list to pick from, instead of a
+/// word to type right.
+fn starting_with(listed: &[(String, String)], typed: &str, pos: usize) -> Vec<Suggestion> {
+    listed
         .iter()
         .filter(|(number, _)| number.starts_with(typed))
         .map(|(number, about)| Suggestion {
@@ -701,7 +719,7 @@ mod tests {
         ];
         let found = |typed: &str| -> Vec<String> {
             let line = format!("#resume {typed}");
-            sessions_from(&sessions, typed, line.len())
+            starting_with(&sessions, typed, line.len())
                 .into_iter()
                 .map(|s| format!("{} {}", s.value, s.description.unwrap()))
                 .collect()
@@ -717,8 +735,32 @@ mod tests {
         );
         assert!(found("9").is_empty());
         // It replaces the digits typed, in the command's line.
-        let suggestion = &sessions_from(&sessions, "1", "#resume 1".len())[0];
+        let suggestion = &starting_with(&sessions, "1", "#resume 1".len())[0];
         assert_eq!((suggestion.span.start, suggestion.span.end), (8, 9));
+    }
+
+    #[test]
+    fn hash_cast_completes_the_spell_name_only() {
+        fn typed(line: &str) -> Option<&str> {
+            spell_name(line, line.len())
+        }
+        assert_eq!(typed("#cast "), Some(""));
+        assert_eq!(typed("  #cast  vs-"), Some("vs-"));
+        assert_eq!(typed("#cast vs-install-mod ./m"), None);
+        assert_eq!(typed("#cast"), None);
+        assert_eq!(typed("#castle x"), None);
+
+        let spells = [
+            ("vs-install-mod".to_string(), "Install a mod".to_string()),
+            ("vs-restart".to_string(), "Restart".to_string()),
+            ("clean-branches".to_string(), "Clean".to_string()),
+        ];
+        let line = "#cast vs-";
+        let found: Vec<String> = starting_with(&spells, "vs-", line.len())
+            .into_iter()
+            .map(|s| format!("{}{}", &line[..s.span.start], s.value))
+            .collect();
+        assert_eq!(found, ["#cast vs-install-mod", "#cast vs-restart"]);
     }
 
     #[test]
@@ -749,7 +791,7 @@ mod tests {
         ];
         let found = |typed: &str| -> Vec<String> {
             let line = format!("#resume agent {typed}");
-            let found = agent_sessions_from(&listed, typed, line.len());
+            let found = agent_starting_with(&listed, typed, line.len());
             found.into_iter().map(|s| s.value).collect()
         };
         assert_eq!(found("").len(), 3);
@@ -759,7 +801,7 @@ mod tests {
         assert_eq!(found("ext-3"), ["ext-3ccc"]);
         assert!(found("nothing").is_empty());
         let line = "#resume agent greet";
-        let suggestion = &agent_sessions_from(&listed, "greet", line.len())[0];
+        let suggestion = &agent_starting_with(&listed, "greet", line.len())[0];
         assert_eq!((suggestion.span.start, suggestion.span.end), (14, 19));
     }
 
