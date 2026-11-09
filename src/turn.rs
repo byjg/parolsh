@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{
     AgentHandle, AgentSession, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage,
 };
-use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
+use crate::audit::{Actor, Audit, Handle, Kind, Record};
 use crate::config::{LinkStyle, Spinner, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::jobs::Job;
@@ -252,8 +252,7 @@ impl Turn {
 
     fn fail(&mut self, audit: &mut Audit, message: &str) {
         self.flush(audit);
-        let failed = format!("turn failed: {}", audit::excerpt(message, 80));
-        audit.add_in(self.session, parolsh_event(failed));
+        audit.add_in(self.session, parolsh_event(failed(message)));
     }
 
     /// In the background: records what the agent sent since the last call,
@@ -530,6 +529,15 @@ fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audi
     eprintln!("(cancelled — the agent did not confirm)");
     audit.add(parolsh_event("cancelled, the agent did not confirm"));
     Outcome::Finished(Some("cancelled"))
+}
+
+/// What a turn that failed leaves in the record: the agent's whole message, on
+/// one line. Agents send a JSON object over several lines, and its first line
+/// alone (`Internal error: {`) says nothing: `#audit` shows the start of it,
+/// the history all of it.
+fn failed(message: &str) -> String {
+    let message: Vec<&str> = message.split_whitespace().collect();
+    format!("turn failed: {}", message.join(" "))
 }
 
 fn parolsh_event(text: impl Into<String>) -> Record {
@@ -1604,6 +1612,17 @@ mod tests {
         status.update_tool("t2", None, Some(true));
         assert_eq!(status.activity(), "Thinking");
         assert_eq!(status.tools, 2);
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_the_whole_message_of_the_agent() {
+        let message =
+            "Internal error: {\n  \"code\": -32603,\n  \"message\": \"Unknown command: /mcp\"\n}";
+
+        assert_eq!(
+            failed(message),
+            "turn failed: Internal error: { \"code\": -32603, \"message\": \"Unknown command: /mcp\" }"
+        );
     }
 
     #[test]
