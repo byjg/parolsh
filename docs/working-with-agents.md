@@ -495,7 +495,8 @@ parolsh · Fix the batch script             the conversation's title, from the a
 
 - The conversation's title is the agent's own (Claude and Codex send one;
   Claude after its first answer), cut to 40 characters. Until then, and after `#new`, the
-  title shows the agent's directory.
+  title shows the agent's directory. A resumed session shows the title saved
+  with it right away.
 - The title is left alone while a `!command` runs, since programs such as
   `vim` or `ssh` set their own.
 - Parolsh saves the title it found on start and puts it back on exit, on

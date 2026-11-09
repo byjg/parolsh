@@ -689,6 +689,28 @@ fn background_tasks_show_in_the_title_and_the_prompt() {
     assert!(restored > output.rfind("\x1b]2;").unwrap());
 }
 
+/// A resumed session shows the title saved with it, before the agent gives
+/// it again: the fake agent does not, on resume.
+#[test]
+fn a_resumed_session_shows_its_title_in_the_terminal() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["bg", "wait:4"], "dumb", false);
+
+    let output = run_in(home.path(), "--resume 1", &[], "xterm-256color", true);
+    let titles: Vec<&str> = output
+        .split("\x1b]2;")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('\x07').map(|(title, _)| title))
+        .collect();
+
+    assert!(output.contains("Resumed session 1"), "{output:?}");
+    assert_eq!(
+        titles.last(),
+        Some(&"parolsh · Fake background work"),
+        "{titles:?}"
+    );
+}
+
 /// `@path` words that name a file go with the message as resource links
 /// (absolute `file://` URIs), before the text; other `@words` stay text.
 #[test]

@@ -412,6 +412,12 @@ impl History {
         }
     }
 
+    /// The agent's title for the conversation: the saved one of a resumed
+    /// session, before the agent gives it again.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// The agent's id for the conversation, for resuming it later.
     pub fn set_agent_session_id(&mut self, id: Option<String>) {
         if self.agent_session_id == id {

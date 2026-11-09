@@ -337,6 +337,11 @@ impl App {
             ui::report_dir(&self.shell_cwd);
             if let Some(title) = &self.title {
                 title.set_place(self.place());
+                title.set_known(
+                    self.audit
+                        .history()
+                        .and_then(|history| history.title().map(String::from)),
+                );
                 title.set_spinner(self.config.spinner);
                 title.set_agent(self.agent.as_ref().map(AgentHandle::activity));
             }

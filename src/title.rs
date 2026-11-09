@@ -1,6 +1,7 @@
 //! The terminal's title: `parolsh` and the conversation's title, or the
-//! directory before the agent gave one. While the agent works, a spinner and
-//! how many background tasks run: `◉ 2 bg · parolsh · Fix the batch script`.
+//! directory before the agent gave one. A resumed session shows the title
+//! saved with it. While the agent works, a spinner and how many background
+//! tasks run: `◉ 2 bg · parolsh · Fix the batch script`.
 //! It shows from another tab or window, where the prompt does not.
 
 use nix::sys::signal::{SigSet, Signal};
@@ -31,6 +32,9 @@ pub struct Title {
 struct Shared {
     /// Shown until the agent gives the conversation a title.
     place: Mutex<String>,
+    /// The history's title of the conversation, shown until the agent gives
+    /// one: a resumed session keeps its title.
+    known: Mutex<Option<String>>,
     agent: Mutex<Option<ActivityWatch>>,
     spinner: Mutex<Spinner>,
     /// A command owns the terminal: its title is left alone.
@@ -76,6 +80,13 @@ impl Title {
     pub fn set_place(&self, place: String) {
         if let Ok(mut current) = self.shared.place.lock() {
             *current = place;
+        }
+    }
+
+    /// The history's title, shown until the agent gives one.
+    pub fn set_known(&self, known: Option<String>) {
+        if let Ok(mut current) = self.shared.known.lock() {
+            *current = known;
         }
     }
 
@@ -129,6 +140,8 @@ fn tick(shared: &Shared) {
                 .ok()
                 .and_then(|agent| agent.as_ref().map(ActivityWatch::get))
                 .unwrap_or_default();
+            let known = shared.known.lock().ok().and_then(|known| known.clone());
+            let activity = with_known(activity, known);
             let place = shared
                 .place
                 .lock()
@@ -168,6 +181,12 @@ pub fn text(spinner: char, place: &str, activity: &Activity) -> String {
     }
     // The agent's title must not end the escape sequence early.
     title.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The agent's title, or the history's until the agent gives one.
+fn with_known(mut activity: Activity, known: Option<String>) -> Activity {
+    activity.title = activity.title.or(known);
+    activity
 }
 
 fn shorten(title: &str) -> String {
@@ -210,6 +229,17 @@ mod tests {
             text('○', place, &activity(false, 0, Some("Fix the batch"))),
             "parolsh · Fix the batch"
         );
+    }
+
+    #[test]
+    fn a_resumed_session_shows_its_title_until_the_agent_gives_one() {
+        let known = || Some("Billing rewrite".to_string());
+
+        let resumed = with_known(activity(false, 0, None), known());
+        let retitled = with_known(activity(false, 0, Some("Falcon")), known());
+
+        assert_eq!(text('○', "~", &resumed), "parolsh · Billing rewrite");
+        assert_eq!(text('○', "~", &retitled), "parolsh · Falcon");
     }
 
     #[test]
