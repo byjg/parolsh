@@ -107,7 +107,7 @@ the read-only `parolsh-history` does not allow them.
 ## Looking back
 
 `#audit` lists what ran on your machine, what reached the agent and what the
-agent reported doing, for the current run (see
+agent reported doing, for the current session (see
 [`#audit`](sessions.md#audit)).
 
 The [history of sessions](sessions.md#the-history-of-sessions) keeps more,

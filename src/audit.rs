@@ -6,8 +6,8 @@
 //! Each entry is a `Record` (who, what kind, its full text, details), also
 //! written to the history of sessions when there is one: there the full
 //! text is kept, the agent's answers and reasoning too, and `!command` lines
-//! only with `save_commands`. `#audit <session>` reads an earlier session
-//! back from it.
+//! only with `save_commands`. `#audit` reads the current session back from
+//! it, `#audit <session>` another; the memory is for a run with none.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;

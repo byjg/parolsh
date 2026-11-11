@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # Sessions and history
 
-What happened, now and in earlier sessions: `#audit` lists this run, and
+What happened, now and in earlier sessions: `#audit` lists this session, and
 the history keeps each conversation so you can find it, resume it, or let
 the agent search it. Typing at the prompt is in
 [Input routing](input-routing.md); the agent itself is in
@@ -12,9 +12,10 @@ the agent search it. Typing at the prompt is in
 
 ## `#audit`
 
-`#audit` lists what happened since Parolsh started, oldest first: what ran on
-your machine, what reached the agent, what the agent did, and what you
-answered.
+`#audit` lists what happened in the current session, oldest first: what ran
+on your machine, what reached the agent, what the agent did, and what you
+answered. After `#resume` that includes what the session held from earlier
+runs.
 
 ```text
 [claude] ~/projects/wallet ✦ #audit
@@ -36,13 +37,16 @@ answered.
 | `AGENT` | Tool calls, with their kind, the files the agent names and how they ended; permission requests and questions |
 | `PAROLSH` | How each turn ended, a cancel the agent did not confirm, an agent that stopped, and the notes Parolsh sent with a message (`note → claude: …`): a background turn's answer, a spell that ended, where your prompt is |
 
-It keeps titles and commands only, the first line of each and at most 200
-characters: outputs and answers stay in the scrollback. It is in memory, and
-gone when you leave Parolsh; for a full record, see
+It reads the session from [the history](#the-history-of-sessions), so it
+shows the agent's answers as one line each, and `!command` lines only when
+`commands` is not `off`. Without a saved session (the history off, after
+`#new private`, or before anything was saved) it lists this run from memory
+instead: titles and commands only, the first line of each and at most 200
+characters, gone when you leave Parolsh. That list keeps the last 1000
+entries and says how many older ones were dropped; `audit_entries` in the
+[configuration](configuration.md#keys) changes that, and `0` turns it off.
+For a full record, see
 [Logging the agent's messages](troubleshooting.md#logging-the-agents-messages).
-It keeps the last 1000 entries and says how many older ones were dropped;
-`audit_entries` in the [configuration](configuration.md#keys) changes that,
-and `0` turns it off.
 What the agent does without telling (a tool it does not report) is not
 there: see [Security model](security.md).
 

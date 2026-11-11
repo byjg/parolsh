@@ -54,7 +54,7 @@ Control commands:
   #options <id> <value>  set one until you leave Parolsh
   #project [init] show the project root, or create .parolsh/ here
   #prompt [name]  show the prompt style, or switch: parolsh, starship, minimal
-  #audit [n]      what ran here, what the agent got, and what it did; n: an earlier session
+  #audit [n]      what ran in this session, what the agent got and did; n: another session
   #sessions       the earlier sessions of this project, from the history
   #sessions <text>  the ones where the text was said
   #sessions all [text]  the same over every project
@@ -626,24 +626,28 @@ impl App {
         Ok(())
     }
 
-    /// `#audit`: the entries of this run, oldest first.
-    /// `#audit`: this run, from memory; `#audit <n>`: session `n` of this
+    /// `#audit`: the current session, from the history, with what it held
+    /// before a `#resume`; this run, from memory, without one (no history,
+    /// `#new private`, nothing saved yet). `#audit <n>`: session `n` of any
     /// project, from the history.
     fn audit_command(&self, args: &str) -> Result<()> {
-        let lines = if args.is_empty() {
-            let lines = self.audit.lines(ui::width());
-            if lines.is_empty() {
-                println!("Nothing yet: commands, messages and what the agent does show up here.");
-            }
-            lines
-        } else {
-            let id = session_number(args)?;
+        let session = match args {
+            "" => self.audit.history().and_then(History::current),
+            number => Some(session_number(number)?),
+        };
+        let lines = if let Some(id) = session {
             // Of any project: looking changes nothing.
             let entries = self
                 .history()?
                 .entries_of(id)?
                 .with_context(|| format!("no session {id}, see #sessions all"))?;
             audit::stored_lines(&entries, ui::width())
+        } else {
+            let lines = self.audit.lines(ui::width());
+            if lines.is_empty() {
+                println!("Nothing yet: commands, messages and what the agent does show up here.");
+            }
+            lines
         };
         for line in lines {
             println!("{line}");

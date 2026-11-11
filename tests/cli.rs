@@ -1010,6 +1010,30 @@ fn resume_goes_back_to_the_agents_conversation() {
     }
 }
 
+/// `#audit` after `#resume` shows the session from the history: what was
+/// said in the earlier run too, not only this run's.
+#[test]
+fn audit_after_resume_shows_the_whole_session() {
+    let home = fake_agent_home_with(&[]);
+    run_in(home.path(), "", &["hello"], "dumb", false);
+
+    let screen = run_in(
+        home.path(),
+        "",
+        &["#resume 1", "who", "#audit"],
+        "dumb",
+        false,
+    );
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    let mut rest = audit;
+    for line in ["USER     → fake: hello", "USER     → fake: who"] {
+        let at = rest
+            .find(line)
+            .unwrap_or_else(|| panic!("missing or out of order: {line}\n{audit}"));
+        rest = &rest[at + line.len()..];
+    }
+}
+
 /// An agent that only loads a conversation replays it: the replay is not
 /// shown again. One that cannot resume says so.
 #[test]
