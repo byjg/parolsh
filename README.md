@@ -71,19 +71,19 @@ See [Input routing](docs/input-routing.md).
 
 ## Install
 
-Add the [ByJG package repository](https://opensource.byjg.com/docs/packages),
-then:
+### Linux Packages (Debian/Fedora)
+
+Add the [ByJG package repository](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
 
 ```bash
-# Debian/Ubuntu
-sudo apt install parolsh
-
-# Fedora/RHEL
-sudo dnf install parolsh
+sudo apt install parolsh   # Debian/Ubuntu
+sudo dnf install parolsh   # Fedora/RHEL
 ```
 
 Packages are built for `amd64` and `arm64`, and need glibc 2.28 or newer
 (Debian 10+, Ubuntu 20.04+, RHEL 8+).
+
+### Homebrew
 
 On macOS (or Linux) with [Homebrew](https://brew.sh):
 
@@ -93,7 +93,9 @@ brew install byjg/tap/parolsh
 
 Homebrew builds it from source, installing Rust only for the build.
 
-Then install an ACP agent, for example
+### After installing
+
+Install an ACP agent, for example
 `npm install -g @agentclientprotocol/claude-agent-acp`, and run `parolsh`: the
 first run creates `~/.config/parolsh/config.toml` with the agents it finds
 already enabled. See [Getting started](docs/getting-started.md).
@@ -104,6 +106,7 @@ already enabled. See [Getting started](docs/getting-started.md).
 - [Input routing](docs/input-routing.md)
 - [Working with agents](docs/working-with-agents.md)
 - [Sessions and history](docs/sessions.md)
+- [Spells](docs/spells.md)
 - [Agents](docs/agents.md)
 - [Projects](docs/projects.md)
 - [Configuration](docs/configuration.md)

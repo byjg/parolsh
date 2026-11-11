@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::acp::{Activity, ActivityWatch, Compacted, Context, Detail};
+use crate::config::Spinner;
 use crate::input::Mode;
 
 /// The logo, a speech bubble with a prompt in it (`docs/images/logo.png`). The `>` is
@@ -18,7 +19,6 @@ const LOGO_WIDTH: usize = 11;
 const LOGO_GRADIENT: [Rgb; 3] = [(118, 24, 252), (0, 140, 253), (0, 237, 157)];
 
 type Rgb = (u8, u8, u8);
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
@@ -297,9 +297,18 @@ pub fn clock(elapsed: Duration) -> String {
     }
 }
 
-/// The spinner's character at `frame`.
-pub fn spinner(frame: usize) -> char {
-    SPINNER[frame % SPINNER.len()]
+/// The spinner's character at `frame`. Every one is a single column wide:
+/// the status line and the title must not move as it turns.
+pub fn spinner(style: Spinner, frame: usize) -> char {
+    let frames: &[char] = match style {
+        Spinner::Ring => &['○', '◎', '◉', '●', '◉', '◎'],
+        Spinner::Dot => &['·', '•', '●', '•'],
+        Spinner::Voice => &['▁', '▃', '▅', '▇', '▅', '▃'],
+        Spinner::Diamond => &['◇', '◈', '◆', '◈'],
+        Spinner::Pie => &['○', '◔', '◑', '◕', '●'],
+        Spinner::Braille => &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+    };
+    frames[frame % frames.len()]
 }
 
 /// The agent shown in the banner: its name and configured mode.
@@ -404,14 +413,13 @@ const QUIET_HINT: Duration = Duration::from_secs(60);
 /// wraps (a wrapped line cannot be redrawn in place): the activity first,
 /// then the hint and the quiet time.
 pub fn status(
-    frame: usize,
+    spinner: char,
     activity: &str,
     elapsed: Duration,
     background: usize,
     quiet: Duration,
     width: usize,
 ) -> String {
-    let spinner = spinner(frame);
     let mut parts = vec![format!(" · {}s", elapsed.as_secs())];
     if background > 0 {
         parts.push(format!(" · {background} bg"));
@@ -805,19 +813,35 @@ mod tests {
     }
 
     #[test]
-    fn status_shows_spinner_activity_and_seconds() {
-        let text = status(2, "Running: Terminal", Duration::from_secs(12), 0, ZERO, 80);
+    fn the_spinner_turns_and_starts_over() {
+        let ring: String = (0..7).map(|frame| spinner(Spinner::Ring, frame)).collect();
+        let dot: String = (0..5).map(|frame| spinner(Spinner::Dot, frame)).collect();
 
-        assert_eq!(plain(&text), "⠹ Running: Terminal · 12s");
+        assert_eq!(ring, "○◎◉●◉◎○");
+        assert_eq!(dot, "·•●•·");
+    }
+
+    #[test]
+    fn status_shows_spinner_activity_and_seconds() {
+        let text = status(
+            '◉',
+            "Running: Terminal",
+            Duration::from_secs(12),
+            0,
+            ZERO,
+            80,
+        );
+
+        assert_eq!(plain(&text), "◉ Running: Terminal · 12s");
     }
 
     const ZERO: Duration = Duration::ZERO;
 
     #[test]
     fn status_counts_the_background_tasks() {
-        let text = status(0, "Thinking", Duration::from_secs(4), 2, ZERO, 80);
+        let text = status('○', "Thinking", Duration::from_secs(4), 2, ZERO, 80);
 
-        assert_eq!(plain(&text), "⠋ Thinking · 4s · 2 bg");
+        assert_eq!(plain(&text), "○ Thinking · 4s · 2 bg");
     }
 
     #[test]
@@ -839,13 +863,13 @@ mod tests {
     #[test]
     fn status_says_how_long_the_agent_has_been_quiet() {
         let secs = Duration::from_secs;
-        let line = |quiet| plain(&status(0, "Thinking", secs(376), 0, quiet, 80));
+        let line = |quiet| plain(&status('○', "Thinking", secs(376), 0, quiet, 80));
 
-        assert_eq!(line(secs(14)), "⠋ Thinking · 376s");
-        assert_eq!(line(secs(15)), "⠋ Thinking · 376s · quiet 15s");
+        assert_eq!(line(secs(14)), "○ Thinking · 376s");
+        assert_eq!(line(secs(15)), "○ Thinking · 376s · quiet 15s");
         assert_eq!(
             line(secs(340)),
-            "⠋ Thinking · 376s · quiet 340s · Ctrl+C to cancel"
+            "○ Thinking · 376s · quiet 340s · Ctrl+C to cancel"
         );
     }
 
@@ -853,7 +877,7 @@ mod tests {
     fn a_narrow_status_drops_the_hint_then_the_quiet_time() {
         let line = |width| {
             plain(&status(
-                0,
+                '○',
                 "Thinking",
                 Duration::from_secs(376),
                 0,
@@ -862,8 +886,8 @@ mod tests {
             ))
         };
 
-        assert_eq!(line(40), "⠋ Thinking · 376s · quiet 340s");
-        assert_eq!(line(24), "⠋ Thinking · 376s");
+        assert_eq!(line(40), "○ Thinking · 376s · quiet 340s");
+        assert_eq!(line(24), "○ Thinking · 376s");
         assert!(line(24).chars().count() < 24);
     }
 
@@ -871,9 +895,9 @@ mod tests {
     fn status_never_wraps_and_keeps_one_line() {
         let long = "Terminal: find / -name '*.rs'\nsecond line";
 
-        let text = plain(&status(0, long, Duration::from_secs(3), 0, ZERO, 24));
+        let text = plain(&status('○', long, Duration::from_secs(3), 0, ZERO, 24));
 
-        assert_eq!(text, "⠋ Terminal: find … · 3s");
+        assert_eq!(text, "○ Terminal: find … · 3s");
         assert!(text.chars().count() < 24);
     }
 

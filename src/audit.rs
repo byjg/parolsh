@@ -6,8 +6,8 @@
 //! Each entry is a `Record` (who, what kind, its full text, details), also
 //! written to the history of sessions when there is one: there the full
 //! text is kept, the agent's answers and reasoning too, and `!command` lines
-//! only with `save_commands`. `#audit <session>` reads an earlier session
-//! back from it.
+//! only with `save_commands`. `#audit` reads the current session back from
+//! it, `#audit <session>` another; the memory is for a run with none.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -82,10 +82,13 @@ pub enum Kind {
     Control,
     /// What Parolsh did: a turn's end, a cancel, the agent stopping.
     Event,
+    /// What Parolsh told the agent with a message: a background turn's
+    /// answer, a spell that ended, where your prompt is; meta `agent`.
+    Note,
 }
 
 impl Kind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Command,
         Self::Capture,
         Self::Share,
@@ -97,6 +100,7 @@ impl Kind {
         Self::Reply,
         Self::Control,
         Self::Event,
+        Self::Note,
     ];
 
     /// The name stored in the history.
@@ -113,6 +117,7 @@ impl Kind {
             Self::Reply => "reply",
             Self::Control => "control",
             Self::Event => "event",
+            Self::Note => "note",
         }
     }
 
@@ -216,6 +221,7 @@ impl Record {
                 if flag("failed") { " · failed" } else { "" }
             ),
             Kind::Event => self.text.clone(),
+            Kind::Note => format!("note → {}: {}", string("agent"), excerpt(&self.text, 120)),
         }
     }
 }
@@ -663,6 +669,32 @@ mod tests {
             "#cd /nowhere · failed"
         );
         assert_eq!(line(Actor::User, Kind::Control, "new ", json!({})), "#new");
+        assert_eq!(
+            line(
+                Actor::Parolsh,
+                Kind::Note,
+                "My prompt is now in /tmp\nmore",
+                json!({"agent": "claude"})
+            ),
+            "note → claude: My prompt is now in /tmp …"
+        );
+    }
+
+    /// What Parolsh told the agent is in the history too: `#audit` of an
+    /// earlier session shows it.
+    #[test]
+    fn a_note_to_the_agent_reaches_the_history() {
+        let (_dir, mut audit) = with_history(false);
+
+        audit.add(
+            Record::new(Actor::Parolsh, Kind::Note, "My prompt is now in /tmp")
+                .meta(json!({"agent": "claude"})),
+        );
+
+        assert_eq!(
+            saved(&audit),
+            ["PAROLSH  note → claude: My prompt is now in /tmp"]
+        );
     }
 
     fn with_history(save_commands: bool) -> (tempfile::TempDir, Audit) {

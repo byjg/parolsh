@@ -46,9 +46,13 @@ What you send, and what Parolsh passes on for you:
   command, its directory and its exit code;
 - each `@path` you mention, as a link to the file, which the agent then
   reads itself (see [Mentioning files](input-routing.md#mentioning-files));
-- the current directory, when a conversation starts;
+- the current directory, when a conversation starts, and the directory your
+  prompt is in, with your next message, when a `cd` moved it away from the
+  agent's (see [Mentioning files](input-routing.md#mentioning-files));
 - after a turn [sent to the background](working-with-agents.md#turns-in-the-background)
   ends, its request and the last 16 KB of its answer, with your next message;
+- after a [spell in the background](spells.md#spells-in-the-background) ends,
+  its exit code and the last 16 KB of its output;
 - while you are [pairing](working-with-agents.md#pairing-two-agents), the
   issue and what the agent wrote after its last tool call go to the second
   agent each time the agent stops, without asking: the second agent may be of
@@ -91,10 +95,19 @@ set up, secrets included, and gives it to the agent. Read a cloned
 repository's `.parolsh/config.toml` before you start Parolsh in it. See
 [What a project can change](configuration.md#what-a-project-can-change).
 
+## Spells
+
+A [spell](spells.md)'s script runs when the agent calls `cast_spell`, as any
+command the agent runs: the agent asks you first unless you allowed the
+tool. Spells are only read from `~/.config/parolsh/spells/`: a project's
+`.parolsh/` cannot add one, so a cloned repository brings no script for the
+agent to run. They are a server of their own, `parolsh-spells`: allowing
+the read-only `parolsh-history` does not allow them.
+
 ## Looking back
 
 `#audit` lists what ran on your machine, what reached the agent and what the
-agent reported doing, for the current run (see
+agent reported doing, for the current session (see
 [`#audit`](sessions.md#audit)).
 
 The [history of sessions](sessions.md#the-history-of-sessions) keeps more,

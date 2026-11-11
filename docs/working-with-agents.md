@@ -84,8 +84,11 @@ instead of adding lines:
 
 ```text
 [claude] ~/projects/wallet ✦ why is the API container restarting?
-⠹ Running: Terminal (9s) · 12s
+◉ Running: Terminal (9s) · 12s
 ```
+
+The spinner's look is the `spinner` setting (see
+[Keys](configuration.md#keys)).
 
 Tool calls only update that line: `Running: <title> (8s)` with the time that
 tool has taken, `2 tools running` when there are more, `Failed: <title>` when
@@ -226,7 +229,7 @@ and the turn's answer comes when it is done.
 
 ```text
 [claude] ~/projects/wallet ✦ compare the code with version 0.6.0
-⠹ Running: Read src/client.rs (2s) · 12s                         (Ctrl+Z)
+◉ Running: Read src/client.rs (2s) · 12s                         (Ctrl+Z)
 [1] in the background: compare the code with version 0.6.0
 [claude] ~/projects/wallet ✦ what does the retry test check?       1 job
 ✦ It checks that a timeout is retried three times, with a longer wait
@@ -252,7 +255,9 @@ two conversations:
   after its last tool call) and gives it to the agent you are talking to,
   with your request, along with your next message. Until then that agent
   does not know the request exists, and it never sees the work behind the
-  answer: the files read, the commands run.
+  answer: the files read, the commands run. A turn that ran 60 s or more
+  also rings the terminal's bell, or plays your sound: `alert` and
+  `alert_after` in [Keys](configuration.md#keys).
 - What happens after the copy is not shared the other way either: the turn
   in the background knows nothing of what you ask meanwhile.
 
@@ -288,7 +293,8 @@ Several turns can run at once, each sent with `Ctrl+Z`:
   agent.
 - **Leaving stops them.** `#exit` and `Ctrl+D` say what is still running the
   first time, and leave the second time. The same when the agent has
-  [background tasks](#background-tasks-and-the-terminal-title) running.
+  [background tasks](#background-tasks-and-the-terminal-title) or
+  [spells](spells.md#spells-in-the-background) running.
 - **A new conversation** (`#new`, `#cd`, `#agent`, `#resume`) leaves them
   running. Their answer is then shown, not given to the new conversation.
 - In the [history](sessions.md#a-turn-in-the-background), the turn is a
@@ -474,7 +480,7 @@ status line of a turn counts them too:
 
 ```text
 [claude] ~/projects/wallet ✦                                ⧗ 1 bg · 0:42
-⠹ Thinking · 4s · 1 bg
+◉ Thinking · 4s · 1 bg
 ```
 
 On an ANSI terminal, Parolsh also sets the terminal's title, so you can follow
@@ -483,13 +489,14 @@ the agent from another tab or window:
 ```text
 parolsh · ~/…/projects/wallet              before the agent names the conversation
 parolsh · Fix the batch script             the conversation's title, from the agent
-⠹ parolsh · Fix the batch script           a turn is running
-⠹ 2 bg · parolsh · Fix the batch script    background tasks are running
+◉ parolsh · Fix the batch script           a turn is running
+◉ 2 bg · parolsh · Fix the batch script    background tasks are running
 ```
 
 - The conversation's title is the agent's own (Claude and Codex send one;
   Claude after its first answer), cut to 40 characters. Until then, and after `#new`, the
-  title shows the agent's directory.
+  title shows the agent's directory. A resumed session shows the title saved
+  with it right away.
 - The title is left alone while a `!command` runs, since programs such as
   `vim` or `ssh` set their own.
 - Parolsh saves the title it found on start and puts it back on exit, on

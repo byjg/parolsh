@@ -1,6 +1,7 @@
 //! The terminal's title: `parolsh` and the conversation's title, or the
-//! directory before the agent gave one. While the agent works, a spinner and
-//! how many background tasks run: `⠹ 2 bg · parolsh · Fix the batch script`.
+//! directory before the agent gave one. A resumed session shows the title
+//! saved with it. While the agent works, a spinner and how many background
+//! tasks run: `◉ 2 bg · parolsh · Fix the batch script`.
 //! It shows from another tab or window, where the prompt does not.
 
 use nix::sys::signal::{SigSet, Signal};
@@ -11,6 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::acp::{Activity, ActivityWatch};
+use crate::config::Spinner;
 use crate::ui;
 
 /// How often the title changes while the agent works: terminals redraw their
@@ -30,7 +32,11 @@ pub struct Title {
 struct Shared {
     /// Shown until the agent gives the conversation a title.
     place: Mutex<String>,
+    /// The history's title of the conversation, shown until the agent gives
+    /// one: a resumed session keeps its title.
+    known: Mutex<Option<String>>,
     agent: Mutex<Option<ActivityWatch>>,
+    spinner: Mutex<Spinner>,
     /// A command owns the terminal: its title is left alone.
     held: AtomicBool,
     /// The title on screen may not be ours: write it again.
@@ -77,6 +83,20 @@ impl Title {
         }
     }
 
+    /// The history's title, shown until the agent gives one.
+    pub fn set_known(&self, known: Option<String>) {
+        if let Ok(mut current) = self.shared.known.lock() {
+            *current = known;
+        }
+    }
+
+    /// How the spinner looks.
+    pub fn set_spinner(&self, spinner: Spinner) {
+        if let Ok(mut current) = self.shared.spinner.lock() {
+            *current = spinner;
+        }
+    }
+
     /// The agent whose work is shown, `None` when there is none.
     pub fn set_agent(&self, agent: Option<ActivityWatch>) {
         if let Ok(mut current) = self.shared.agent.lock() {
@@ -120,12 +140,19 @@ fn tick(shared: &Shared) {
                 .ok()
                 .and_then(|agent| agent.as_ref().map(ActivityWatch::get))
                 .unwrap_or_default();
+            let known = shared.known.lock().ok().and_then(|known| known.clone());
+            let activity = with_known(activity, known);
             let place = shared
                 .place
                 .lock()
                 .map(|place| place.clone())
                 .unwrap_or_default();
-            let title = text(frame, &place, &activity);
+            let spinner = shared
+                .spinner
+                .lock()
+                .map(|spinner| ui::spinner(*spinner, frame))
+                .unwrap_or_default();
+            let title = text(spinner, &place, &activity);
             if title != shown || shared.dirty.swap(false, Ordering::SeqCst) {
                 write(&format!("\x1b]2;{title}\x07"));
                 shown = title;
@@ -136,12 +163,12 @@ fn tick(shared: &Shared) {
     }
 }
 
-/// The title: `[⠹ ][2 bg · ]parolsh · <title or place>`. The spinner turns
+/// The title: `[◉ ][2 bg · ]parolsh · <title or place>`. The spinner shows
 /// while a prompt is in flight or background tasks run.
-pub fn text(frame: usize, place: &str, activity: &Activity) -> String {
+pub fn text(spinner: char, place: &str, activity: &Activity) -> String {
     let mut title = String::new();
     if activity.busy || activity.tasks > 0 {
-        title.push(ui::spinner(frame));
+        title.push(spinner);
         title.push(' ');
     }
     if activity.tasks > 0 {
@@ -154,6 +181,12 @@ pub fn text(frame: usize, place: &str, activity: &Activity) -> String {
     }
     // The agent's title must not end the escape sequence early.
     title.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The agent's title, or the history's until the agent gives one.
+fn with_known(mut activity: Activity, known: Option<String>) -> Activity {
+    activity.title = activity.title.or(known);
+    activity
 }
 
 fn shorten(title: &str) -> String {
@@ -189,32 +222,43 @@ mod tests {
         let place = "~/…/byjg/parolsh";
 
         assert_eq!(
-            text(0, place, &activity(false, 0, None)),
+            text('○', place, &activity(false, 0, None)),
             "parolsh · ~/…/byjg/parolsh"
         );
         assert_eq!(
-            text(0, place, &activity(false, 0, Some("Fix the batch"))),
+            text('○', place, &activity(false, 0, Some("Fix the batch"))),
             "parolsh · Fix the batch"
         );
     }
 
     #[test]
-    fn a_working_agent_spins_and_counts_its_background_tasks() {
-        let turn = text(0, "~", &activity(true, 0, Some("Fix")));
-        let tasks = text(1, "~", &activity(false, 2, Some("Fix")));
+    fn a_resumed_session_shows_its_title_until_the_agent_gives_one() {
+        let known = || Some("Billing rewrite".to_string());
 
-        assert_eq!(turn, "⠋ parolsh · Fix");
-        assert_eq!(tasks, "⠙ 2 bg · parolsh · Fix");
+        let resumed = with_known(activity(false, 0, None), known());
+        let retitled = with_known(activity(false, 0, Some("Falcon")), known());
+
+        assert_eq!(text('○', "~", &resumed), "parolsh · Billing rewrite");
+        assert_eq!(text('○', "~", &retitled), "parolsh · Falcon");
+    }
+
+    #[test]
+    fn a_working_agent_spins_and_counts_its_background_tasks() {
+        let turn = text('○', "~", &activity(true, 0, Some("Fix")));
+        let tasks = text('◎', "~", &activity(false, 2, Some("Fix")));
+
+        assert_eq!(turn, "○ parolsh · Fix");
+        assert_eq!(tasks, "◎ 2 bg · parolsh · Fix");
     }
 
     #[test]
     fn a_long_title_is_cut_and_control_characters_dropped() {
         let long = "word ".repeat(20);
-        let title = text(0, "~", &activity(false, 0, Some(&long)));
+        let title = text('○', "~", &activity(false, 0, Some(&long)));
         assert!(title.chars().count() <= "parolsh · ".chars().count() + MAX_TITLE);
         assert!(title.ends_with('…'), "{title}");
 
-        let sneaky = text(0, "~", &activity(false, 0, Some("a\x07\x1b]2;b")));
+        let sneaky = text('○', "~", &activity(false, 0, Some("a\x07\x1b]2;b")));
         assert_eq!(sneaky, "parolsh · a]2;b");
     }
 }

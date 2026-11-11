@@ -39,8 +39,9 @@ Parolsh looks:
   `~/.bashrc` set up, and gives it to the agent (see
   [Shell environment](#shell-environment)). It runs your files, not the
   project's.
-- `default_agent`, `input`, `prompt`, `thinking`, `markdown`, `links`,
-  `audit_entries`, `redraw_exchanges`.
+- `default_agent`, `input`, `prompt`, `thinking`, `spinner`, `spell_ended`,
+  `alert`, `alert_after`, `markdown`, `links`, `audit_entries`,
+  `redraw_exchanges`.
 
 A project can only refer to agents defined in the global file: it cannot add
 one. A project file that sets a global-only key is reported as an error and
@@ -135,11 +136,15 @@ the agent in use (here `qwen`, which the global file configures) until
 | `markdown` | `true` | Render the answers' markdown on ANSI terminals: `**bold**`, `` `code` `` in cyan, code blocks, `#` headings and `-` bullets, with the markers hidden. `false` prints the raw text. |
 | `shell_env` | `"auto"` | When to import the environment your shell sets up (`~/.profile`, `~/.bashrc`): `auto` (when Parolsh was not started from a shell), `always`, `never`. See [Shell environment](#shell-environment). |
 | `links` | `"both"` | How markdown links are shown: `both` (clickable text followed by the URL), `clickable` (clickable text only), `inline` (underlined text followed by the URL). See [links](working-with-agents.md#during-a-turn). |
-| `audit_entries` | `1000` | How many entries [`#audit`](sessions.md#audit) keeps, the oldest dropped first. `0` keeps none. |
+| `audit_entries` | `1000` | How many entries [`#audit`](sessions.md#audit) keeps in memory, for when there is no saved session, the oldest dropped first. `0` keeps none. |
 | `redraw_exchanges` | `5` | How many exchanges [`#redraw`](sessions.md#showing-the-conversation-again) and `Ctrl+L` show again, and how many are shown when a session is resumed. |
 | `history_days` | `90` | Days an idle session stays in the [history of sessions](sessions.md#the-history-of-sessions). `0` saves nothing. Global only. |
 | `commands` | `"private"` | The lines of your `!commands` (never their output) in the history: `private` (saved for you: `#redraw`, `#resume` and `#audit <n>` show them; the agent's tools do not return them), `shared` (returned to the agent too), `off` (not saved). Global only. `save_commands = true` or `false`, from 0.6.0, still means `shared` or `off`. See [The history of sessions](sessions.md#the-history-of-sessions). |
 | `thinking` | `"status"` | How the agent's reasoning is displayed: `status` (its latest line in the status line), `hidden` (only "Thinking"), `show` (printed dim, before the answer). |
+| `spell_ended` | `"turn"` | When the agent is told that a spell it cast in the background ended: `turn` (at once, in a turn of its own, unless you are typing: then with your next message), `turn-immediately` (at once, even while you type: what you typed comes back), `tell` (with your next message). See [Spells in the background](spells.md#spells-in-the-background). |
+| `alert` | `"bell"` | When a spell or a turn ends in the background: `bell` (the terminal's bell: your terminal decides what it does, a sound, a flash or the tab marked), `off`, or the path of a sound file (`~/` is your home), played with `pw-play` or `paplay`, the bell when neither is installed. |
+| `alert_after` | `60` | Seconds: a spell or a turn in the background that ends sooner has no alert. |
+| `spinner` | `"ring"` | The spinner shown in the status line and the terminal title while the agent works: `ring` (`○◎◉●◉◎`), `dot` (`·•●•`), `voice` (`▁▃▅▇▅▃`), `diamond` (`◇◈◆◈`), `pie` (`○◔◑◕●`), `braille` (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`). |
 
 `shell` only affects commands you type with `!`. `parolsh -c` always uses a
 plain `bash -c`.
@@ -236,5 +241,7 @@ environment it was given.
 |---|---|
 | `~/.local/state/parolsh/history` (or `$XDG_STATE_HOME/parolsh/history`) | Input history, last 1000 lines |
 | `~/.local/state/parolsh/history.db` (or `$XDG_STATE_HOME/parolsh/history.db`) | The [history of sessions](sessions.md#the-history-of-sessions) (SQLite) |
+| `~/.config/parolsh/spells/` (or `$XDG_CONFIG_HOME/parolsh/spells/`) | Your [spells](spells.md), one directory each |
+| `~/.local/state/parolsh/run/<pid>/` | While Parolsh runs: the directory of your commands, and the spells in the background, shared with the [spells](spells.md#spells-in-the-background)' server |
 | `/usr/share/doc/parolsh/config.sample.toml` | The commented sample configuration (Linux packages) |
 | `$(brew --prefix)/share/parolsh/config.sample.toml` | The same, installed with Homebrew |

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use crate::acp::{
     AgentHandle, AgentSession, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage,
 };
-use crate::audit::{self, Actor, Audit, Handle, Kind, Record};
-use crate::config::{LinkStyle, ThinkingDisplay};
+use crate::audit::{Actor, Audit, Handle, Kind, Record};
+use crate::config::{LinkStyle, Spinner, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::jobs::Job;
 use crate::markdown::Markdown;
@@ -78,7 +78,12 @@ pub struct Display {
     /// Render markdown (on ANSI terminals only).
     pub markdown: bool,
     pub links: LinkStyle,
+    pub spinner: Spinner,
 }
+
+/// The status line is redrawn every 100 ms while the agent is silent; its
+/// spinner moves on every third time, about 300 ms per frame.
+const TICKS_PER_FRAME: usize = 3;
 
 /// How long the agent has to confirm a cancel before Parolsh stops waiting.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -247,8 +252,7 @@ impl Turn {
 
     fn fail(&mut self, audit: &mut Audit, message: &str) {
         self.flush(audit);
-        let failed = format!("turn failed: {}", audit::excerpt(message, 80));
-        audit.add_in(self.session, parolsh_event(failed));
+        audit.add_in(self.session, parolsh_event(failed(message)));
     }
 
     /// In the background: records what the agent sent since the last call,
@@ -360,7 +364,7 @@ fn follow(
     BACKGROUND.store(false, Ordering::SeqCst);
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
-    let mut out = Output::new(ansi, display.thinking, markdown);
+    let mut out = Output::new(ansi, display.thinking, display.spinner, markdown);
     if agent.abandoned().is_some() {
         out.pin("Waiting for the previous turn to stop…");
     }
@@ -525,6 +529,15 @@ fn give_up(agent: &AgentHandle, turn: TurnId, out: &mut Output, audit: &mut Audi
     eprintln!("(cancelled — the agent did not confirm)");
     audit.add(parolsh_event("cancelled, the agent did not confirm"));
     Outcome::Finished(Some("cancelled"))
+}
+
+/// What a turn that failed leaves in the record: the agent's whole message, on
+/// one line. Agents send a JSON object over several lines, and its first line
+/// alone (`Internal error: {`) says nothing: `#audit` shows the start of it,
+/// the history all of it.
+fn failed(message: &str) -> String {
+    let message: Vec<&str> = message.split_whitespace().collect();
+    format!("turn failed: {}", message.join(" "))
 }
 
 fn parolsh_event(text: impl Into<String>) -> Record {
@@ -1155,6 +1168,7 @@ struct Output {
     mid_line: bool,
     status: Option<Status>,
     thinking: ThinkingDisplay,
+    spinner: Spinner,
     ansi: bool,
     /// The last thing printed was reasoning (`thinking = "show"`).
     in_thought: bool,
@@ -1278,10 +1292,16 @@ impl Status {
 }
 
 impl Output {
-    fn new(ansi: bool, thinking: ThinkingDisplay, markdown: Option<Markdown>) -> Self {
+    fn new(
+        ansi: bool,
+        thinking: ThinkingDisplay,
+        spinner: Spinner,
+        markdown: Option<Markdown>,
+    ) -> Self {
         Self {
             markdown,
             thinking,
+            spinner,
             ansi,
             in_thought: false,
             mid_line: false,
@@ -1509,7 +1529,7 @@ impl Output {
                 None => status.activity(),
             };
             let line = ui::status(
-                status.frame,
+                ui::spinner(self.spinner, status.frame / TICKS_PER_FRAME),
                 &activity,
                 status.started.elapsed(),
                 status.background,
@@ -1592,6 +1612,17 @@ mod tests {
         status.update_tool("t2", None, Some(true));
         assert_eq!(status.activity(), "Thinking");
         assert_eq!(status.tools, 2);
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_the_whole_message_of_the_agent() {
+        let message =
+            "Internal error: {\n  \"code\": -32603,\n  \"message\": \"Unknown command: /mcp\"\n}";
+
+        assert_eq!(
+            failed(message),
+            "turn failed: Internal error: { \"code\": -32603, \"message\": \"Unknown command: /mcp\" }"
+        );
     }
 
     #[test]
