@@ -2797,6 +2797,7 @@ mod tests {
             spell: "build-all-php".to_string(),
             args: vec!["7.0".to_string(), "fresh".to_string()],
             pgid: 0,
+            token: String::new(),
             started: 0,
             exit: Some(1),
             output: "Stopping due to failure in php-gluo\n".to_string(),

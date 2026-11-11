@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -194,8 +194,13 @@ fn spell_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// A spell still running after `cast_spell` stopped waiting for it, as its
-/// server writes it in `jobs/<id>.json` of the [`Here`] directory: Parolsh
-/// lists it, says when it ended, and stops it with the conversation.
+/// server writes it in `jobs/<id>.json` of the [`Here`] directory, its end
+/// in `jobs/<id>-<token>.end`: Parolsh lists it, says when it ended, and
+/// stops it with the conversation.
+///
+/// Each file is written whole under a temporary name, then given its own,
+/// and never written again: Parolsh, which reads them while the server
+/// writes, never finds one half written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobFile {
     pub id: u32,
@@ -203,13 +208,29 @@ pub struct JobFile {
     pub args: Vec<String>,
     /// Its process group.
     pub pgid: i32,
+    /// Its own among all jobs, which names its end file: empty when an
+    /// older server wrote it. See [`JobEnd`].
+    #[serde(default)]
+    pub token: String,
     /// When it started, in seconds since the epoch.
     pub started: u64,
-    /// Set when it ended, once its output is all read.
+    /// Set when it ended, once its output is all read: from its `.end`
+    /// file, or from `<id>.json` itself when an older server wrote it.
     pub exit: Option<i32>,
     /// The end of its output, set with `exit`.
     #[serde(default)]
     pub output: String,
+}
+
+/// How a job ended, in `jobs/<id>-<token>.end`. A job Parolsh stopped and
+/// forgot may write its end after another took its number, even with the
+/// same process group, which the system gives again: named by the job's
+/// own token, its end goes to a file no other job reads, and replaces
+/// none.
+#[derive(Serialize, Deserialize)]
+struct JobEnd {
+    exit: Option<i32>,
+    output: String,
 }
 
 impl JobFile {
@@ -288,7 +309,7 @@ impl Here {
             .filter(|job| job.exit.is_some())
             .collect();
         for job in &ended {
-            let _ = std::fs::remove_file(job_path(&self.dir, job.id));
+            remove_job(&self.dir, job);
         }
         ended
     }
@@ -298,7 +319,7 @@ impl Here {
     pub fn stop_running(&self) {
         for job in self.running() {
             shell::stop_group(job.pgid);
-            let _ = std::fs::remove_file(job_path(&self.dir, job.id));
+            remove_job(&self.dir, &job);
         }
     }
 }
@@ -314,14 +335,27 @@ impl Drop for Here {
 const CWD: &str = "cwd";
 const JOBS: &str = "jobs";
 
-/// The jobs of the [`Here`] directory `here`, by number.
+/// The jobs of the [`Here`] directory `here`, by number, each with its end
+/// when it has one. An end without its job (one Parolsh stopped) is not read.
 fn read_jobs(here: &Path) -> Vec<JobFile> {
     let Ok(entries) = std::fs::read_dir(here.join(JOBS)) else {
         return Vec::new();
     };
     let mut jobs: Vec<JobFile> = entries
         .flatten()
-        .filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| {
+            let mut job: JobFile = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            let end = (!job.token.is_empty())
+                .then(|| std::fs::read(end_path(here, job.id, &job.token)).ok())
+                .flatten();
+            if let Some(end) = end.and_then(|end| serde_json::from_slice::<JobEnd>(&end).ok()) {
+                job.exit = end.exit;
+                job.output = end.output;
+            }
+            Some(job)
+        })
         .collect();
     jobs.sort_by_key(|job| job.id);
     jobs
@@ -329,6 +363,34 @@ fn read_jobs(here: &Path) -> Vec<JobFile> {
 
 fn job_path(here: &Path, id: u32) -> PathBuf {
     here.join(JOBS).join(format!("{id}.json"))
+}
+
+fn end_path(here: &Path, id: u32, token: &str) -> PathBuf {
+    here.join(JOBS).join(format!("{id}-{token}.end"))
+}
+
+/// A token no other job has: of this server, now, and counted.
+fn new_token() -> String {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let count = COUNT.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{count}", std::process::id())
+}
+
+/// Writes how job `id`, of token `token`, ended, whole, beside its file.
+fn write_end(here: &Path, id: u32, token: &str, end: &JobEnd) -> std::io::Result<()> {
+    let path = end_path(here, id, token);
+    let draft = path.with_extension("end.tmp");
+    std::fs::write(&draft, serde_json::to_vec(end)?)?;
+    std::fs::rename(&draft, &path)
+}
+
+/// Forgets `job`: its file, then its end.
+fn remove_job(here: &Path, job: &JobFile) {
+    let _ = std::fs::remove_file(job_path(here, job.id));
+    let _ = std::fs::remove_file(end_path(here, job.id, &job.token));
 }
 
 /// The directory a [`Here`] at `path` holds, when it still exists.
@@ -346,15 +408,15 @@ fn add_job(here: &Path, mut job: JobFile, last: u32) -> std::io::Result<u32> {
     let mut id = 1 + last.max(on_disk);
     loop {
         job.id = id;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(job_path(here, id))
-        {
-            Ok(mut file) => {
-                file.write_all(&serde_json::to_vec(&job)?)?;
-                return Ok(id);
-            }
+        // Written whole under a name of this process, then linked under its
+        // number: the link fails when another server took the number.
+        let path = job_path(here, id);
+        let draft = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&draft, serde_json::to_vec(&job)?)?;
+        let linked = std::fs::hard_link(&draft, &path);
+        let _ = std::fs::remove_file(&draft);
+        match linked {
+            Ok(()) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => id += 1,
             Err(e) => return Err(e),
         }
@@ -455,6 +517,7 @@ impl SpellTools {
             spell: spell.name.clone(),
             args,
             pgid: captive.pgid(),
+            token: new_token(),
             started,
             exit: None,
             output: String::new(),
@@ -467,20 +530,15 @@ impl SpellTools {
             Some(here) => add_job(here, file.clone(), last)?,
             None => last + 1,
         };
-        // Its end, for Parolsh, unless Parolsh forgot it: it stopped it.
+        // Its end, for Parolsh. One Parolsh forgot (it stopped it) has no
+        // job file left, and its end is not read.
         if let Some(here) = self.here.clone() {
             let ended = captive.clone();
-            let mut file = file.clone();
+            let (id, token) = (file.id, file.token.clone());
             std::thread::spawn(move || {
-                file.exit = ended.wait(None);
-                file.output = shown(&ended.output());
-                let opened = std::fs::OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(job_path(&here, file.id));
-                if let (Ok(mut opened), Ok(json)) = (opened, serde_json::to_vec(&file)) {
-                    let _ = opened.write_all(&json);
-                }
+                let exit = ended.wait(None);
+                let output = shown(&ended.output());
+                let _ = write_end(&here, id, &token, &JobEnd { exit, output });
             });
         }
         jobs.push(Job {
@@ -1269,5 +1327,124 @@ instructions = "Check the version first.\n"
             tools.call("spell_job", &json!({})).unwrap(),
             "No spells in the background.\n"
         );
+    }
+
+    /// A job as a server writes it: running, numbered by `add_job`.
+    fn job_file(pgid: i32, token: &str) -> JobFile {
+        JobFile {
+            id: 0,
+            spell: "slow".into(),
+            args: vec!["mod.zip".into()],
+            pgid,
+            token: token.into(),
+            started: 0,
+            exit: None,
+            output: String::new(),
+        }
+    }
+
+    fn job_end(exit: i32, output: &str) -> JobEnd {
+        JobEnd {
+            exit: Some(exit),
+            output: output.into(),
+        }
+    }
+
+    /// Parolsh reads the jobs while servers write them: what is not whole
+    /// yet, and the end of a job it forgot, are not jobs or ends.
+    #[test]
+    fn job_files_are_read_only_when_whole_and_ends_only_with_their_job() {
+        let state = tempfile::tempdir().unwrap();
+        let here = Here::create(state.path(), state.path()).unwrap();
+        let jobs = here.path().join(JOBS);
+        assert_eq!(add_job(here.path(), job_file(4242, "a"), 0).unwrap(), 1);
+        // A draft whole, not yet linked under its number.
+        let draft = JobFile {
+            id: 2,
+            ..job_file(4343, "b")
+        };
+        std::fs::write(
+            jobs.join("2.json.99.tmp"),
+            serde_json::to_vec(&draft).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(jobs.join("1-a.end.tmp"), "{\"exit\":").unwrap();
+        write_end(here.path(), 3, "c", &job_end(0, "done\n")).unwrap();
+
+        assert_eq!(
+            here.jobs(),
+            vec![JobFile {
+                id: 1,
+                ..job_file(4242, "a")
+            }]
+        );
+
+        write_end(here.path(), 1, "a", &job_end(3, "failed\n")).unwrap();
+        let ended = here.take_ended();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(
+            (ended[0].exit, ended[0].output.as_str()),
+            (Some(3), "failed\n")
+        );
+        assert!(!jobs.join("1.json").exists() && !jobs.join("1-a.end").exists());
+    }
+
+    /// A job Parolsh forgot writes its end late, after another took its
+    /// number, and the system gave that one the same process group: the
+    /// other is still running, and then has its own end.
+    #[test]
+    fn a_late_end_of_a_forgotten_job_is_not_the_end_of_the_next_with_its_number() {
+        let state = tempfile::tempdir().unwrap();
+        let here = Here::create(state.path(), state.path()).unwrap();
+        let forgotten = job_file(4242, "first");
+        assert_eq!(add_job(here.path(), forgotten.clone(), 0).unwrap(), 1);
+        remove_job(here.path(), &JobFile { id: 1, ..forgotten });
+        assert_eq!(
+            add_job(here.path(), job_file(4242, "second"), 0).unwrap(),
+            1
+        );
+
+        write_end(here.path(), 1, "first", &job_end(143, "stopped\n")).unwrap();
+        assert_eq!(here.jobs()[0].exit, None);
+        assert!(here.take_ended().is_empty());
+
+        write_end(here.path(), 1, "second", &job_end(0, "done\n")).unwrap();
+        let ended = here.take_ended();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(
+            (ended[0].exit, ended[0].output.as_str()),
+            (Some(0), "done\n")
+        );
+    }
+
+    /// A number is taken from the moment its file is there, even before
+    /// another server could read it: the next job gets the one after.
+    #[test]
+    fn a_number_taken_by_another_server_is_not_given_again() {
+        let state = tempfile::tempdir().unwrap();
+        let here = Here::create(state.path(), state.path()).unwrap();
+        std::fs::write(here.path().join(JOBS).join("1.json"), "").unwrap();
+
+        assert_eq!(add_job(here.path(), job_file(4242, "a"), 0).unwrap(), 2);
+        assert_eq!(here.jobs()[0].id, 2);
+    }
+
+    /// A server of an earlier version, still running after an upgrade,
+    /// writes the end in the job's own file, and no token: it is read there.
+    #[test]
+    fn the_end_an_older_server_writes_in_the_job_file_is_read() {
+        let state = tempfile::tempdir().unwrap();
+        let here = Here::create(state.path(), state.path()).unwrap();
+        let old = JobFile {
+            id: 1,
+            exit: Some(0),
+            output: "done\n".into(),
+            ..job_file(4242, "")
+        };
+        let mut json = serde_json::to_value(&old).unwrap();
+        json.as_object_mut().unwrap().remove("token");
+        std::fs::write(job_path(here.path(), 1), json.to_string()).unwrap();
+
+        assert_eq!(here.take_ended(), vec![old]);
     }
 }
