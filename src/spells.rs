@@ -801,6 +801,12 @@ mod tests {
         }
     }
 
+    /// Every job has its end written. A job stops running when its process
+    /// ends, and its end is written a moment later, once its output is read.
+    fn all_ended(here: &Here) -> bool {
+        here.jobs().iter().all(|job| job.exit.is_some())
+    }
+
     #[test]
     fn spells_are_read_by_name_and_the_broken_ones_are_said() {
         let dir = tempfile::tempdir().unwrap();
@@ -1077,7 +1083,7 @@ instructions = "Check the version first.\n"
             "{job}"
         );
 
-        eventually(|| here.running().is_empty());
+        eventually(|| all_ended(&here));
 
         let ended = here.take_ended();
         assert_eq!(ended.len(), 1);
@@ -1109,7 +1115,7 @@ instructions = "Check the version first.\n"
         let mut tools = tools(dir.path(), Some(here.path().to_path_buf()));
         tools.wait = Duration::from_millis(300);
         cast(&tools, "slow", json!(["first"])).unwrap();
-        eventually(|| here.running().is_empty());
+        eventually(|| all_ended(&here));
         assert_eq!(here.take_ended().len(), 1);
 
         let out = cast(&tools, "slow", json!(["second"])).unwrap();
@@ -1157,6 +1163,7 @@ instructions = "Check the version first.\n"
         let stopped = tools.call("stop_spell", &json!({"job": 1})).unwrap();
         assert_eq!(stopped, "Job 1 stopped. exit 143\nwaiting\n");
         eventually(|| !shell::group_alive(first));
+        eventually(|| all_ended(&here));
         let again = tools.call("stop_spell", &json!({"job": 1})).unwrap();
         assert!(
             again.starts_with("Job 1 had already ended. exit 143"),
