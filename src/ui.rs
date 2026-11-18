@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::acp::{Activity, ActivityWatch, Compacted, Context, Detail};
+use crate::audit::excerpt;
 use crate::config::Spinner;
 use crate::input::Mode;
 
@@ -223,7 +224,8 @@ impl reedline::Prompt for Prompt {
         Cow::Borrowed(&self.left)
     }
 
-    /// Read on each repaint: the background tasks' time keeps running.
+    /// Read on each repaint: the time of background tasks and tool calls
+    /// keeps running.
     fn render_prompt_right(&self) -> Cow<'_, str> {
         let jobs = match self.jobs {
             0 => None,
@@ -241,6 +243,7 @@ impl reedline::Prompt for Prompt {
         let parts: Vec<String> = [
             context_warning(&activity, ansi),
             jobs.map(dim),
+            calls(&activity).map(dim),
             background(&activity).map(dim),
         ]
         .into_iter()
@@ -284,6 +287,18 @@ pub fn background(activity: &Activity) -> Option<String> {
         text.push_str(&format!(" · {}", clock(oldest.elapsed())));
     }
     Some(text)
+}
+
+/// The tool calls the agent runs between turns and how long the oldest has
+/// run: `⚙ Run tests · 0:42`, or `⚙ 2 calls · 0:42`; `None` without any, or
+/// during a turn, which shows them itself.
+pub fn calls(activity: &Activity) -> Option<String> {
+    let oldest = activity.calls.first().filter(|_| !activity.busy)?;
+    let what = match activity.calls.len() {
+        1 => excerpt(&oldest.title, 30),
+        calls => format!("{calls} calls"),
+    };
+    Some(format!("⚙ {what} · {}", clock(oldest.started.elapsed())))
 }
 
 /// `0:42`, `12:03`, `1:02:03`.
@@ -724,6 +739,7 @@ fn tilde(path: &Path, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::RunningCall;
 
     fn plain(text: &str) -> String {
         let mut out = String::new();
@@ -858,6 +874,32 @@ mod tests {
         assert!(one.starts_with("⧗ 1 bg · 0:4"), "{one}");
         assert_eq!(clock(Duration::from_secs(723)), "12:03");
         assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
+    }
+
+    #[test]
+    fn tool_calls_between_turns_show_with_the_time_of_the_oldest() {
+        let now = std::time::Instant::now();
+        let call = |title: &str, secs| RunningCall {
+            id: title.to_string(),
+            title: title.to_string(),
+            started: now.checked_sub(Duration::from_secs(secs)).unwrap(),
+        };
+        let between = |calls| Activity {
+            calls,
+            ..Default::default()
+        };
+
+        assert_eq!(calls(&between(vec![])), None);
+        let one = calls(&between(vec![call("Run tests\nand more", 42)])).unwrap();
+        assert!(one.starts_with("⚙ Run tests … · 0:4"), "{one}");
+        let two = calls(&between(vec![call("a", 75), call("b", 3)])).unwrap();
+        assert!(two.starts_with("⚙ 2 calls · 1:1"), "{two}");
+        // A turn shows them in its own status line.
+        let busy = Activity {
+            busy: true,
+            ..between(vec![call("a", 1)])
+        };
+        assert_eq!(calls(&busy), None);
     }
 
     #[test]

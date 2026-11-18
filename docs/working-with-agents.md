@@ -214,6 +214,10 @@ while you type:
   after it pauses briefly. Tool calls are `• <title>` lines, and go to
   [`#audit`](sessions.md#audit) like the ones in a turn. Its reasoning and
   plan are not shown: the status line only exists during a turn.
+- While a tool call runs, the prompt shows it on the right with its time,
+  `⚙ Run tests · 0:42` (`⚙ 2 calls · 0:42` for several, with the time of the
+  oldest). A message you send meanwhile starts its turn showing it,
+  `Running: Run tests (57s)`, and its end is recorded in that turn.
 - When it asks for permission or asks you questions, the prompt makes way for
   the question. What you were typing comes back after you answer.
 - If it stops, Parolsh says so and `#new` starts it again.

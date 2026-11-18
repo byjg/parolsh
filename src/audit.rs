@@ -250,8 +250,16 @@ impl Handle {
 /// The entry of each tool call of an agent, until it finishes. Kept by the
 /// agent, not by what shows it: a call started between turns may finish in a
 /// turn, or the other way.
-#[derive(Default)]
-pub struct ToolCalls(HashMap<String, (Handle, Record)>);
+#[derive(Debug, Default)]
+pub struct ToolCalls(HashMap<String, (Handle, Record, Instant)>);
+
+/// A tool call not finished yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningCall {
+    pub id: String,
+    pub title: String,
+    pub started: Instant,
+}
 
 impl ToolCalls {
     pub fn start(
@@ -270,7 +278,7 @@ impl ToolCalls {
         let record = Record::new(Actor::Agent, Kind::Tool, title)
             .meta(json!({"kind": kind, "files": files}));
         let handle = audit.add_in(session, record.clone());
-        self.0.insert(id, (handle, record));
+        self.0.insert(id, (handle, record, Instant::now()));
     }
 
     /// A new title, or how it ended: then it is forgotten.
@@ -281,7 +289,7 @@ impl ToolCalls {
         title: Option<&str>,
         finished: Option<bool>,
     ) {
-        if let Some((handle, record)) = self.0.get_mut(id) {
+        if let Some((handle, record, _)) = self.0.get_mut(id) {
             if let Some(title) = title {
                 record.text = title.to_string();
             }
@@ -293,6 +301,21 @@ impl ToolCalls {
                 self.0.remove(id);
             }
         }
+    }
+
+    /// The calls not finished yet, the oldest first.
+    pub fn running(&self) -> Vec<RunningCall> {
+        let mut running: Vec<RunningCall> = self
+            .0
+            .iter()
+            .map(|(id, (_, record, started))| RunningCall {
+                id: id.clone(),
+                title: record.text.clone(),
+                started: *started,
+            })
+            .collect();
+        running.sort_by_key(|call| call.started);
+        running
     }
 }
 

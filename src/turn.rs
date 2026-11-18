@@ -202,9 +202,8 @@ impl Turn {
     ) {
         self.flush(audit);
         self.doing.start_tool(id.clone(), title.clone());
-        agent
-            .tool_calls()
-            .start(audit, self.session, id, title, kind, files);
+        let session = self.session;
+        agent.tool_calls(|calls| calls.start(audit, session, id, title, kind, files));
         self.answer.clear();
         if !self.said.is_empty() && !self.said.ends_with("\n\n") {
             let gap = if self.said.ends_with('\n') {
@@ -225,7 +224,7 @@ impl Turn {
         title: Option<&str>,
         finished: Option<bool>,
     ) {
-        agent.tool_calls().update(audit, id, title, finished);
+        agent.tool_calls(|calls| calls.update(audit, id, title, finished));
         self.doing
             .update_tool(id, title.map(str::to_string), finished);
     }
@@ -340,6 +339,13 @@ pub fn run(
         return (Outcome::AgentStopped, Wrote::default());
     };
     let mut turn = Turn::new(id);
+    // What the agent started between turns and still runs is shown too.
+    turn.doing
+        .adopt(agent.activity().get().calls.into_iter().map(|call| Tool {
+            id: call.id,
+            title: call.title,
+            started: call.started,
+        }));
     match follow(agent, &mut turn, display, audit, jobs) {
         Some(outcome) => {
             let wrote = Wrote {
@@ -366,6 +372,9 @@ fn follow(
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
     let mut out = Output::new(ansi, display.thinking, display.spinner, markdown);
+    if let Some(status) = &mut out.status {
+        status.adopt(turn.doing.running.iter().cloned());
+    }
     if agent.abandoned().is_some() {
         out.pin("Waiting for the previous turn to stop…");
     }
@@ -765,8 +774,8 @@ pub struct Watched {
 /// tool calls are printed above the prompt through `printer`, until `stop` is
 /// set. A permission request, a form or the agent stopping need the prompt
 /// gone: `watch` sets `interrupt` (the prompt's break signal) and returns.
-/// While background tasks run, `repaint` redraws the prompt every second, for
-/// their time on the right.
+/// While background tasks or tool calls run, `repaint` redraws the prompt
+/// every second, for their time on the right.
 pub fn watch(
     agent: &AgentHandle,
     display: Display,
@@ -798,7 +807,8 @@ pub fn watch(
             interrupt.store(true, Ordering::SeqCst);
             break;
         }
-        let running = activity.get().tasks;
+        let now = activity.get();
+        let running = now.tasks + now.calls.len();
         if running != tasks || (running > 0 && painted.elapsed() >= Duration::from_secs(1)) {
             tasks = running;
             painted = Instant::now();
@@ -851,18 +861,15 @@ pub fn watch(
                 files,
             } => {
                 said.flush(audit, None);
-                agent
-                    .tool_calls()
-                    .start(audit, None, id, title.clone(), kind, files);
+                let shown = title.clone();
+                agent.tool_calls(|calls| calls.start(audit, None, id, shown, kind, files));
                 lines.line(format!("• {title}"));
             }
             Event::ToolUpdate {
                 id,
                 title,
                 finished,
-            } => agent
-                .tool_calls()
-                .update(audit, &id, title.as_deref(), finished),
+            } => agent.tool_calls(|calls| calls.update(audit, &id, title.as_deref(), finished)),
             Event::Notice(message) => lines.line(format!("parolsh: {message}")),
             Event::Error(message) => {
                 lines.line(format!("parolsh: {message}"));
@@ -1172,6 +1179,7 @@ struct Status {
     waiting: Option<String>,
 }
 
+#[derive(Clone)]
 struct Tool {
     id: String,
     title: String,
@@ -1212,6 +1220,16 @@ impl Status {
         });
         self.on_tools = true;
         self.thoughts.clear();
+    }
+
+    /// Tool calls started before it was shown, still running.
+    fn adopt(&mut self, tools: impl Iterator<Item = Tool>) {
+        for tool in tools {
+            if !self.running.iter().any(|running| running.id == tool.id) {
+                self.running.push(tool);
+                self.on_tools = true;
+            }
+        }
     }
 
     /// A tool call got a new title, or finished. A failure is shown until the
