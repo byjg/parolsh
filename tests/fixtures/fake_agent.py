@@ -36,6 +36,8 @@ The prompt is the text of the last block; earlier blocks are context.
          writes "background done" and an unfinished line "all good"
   later perm  the same, but asks for permission to edit a file then, and
          writes "chose:<option id>"
+  later busy  the same, but its tool call "Run tests" is still running when
+         the next message comes: it completes at the start of that turn
   bg     like Claude: titles the session "Fake background work", starts a
          background task (only for clients that ask for them, with JetBrains'
          AIR extension), replies "started" and ends the turn. The task ends
@@ -112,6 +114,7 @@ sessions = {}  # session id -> {"cwd": ..., "mode": ...}
 client_capabilities = {}
 next_request_id = 1000
 later = []  # (when, action): what the agent does after its turn ended
+running = []  # tool calls started after a turn ended, completed in the next
 
 
 def send(message):
@@ -190,6 +193,10 @@ def prompt(request):
     def context(used, size=1000000, **more):
         session["used"] = used
         update({"sessionUpdate": "usage_update", "used": used, "size": size, **more})
+
+    while running:
+        update({"sessionUpdate": "tool_call_update", "toolCallId": running.pop(),
+                "status": "completed"})
 
     if says is not None and not text.startswith("env "):
         say(session_id, says)
@@ -347,10 +354,14 @@ def prompt(request):
     elif text == "warn":
         print("fake warning", file=sys.stderr, flush=True)
         say(session_id, "warned")
-    elif text in ("later", "later perm"):
+    elif text in ("later", "later perm", "later busy"):
         say(session_id, "started")
 
         def wake_up():
+            if text == "later busy":
+                update({"sessionUpdate": "tool_call", "toolCallId": "b3", "title": "Run tests"})
+                running.append("b3")
+                return
             send({"method": "session/update", "params": {"sessionId": session_id, "update": {
                 "sessionUpdate": "tool_call", "toolCallId": "b1", "title": "Read log"}}})
             if text == "later perm":

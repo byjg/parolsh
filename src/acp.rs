@@ -28,6 +28,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
+use crate::audit::ToolCalls;
 use crate::config::{self, OptionValue};
 use crate::form::{self, Answers, Form};
 use std::collections::BTreeMap;
@@ -643,6 +644,8 @@ pub struct AgentHandle {
     /// The last turn Parolsh stopped waiting for, while the agent has not
     /// ended it yet; 0 for none (turns start at 1).
     abandoned: AtomicU64,
+    /// Its tool calls not finished yet, whichever view shows them.
+    tool_calls: Mutex<ToolCalls>,
 }
 
 impl AgentHandle {
@@ -732,7 +735,16 @@ impl AgentHandle {
             thread: Some(thread),
             last_turn: AtomicU64::new(0),
             abandoned: AtomicU64::new(0),
+            tool_calls: Mutex::default(),
         }
+    }
+
+    /// Its tool calls not finished yet: a call started between turns may
+    /// finish in a turn, or the other way.
+    pub fn tool_calls(&self) -> std::sync::MutexGuard<'_, ToolCalls> {
+        self.tool_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The modes of the current session, once the agent reported them.

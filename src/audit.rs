@@ -10,7 +10,8 @@
 //! it, `#audit <session>` another; the memory is for a run with none.
 
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::history::{History, SessionStart, Stored};
@@ -243,6 +244,55 @@ impl Handle {
     /// The entry's row in the history, when it was saved.
     pub fn row(&self) -> Option<i64> {
         self.row
+    }
+}
+
+/// The entry of each tool call of an agent, until it finishes. Kept by the
+/// agent, not by what shows it: a call started between turns may finish in a
+/// turn, or the other way.
+#[derive(Default)]
+pub struct ToolCalls(HashMap<String, (Handle, Record)>);
+
+impl ToolCalls {
+    pub fn start(
+        &mut self,
+        audit: &mut Audit,
+        session: Option<i64>,
+        id: String,
+        title: String,
+        kind: String,
+        files: Vec<PathBuf>,
+    ) {
+        let files: Vec<String> = files
+            .iter()
+            .map(|file| file.display().to_string())
+            .collect();
+        let record = Record::new(Actor::Agent, Kind::Tool, title)
+            .meta(json!({"kind": kind, "files": files}));
+        let handle = audit.add_in(session, record.clone());
+        self.0.insert(id, (handle, record));
+    }
+
+    /// A new title, or how it ended: then it is forgotten.
+    pub fn update(
+        &mut self,
+        audit: &mut Audit,
+        id: &str,
+        title: Option<&str>,
+        finished: Option<bool>,
+    ) {
+        if let Some((handle, record)) = self.0.get_mut(id) {
+            if let Some(title) = title {
+                record.text = title.to_string();
+            }
+            if let Some(finished) = finished {
+                record.meta["finished"] = json!(finished);
+            }
+            audit.update(*handle, record);
+            if finished.is_some() {
+                self.0.remove(id);
+            }
+        }
     }
 }
 

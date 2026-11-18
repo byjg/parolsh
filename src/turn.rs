@@ -3,7 +3,7 @@
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind, StopReason};
 use reedline::ExternalPrinter;
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::acp::{
     AgentHandle, AgentSession, Block, Compacted, Context, Detail, Event, TurnId, TurnUsage,
 };
-use crate::audit::{Actor, Audit, Handle, Kind, Record};
+use crate::audit::{Actor, Audit, Kind, Record};
 use crate::config::{LinkStyle, Spinner, ThinkingDisplay};
 use crate::form::{self, Answers, FieldKind, Form};
 use crate::jobs::Job;
@@ -93,7 +93,6 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 pub struct Turn {
     id: TurnId,
     started: Instant,
-    tools: ToolAudit,
     spoken: Said,
     usage: Option<TurnUsage>,
     /// Where it is recorded: this run and the current session, or only the
@@ -132,7 +131,6 @@ impl Turn {
         Self {
             id,
             started: Instant::now(),
-            tools: ToolAudit::default(),
             spoken: Said::default(),
             usage: None,
             session: None,
@@ -195,6 +193,7 @@ impl Turn {
 
     fn tool(
         &mut self,
+        agent: &AgentHandle,
         audit: &mut Audit,
         id: String,
         title: String,
@@ -203,7 +202,8 @@ impl Turn {
     ) {
         self.flush(audit);
         self.doing.start_tool(id.clone(), title.clone());
-        self.tools
+        agent
+            .tool_calls()
             .start(audit, self.session, id, title, kind, files);
         self.answer.clear();
         if !self.said.is_empty() && !self.said.ends_with("\n\n") {
@@ -219,12 +219,13 @@ impl Turn {
 
     fn tool_update(
         &mut self,
+        agent: &AgentHandle,
         audit: &mut Audit,
         id: &str,
         title: Option<&str>,
         finished: Option<bool>,
     ) {
-        self.tools.update(audit, id, title, finished);
+        agent.tool_calls().update(audit, id, title, finished);
         self.doing
             .update_tool(id, title.map(str::to_string), finished);
     }
@@ -275,12 +276,12 @@ impl Turn {
                     title,
                     kind,
                     files,
-                } => self.tool(audit, id, title, kind, files),
+                } => self.tool(agent, audit, id, title, kind, files),
                 Event::ToolUpdate {
                     id,
                     title,
                     finished,
-                } => self.tool_update(audit, &id, title.as_deref(), finished),
+                } => self.tool_update(agent, audit, &id, title.as_deref(), finished),
                 Event::Compacted(compacted) => self.compacted(audit, &compacted),
                 Event::Usage(used) => self.usage = Some(used),
                 request @ (Event::Permission { .. } | Event::Form { .. }) => {
@@ -464,7 +465,7 @@ fn follow(
                 kind,
                 files,
             } => {
-                turn.tool(audit, id.clone(), title.clone(), kind, files);
+                turn.tool(agent, audit, id.clone(), title.clone(), kind, files);
                 out.tool(id, title);
             }
             Event::ToolUpdate {
@@ -472,7 +473,7 @@ fn follow(
                 title,
                 finished,
             } => {
-                turn.tool_update(audit, &id, title.as_deref(), finished);
+                turn.tool_update(agent, audit, &id, title.as_deref(), finished);
                 out.tool_update(&id, title, finished);
             }
             Event::Plan { step, total, entry } => out.plan(step, total, &entry),
@@ -630,43 +631,6 @@ pub fn answer_in(request: Event, audit: &mut Audit, session: Option<i64>) {
     }
 }
 
-/// The audit entry of each tool call, updated when it finishes.
-#[derive(Default)]
-struct ToolAudit(HashMap<String, (Handle, Record)>);
-
-impl ToolAudit {
-    fn start(
-        &mut self,
-        audit: &mut Audit,
-        session: Option<i64>,
-        id: String,
-        title: String,
-        kind: String,
-        files: Vec<PathBuf>,
-    ) {
-        let files: Vec<String> = files
-            .iter()
-            .map(|file| file.display().to_string())
-            .collect();
-        let record = Record::new(Actor::Agent, Kind::Tool, title)
-            .meta(json!({"kind": kind, "files": files}));
-        let handle = audit.add_in(session, record.clone());
-        self.0.insert(id, (handle, record));
-    }
-
-    fn update(&mut self, audit: &mut Audit, id: &str, title: Option<&str>, finished: Option<bool>) {
-        if let Some((handle, record)) = self.0.get_mut(id) {
-            if let Some(title) = title {
-                record.text = title.to_string();
-            }
-            if let Some(finished) = finished {
-                record.meta["finished"] = json!(finished);
-            }
-            audit.update(*handle, record);
-        }
-    }
-}
-
 /// What the agent said since it last did something else: its reasoning and
 /// its answer, each written to the history in one piece when it moves on (a
 /// tool call, a question, the end of the turn), not chunk by chunk.
@@ -816,7 +780,6 @@ pub fn watch(
     let ansi = ui::is_ansi();
     let markdown = (ansi && display.markdown).then(|| Markdown::new(display.links));
     let mut lines = Lines::new(ansi, markdown);
-    let mut tools = ToolAudit::default();
     let mut said = Said::default();
     let mut watched = Watched::default();
     let mut heard = Instant::now();
@@ -888,14 +851,18 @@ pub fn watch(
                 files,
             } => {
                 said.flush(audit, None);
-                tools.start(audit, None, id, title.clone(), kind, files);
+                agent
+                    .tool_calls()
+                    .start(audit, None, id, title.clone(), kind, files);
                 lines.line(format!("• {title}"));
             }
             Event::ToolUpdate {
                 id,
                 title,
                 finished,
-            } => tools.update(audit, &id, title.as_deref(), finished),
+            } => agent
+                .tool_calls()
+                .update(audit, &id, title.as_deref(), finished),
             Event::Notice(message) => lines.line(format!("parolsh: {message}")),
             Event::Error(message) => {
                 lines.line(format!("parolsh: {message}"));

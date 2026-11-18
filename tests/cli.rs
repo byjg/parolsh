@@ -638,6 +638,16 @@ fn the_agent_is_heard_between_turns() {
     assert!(audit.contains("AGENT    Read log"), "{audit}");
 }
 
+/// A tool call the agent started between turns, still running when the next
+/// message is sent, is recorded as finished when it ends in that turn.
+#[test]
+fn a_tool_call_started_between_turns_finishes_in_the_next_turn() {
+    let screen = with_fake_agent("", &["later busy", "wait:2", "hello", "#audit"]);
+
+    let audit = &screen[screen.rfind("#audit").unwrap()..];
+    assert!(audit.contains("AGENT    Run tests · completed"), "{audit}");
+}
+
 /// A permission request between turns takes the prompt, is answered, and
 /// the prompt comes back.
 #[test]
