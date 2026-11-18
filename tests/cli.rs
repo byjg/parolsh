@@ -648,6 +648,16 @@ fn a_tool_call_started_between_turns_finishes_in_the_next_turn() {
     assert!(audit.contains("AGENT    Run tests · completed"), "{audit}");
 }
 
+/// A tool call the agent runs between turns is on the right of the prompt,
+/// with its time; a message sent meanwhile starts its turn showing it.
+#[test]
+fn a_tool_call_running_between_turns_is_shown() {
+    let output = raw_output(&["later busy", "wait:2", "hello"]);
+
+    assert!(output.contains("⚙ Run tests · 0:0"), "{output:?}");
+    assert!(output.contains("Running: Run tests ("), "{output:?}");
+}
+
 /// A permission request between turns takes the prompt, is answered, and
 /// the prompt comes back.
 #[test]
